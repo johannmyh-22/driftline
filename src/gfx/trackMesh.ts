@@ -6,10 +6,12 @@ import {
   Group,
   Mesh,
   MeshStandardMaterial,
+  Vector2,
 } from 'three';
 import type { Course } from '../game/course';
 import type { Rng } from '../core/rng';
 import type { Palette } from './palette';
+import { createSurfaceTextures } from './textures';
 
 /** 边线条纹的宽度,占外缘半宽的比例。 */
 const EDGE_STRIPE = 0.06;
@@ -33,10 +35,13 @@ export function createTrackMesh(course: Course, rng: Rng, palette: Palette): Gro
 }
 
 function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
-  const { positions, lateral } = course.buildRibbonTriangles();
+  const { positions, normals, uvs, lateral } = course.buildRibbonTriangles();
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(positions, 3));
-  geometry.computeVertexNormals();
+  // 用条带网格算出的平滑法线,不要 computeVertexNormals 的面法线 ——
+  // 面法线会让路面变成一段段折面,法线贴图再细也盖不住。
+  geometry.setAttribute('normal', new BufferAttribute(normals, 3));
+  geometry.setAttribute('uv', new BufferAttribute(uvs, 2));
 
   const triangles = positions.length / 9;
   const colors = new Float32Array(triangles * 9);
@@ -50,6 +55,8 @@ function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
     const side = Math.abs(lateral[t] ?? 0);
     const row = Math.floor(t / rowTriangles);
 
+    // 顶点色在这里是**贴图的乘数**:路面本身由沥青贴图决定,顶点色只负责
+    // 区分标线、路肩和起跑线。所以基准值是 1 而不是某个颜色。
     if (row < START_LINE_ROWS && side < roadEdge) {
       tint.copy(palette.startLine);
     } else if (side > roadEdge + EDGE_STRIPE) {
@@ -57,11 +64,10 @@ function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
     } else if (side > roadEdge - EDGE_STRIPE) {
       tint.copy(palette.roadEdge);
     } else {
-      tint.copy(palette.road);
+      tint.setRGB(1, 1, 1);
     }
 
-    // 逐面轻微抖动,纯色路面在低多边形风格里会显得像塑料。
-    tint.offsetHSL(0, 0, rng.range(-0.018, 0.018));
+    tint.multiplyScalar(1 + rng.range(-0.03, 0.03));
     for (let v = 0; v < 3; v++) {
       const o = (t * 3 + v) * 3;
       colors[o] = tint.r;
@@ -72,13 +78,16 @@ function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
 
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
 
+  const textures = createSurfaceTextures(rng, palette.roadSurface);
   const mesh = new Mesh(
     geometry,
     new MeshStandardMaterial({
+      map: textures.map,
+      normalMap: textures.normalMap,
+      roughnessMap: textures.roughnessMap,
+      normalScale: new Vector2(0.8, 0.8),
       vertexColors: true,
-      flatShading: true,
-      roughness: 0.82,
-      metalness: 0.05,
+      metalness: 0.02,
     }),
   );
   mesh.name = 'track-ribbon';

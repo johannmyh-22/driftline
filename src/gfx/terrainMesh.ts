@@ -1,8 +1,10 @@
-import { BufferAttribute, BufferGeometry, Color, Mesh, MeshStandardMaterial } from 'three';
+import { BufferAttribute, BufferGeometry, Color, Mesh, MeshStandardMaterial, Vector2 } from 'three';
 import type { Rng } from '../core/rng';
 import type { Course } from '../game/course';
 import { createGroundHit } from '../game/groundQuery';
 import type { Palette } from './palette';
+import { createSurfaceTextures } from './textures';
+import { TRACK } from '../game/tuning';
 
 /** 地形网格的格子边长(米)。背景地形,不需要赛道那种精度。 */
 const CELL = 9;
@@ -49,7 +51,26 @@ export function createTerrainMesh(course: Course, rng: Rng, palette: Palette): M
   const heightAt = (ix: number, iz: number): number => heights[iz * (cols + 1) + ix] ?? 0;
 
   const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
   const colors: number[] = [];
+
+  /*
+   * 逐顶点法线由噪声的解析梯度求出,而不是三角面法线。
+   *
+   * 写实材质靠「平滑着色 + 法线贴图」出细节;用面法线的话地形就是一堆折面,
+   * 贴多好的图都盖不住那个棱。
+   */
+  const normalAt = (wx: number, wz: number, out: number[]): void => {
+    const e = CELL * 0.5;
+    const dx = (course.terrainHeightAt(wx + e, wz) - course.terrainHeightAt(wx - e, wz)) / (2 * e);
+    const dz = (course.terrainHeightAt(wx, wz + e) - course.terrainHeightAt(wx, wz - e)) / (2 * e);
+    const inv = 1 / Math.hypot(-dx, 1, -dz);
+    out[0] = -dx * inv;
+    out[1] = inv;
+    out[2] = -dz * inv;
+  };
+  const normalScratch = [0, 1, 0];
   const hit = createGroundHit();
   const tint = new Color();
 
@@ -64,16 +85,22 @@ export function createTerrainMesh(course: Course, rng: Rng, palette: Palette): M
     }
 
     const ys = [heightAt(ax, az), heightAt(bx, bz), heightAt(cx, cz)];
-    positions.push(
-      minX + ax * CELL, ys[0] ?? 0, minZ + az * CELL,
-      minX + bx * CELL, ys[1] ?? 0, minZ + bz * CELL,
-      minX + cx * CELL, ys[2] ?? 0, minZ + cz * CELL,
-    );
+    const corners: Array<[number, number, number]> = [
+      [minX + ax * CELL, ys[0] ?? 0, minZ + az * CELL],
+      [minX + bx * CELL, ys[1] ?? 0, minZ + bz * CELL],
+      [minX + cx * CELL, ys[2] ?? 0, minZ + cz * CELL],
+    ];
+    for (const [wx, wy, wz] of corners) {
+      positions.push(wx, wy, wz);
+      normalAt(wx, wz, normalScratch);
+      normals.push(normalScratch[0] ?? 0, normalScratch[1] ?? 1, normalScratch[2] ?? 0);
+      uvs.push(wx / TRACK.textureScale, wz / TRACK.textureScale);
+    }
 
     const height = ((ys[0] ?? 0) + (ys[1] ?? 0) + (ys[2] ?? 0)) / 3;
-    tint.copy(palette.ground);
-    // 高处提亮,让山脊和洼地在没有强光的地方也读得出形状。
-    tint.offsetHSL(0, 0, Math.max(-0.06, Math.min(0.16, height * 0.004)) + rng.range(-0.03, 0.03));
+    // 顶点色只做大尺度的明暗变化,细节交给贴图。高处略亮,让山脊读得出形状。
+    const shade = 1 + Math.max(-0.12, Math.min(0.22, height * 0.005)) + rng.range(-0.05, 0.05);
+    tint.setRGB(shade, shade, shade);
     for (let v = 0; v < 3; v++) {
       colors.push(tint.r, tint.g, tint.b);
     }
@@ -88,15 +115,19 @@ export function createTerrainMesh(course: Course, rng: Rng, palette: Palette): M
 
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(Float32Array.from(positions), 3));
+  geometry.setAttribute('normal', new BufferAttribute(Float32Array.from(normals), 3));
+  geometry.setAttribute('uv', new BufferAttribute(Float32Array.from(uvs), 2));
   geometry.setAttribute('color', new BufferAttribute(Float32Array.from(colors), 3));
-  geometry.computeVertexNormals();
 
+  const textures = createSurfaceTextures(rng, palette.terrainSurface);
   const mesh = new Mesh(
     geometry,
     new MeshStandardMaterial({
+      map: textures.map,
+      normalMap: textures.normalMap,
+      roughnessMap: textures.roughnessMap,
+      normalScale: new Vector2(1.1, 1.1),
       vertexColors: true,
-      flatShading: true,
-      roughness: 0.95,
       metalness: 0,
     }),
   );

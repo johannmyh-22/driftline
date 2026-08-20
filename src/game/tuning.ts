@@ -229,6 +229,8 @@ export const TRACK = {
    */
   maxBankRatePerMeter: 0.003,
 
+  /** 贴图在世界里的重复尺度(米)。小 = 纹理更细密。 */
+  textureScale: 5,
   /** 路肩宽度(米)。路面边缘到地形之间的过渡带,压上去还能开,但会掉速。 */
   shoulderWidth: 7,
   /** 赛道外地形的噪声特征尺度与幅度(米)。 */
