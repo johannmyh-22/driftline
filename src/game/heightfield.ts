@@ -111,6 +111,10 @@ export class Heightfield implements GroundQuery {
     out.lateral = 0;
     out.arc = 0;
     out.segment = 0;
+    out.tangentX = 0;
+    out.tangentZ = 1;
+    // 平地场景没有护栏,车爱开多远开多远。
+    out.wallDistance = Number.POSITIVE_INFINITY;
   }
 
   /**

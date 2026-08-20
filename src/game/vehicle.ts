@@ -49,6 +49,18 @@ export class Vehicle {
   lateral = 0;
   /** 沿赛道的弧长位置(米)。 */
   arc = 0;
+  /** 侧向抓地力的使用率 0..1。到 1 就是滑出去了,给音效和 HUD 用。 */
+  gripSaturation = 0;
+  /**
+   * 抓地力这一帧实际施加的侧向加速度(m/s²)。
+   *
+   * 想知道「车在拉几个 g」必须看这个,**不能拿速度差去算** —— 车头转动本身
+   * 就会让机体坐标系下的侧向速度以 ω·v 的速率变化(0.9 rad/s × 80 m/s = 72 m/s²),
+   * 那是坐标系旋转的记账,不是地面给的力。
+   */
+  lateralGripAccel = 0;
+  /** 最近一次撞墙的强度(法向速度 × 撞击角),没撞是 0。 */
+  wallImpact = 0;
   /**
    * 侧向速度,**正值 = 向驾驶员右手边滑**。漂移感就看它。
    *
@@ -107,6 +119,7 @@ export class Vehicle {
     this.applyLateralGrip(input, dt);
 
     this.position.addScaledVector(this.velocity, dt);
+    this.resolveWall();
 
     // 兜底:高速冲上陡坡时不让车体穿进地里。
     this.field.sample(this.position.x, this.position.z, this.hit);
@@ -189,8 +202,83 @@ export class Vehicle {
       grip += VEHICLE.airBrakeGripBonus * input.airBrake;
     }
 
-    const removed = this.lateralSpeed * (1 - Math.exp(-grip * dt));
+    const wanted = this.lateralSpeed * (1 - Math.exp(-grip * dt));
+
+    // 抓地力封顶(摩擦圆)。没有这一层的话,抓地力正比于侧滑速度且无上限,
+    // 任何速度进弯都能被硬拽回线上 —— 也就没有「过弯极限」这回事了。
+    const budget = this.lateralGripBudget(input) * dt;
+    const removed = Math.sign(wanted) * Math.min(Math.abs(wanted), budget);
+
+    this.gripSaturation = budget > 1e-6 ? Math.min(1, Math.abs(wanted) / budget) : 0;
+    this.lateralGripAccel = Math.abs(removed) / dt;
     this.velocity.addScaledVector(rightward, -removed);
+  }
+
+  /**
+   * 当前可用的侧向加速度上限。
+   *
+   * 侧倾会加分:路面朝侧滑方向抬起时,重力的分量帮着把车推回来。这正是
+   * 真实赛道压弯道外侧能多带速度的原因,也让侧倾对圈速产生了实际意义。
+   */
+  private lateralGripBudget(input: InputFrame): number {
+    if (!this.grounded) {
+      return VEHICLE.lateralGripLimit * 0.12;
+    }
+
+    let budget = VEHICLE.lateralGripLimit;
+    budget += VEHICLE.airBrakeGripBonus * input.airBrake;
+
+    if (this.hit.normalY > 1e-6 && this.lateralSpeed !== 0) {
+      // 法线在横向上的分量给出路面的横向坡度;车往哪边滑,那边是上坡就得分。
+      const slope = -(this.hit.normalX * rightward.x + this.hit.normalZ * rightward.z) /
+        this.hit.normalY;
+      budget += Math.max(0, VEHICLE.gravity * slope * Math.sign(this.lateralSpeed));
+    }
+
+    return budget;
+  }
+
+  /**
+   * 护栏碰撞。M2 的护栏只是画出来的,车能直接穿过去。
+   *
+   * 处理成「贴着墙滑行」而不是弹开:把超出的部分推回来,法向速度按反弹系数
+   * 反向,切向速度按撞击角度扣一刀。正面撞掉速多、小角度擦墙掉速少 ——
+   * 反过来的话贴着墙磨会变成最快跑法。
+   */
+  private resolveWall(): void {
+    const limit = this.hit.wallDistance;
+    if (!Number.isFinite(limit)) {
+      return;
+    }
+
+    this.field.sample(this.position.x, this.position.z, this.hit);
+    const lateral = this.hit.lateral;
+    if (!Number.isFinite(lateral) || Math.abs(lateral) <= limit) {
+      this.wallImpact = 0;
+      return;
+    }
+
+    // 墙的法线就是赛道横向轴,朝向赛道内侧。
+    rightward.set(-this.hit.tangentZ, 0, this.hit.tangentX);
+    const outward = Math.sign(lateral);
+    const overshoot = Math.abs(lateral) - limit;
+
+    this.position.addScaledVector(rightward, -overshoot * outward);
+
+    const normalSpeed = this.velocity.dot(rightward) * outward;
+    if (normalSpeed > 0) {
+      this.velocity.addScaledVector(
+        rightward,
+        -normalSpeed * (1 + VEHICLE.wallRestitution) * outward,
+      );
+
+      const speed = this.velocity.length() || 1;
+      // 撞击角:法向速度占总速度的比例。正面撞接近 1,擦墙接近 0。
+      const bite = Math.min(1, normalSpeed / speed);
+      this.wallImpact = bite * normalSpeed;
+      const scrub = Math.exp(-VEHICLE.wallScrubbing * bite * (1 / 60));
+      this.velocity.multiplyScalar(scrub);
+    }
   }
 
   private updateOrientation(dt: number): void {
