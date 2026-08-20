@@ -119,9 +119,17 @@ export class ChaseCamera {
     desired
       .copy(vehicle.position)
       .addScaledVector(forward, -CAMERA.offsetBack)
-      .addScaledVector(upAxis, CAMERA.offsetUp)
-      // 前馈抵消稳态滞后,否则速度一上来车就缩成画面里的一个点。
-      .addScaledVector(vehicle.velocity, CAMERA.lagCompensation / CAMERA.positionLambda);
+      .addScaledVector(upAxis, CAMERA.offsetUp);
+
+    /*
+     * 前馈抵消稳态滞后,否则速度一上来车就缩成画面里的一个点。
+     *
+     * 只取速度在**车头方向**上的分量,不用完整的速度矢量:侧滑时两者能差
+     * 几十度,按完整矢量前馈会把相机推到侧面去,画面看着「偏得离谱」。
+     * 滞后本来就只发生在前后方向上,横向那份前馈纯属副作用。
+     */
+    const along = vehicle.velocity.x * forward.x + vehicle.velocity.z * forward.z;
+    desired.addScaledVector(forward, (along * CAMERA.lagCompensation) / CAMERA.positionLambda);
 
     lookTarget
       .copy(vehicle.position)

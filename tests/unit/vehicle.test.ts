@@ -153,11 +153,17 @@ describe('Vehicle 转向', () => {
   });
 
   it('左右满舵的轨迹关于出发方向镜像', () => {
-    // 这条不看方向只看对称,所以从静止起步、转多少圈都无所谓。
+    /*
+     * 只跑 1.2 秒,是为了让车留在出生点那片强制压平的地里(半径 46 米)。
+     * 跑满 2 秒会开出去约 49 米,左右两边压到**不同的随机地形**,轨迹自然不再
+     * 镜像 —— 那是地形不对称,不是转向逻辑不对称,别被它骗去放宽容差。
+     */
     const right = makeVehicle();
     const left = makeVehicle();
-    drive(right, input({ throttle: 1, steer: 1 }), 2);
-    drive(left, input({ throttle: 1, steer: -1 }), 2);
+    drive(right, input({ throttle: 1, steer: 1 }), 1.2);
+    drive(left, input({ throttle: 1, steer: -1 }), 1.2);
+
+    expect(Math.hypot(right.position.x, right.position.z)).toBeLessThan(46);
 
     expect(right.position.x).toBeCloseTo(-left.position.x, 6);
     expect(right.position.z).toBeCloseTo(left.position.z, 6);
