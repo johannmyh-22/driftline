@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import type { InputFrame } from '../src/core/input';
 
 /** Playwright 与 `npm run shoot` 各起一个 preview,端口错开,互不打架。 */
 export const VISUAL_TEST_PORT = 4173;
@@ -40,6 +41,8 @@ export interface SceneOptions {
   seed: number;
   frames: number;
   camera: string;
+  /** 步进期间一直保持的操作输入。不给就是松手滑行。 */
+  input?: Partial<InputFrame>;
 }
 
 /**
@@ -70,6 +73,9 @@ export async function driveScene(
       throw new Error('__DRIFTLINE_TEST__ 未挂载');
     }
     api.setCamera(opts.camera);
+    if (opts.input !== undefined) {
+      api.setInput(opts.input);
+    }
     api.advance(opts.frames);
     return api.snapshot();
   }, options);

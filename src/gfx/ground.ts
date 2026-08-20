@@ -1,81 +1,67 @@
-import {
-  BufferAttribute,
-  Color,
-  DoubleSide,
-  Group,
-  GridHelper,
-  LineBasicMaterial,
-  Mesh,
-  MeshStandardMaterial,
-  PlaneGeometry,
-} from 'three';
+import { BufferAttribute, BufferGeometry, Color, Mesh, MeshStandardMaterial } from 'three';
 import type { Rng } from '../core/rng';
+import type { Heightfield } from '../game/heightfield';
 import type { Palette } from './palette';
 
-const SIZE = 160;
-const DIVISIONS = 32;
-/** 网格线比三角面稀一半:太密的话远处会糊成一片摩尔纹。 */
-const GRID_DIVISIONS = 16;
+/** 每隔这么多格画一条「网格线」。速度感需要一个周期性的参照物。 */
+const GRID_PERIOD = 8;
 
 /**
- * 地面 = 逐三角上色的平面 + 网格线。
+ * 地面网格。几何体完全来自 `Heightfield`,不自己算高度 ——
+ * 一旦这里和物理各算一套,车就会浮空或者陷进坡里。
  *
- * 平面本身保持绝对水平:M0 只要证明「光照 / 顶点色 / seed」这条链路是通的,
- * 真正的地形放到 M2。三角面各自取色是为了在纯平的几何上也能看出低多边形质感。
+ * 网格线不是额外的线段,而是直接烧进顶点色:线段跟不上起伏的地形,
+ * 会浮在山包上方或者被埋进去。
  */
-export function createGround(rng: Rng, palette: Palette): Group {
-  const group = new Group();
-  group.name = 'ground';
+export function createGround(field: Heightfield, rng: Rng, palette: Palette): Mesh {
+  const { positions, cells } = field.buildTriangles();
 
-  const geometry = new PlaneGeometry(SIZE, SIZE, DIVISIONS, DIVISIONS).toNonIndexed();
-  geometry.rotateX(-Math.PI / 2);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(positions, 3));
+  geometry.computeVertexNormals();
 
-  const position = geometry.getAttribute('position');
-  const colors = new Float32Array(position.count * 3);
+  const triangles = positions.length / 9;
+  const colors = new Float32Array(positions.length / 3 * 3);
   const tint = new Color();
 
-  for (let i = 0; i < position.count; i += 3) {
-    // 每个三角形取一次随机数,三个顶点共用 —— 这才是 flat shading 想要的效果。
-    const jitter = rng.range(-0.06, 0.06);
-    const cx = (position.getX(i) + position.getX(i + 1) + position.getX(i + 2)) / 3;
-    const cz = (position.getZ(i) + position.getZ(i + 1) + position.getZ(i + 2)) / 3;
-    const falloff = Math.min(1, Math.hypot(cx, cz) / (SIZE * 0.5));
+  for (let t = 0; t < triangles; t++) {
+    const ix = cells[t * 2] ?? 0;
+    const iz = cells[t * 2 + 1] ?? 0;
+
+    // 三角形中心的高度,用来做高度分层上色。
+    const base = t * 9;
+    const height =
+      ((positions[base + 1] ?? 0) + (positions[base + 4] ?? 0) + (positions[base + 7] ?? 0)) / 3;
+
+    const onGridLine = ix % GRID_PERIOD === 0 || iz % GRID_PERIOD === 0;
 
     tint.copy(palette.ground);
-    tint.offsetHSL(0, -0.12 * falloff, jitter - 0.14 * falloff);
+    if (onGridLine) {
+      // 只是提亮一档,不是换个颜色 —— 一格就有 4 米宽,真按亮色画会变成公路。
+      tint.lerp(palette.gridMajor, 0.14);
+    }
+    // 越高越亮:坡和山包不用靠光照也能读出形状。
+    tint.offsetHSL(0, 0, Math.min(0.22, height * 0.022) + rng.range(-0.035, 0.035));
 
     for (let v = 0; v < 3; v++) {
-      colors[(i + v) * 3] = tint.r;
-      colors[(i + v) * 3 + 1] = tint.g;
-      colors[(i + v) * 3 + 2] = tint.b;
+      const o = (t * 3 + v) * 3;
+      colors[o] = tint.r;
+      colors[o + 1] = tint.g;
+      colors[o + 2] = tint.b;
     }
   }
 
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
-  geometry.computeVertexNormals();
 
-  const plane = new Mesh(
+  const mesh = new Mesh(
     geometry,
     new MeshStandardMaterial({
       vertexColors: true,
       flatShading: true,
-      roughness: 0.95,
+      roughness: 0.94,
       metalness: 0,
-      side: DoubleSide,
     }),
   );
-  plane.name = 'ground-plane';
-  group.add(plane);
-
-  const grid = new GridHelper(SIZE, GRID_DIVISIONS, palette.gridMajor, palette.gridMinor);
-  grid.name = 'ground-grid';
-  // 抬高一点点避免和地面共面打架,肉眼看不出这个高度差。
-  grid.position.y = 0.03;
-  const gridMaterial = grid.material as LineBasicMaterial;
-  gridMaterial.transparent = true;
-  gridMaterial.opacity = 0.9;
-  gridMaterial.depthWrite = false;
-  group.add(grid);
-
-  return group;
+  mesh.name = 'ground';
+  return mesh;
 }

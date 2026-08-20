@@ -1,8 +1,15 @@
 import { WebGLRenderer } from 'three';
+import {
+  type InputFrame,
+  KeyboardInput,
+  ScriptedInput,
+  createInputFrame,
+} from './core/input';
 import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
 import { installTestApi } from './core/testApi';
-import { PlaceholderWorld } from './game/placeholderWorld';
+import { Readout } from './game/hud';
+import { World } from './game/world';
 import './style.css';
 
 const DEFAULT_SEED = 1337;
@@ -33,14 +40,23 @@ function boot(container: HTMLDivElement): void {
   renderer.setPixelRatio(testMode ? 1 : Math.min(window.devicePixelRatio, 2));
   container.append(renderer.domElement);
 
-  const world = new PlaceholderWorld(new Rng(seed));
+  const world = new World(new Rng(seed));
+
+  const scripted = new ScriptedInput();
+  const keyboard = testMode ? null : new KeyboardInput();
+  const source = keyboard ?? scripted;
+  const frame: InputFrame = createInputFrame();
+  const readout = testMode ? null : new Readout(container);
 
   const loop = new Loop({
     update: (dt) => {
-      world.update(dt);
+      // 每个固定步采一次输入:采样频率和物理步长绑死,回放才可能逐帧复现。
+      source.sample(frame);
+      world.update(frame, dt);
     },
     render: (alpha) => {
       world.present(alpha);
+      readout?.update(world.vehicle.groundSpeed);
       renderer.render(world.scene, world.camera);
     },
   });
@@ -70,12 +86,31 @@ function boot(container: HTMLDivElement): void {
       },
       setCamera: (preset) => {
         world.setCameraPreset(preset);
+        world.present(1);
         renderer.render(world.scene, world.camera);
+      },
+      setInput: (partial) => {
+        scripted.set(partial);
+      },
+      reset: () => {
+        scripted.reset();
+        world.vehicle.reset();
+        world.chase.snapTo(world.vehicle);
+        world.present(1);
       },
       snapshot: () => ({
         frame: loop.frame,
         elapsed: loop.elapsed,
-        spinnerRotation: world.spinnerRotation,
+        speed: world.vehicle.speed,
+        groundSpeed: world.vehicle.groundSpeed,
+        x: world.vehicle.position.x,
+        y: world.vehicle.position.y,
+        z: world.vehicle.position.z,
+        yaw: world.vehicle.yaw,
+        yawRate: world.vehicle.yawRate,
+        clearance: world.vehicle.clearance,
+        lateralSpeed: world.vehicle.lateralSpeed,
+        grounded: world.vehicle.grounded ? 1 : 0,
       }),
     });
 

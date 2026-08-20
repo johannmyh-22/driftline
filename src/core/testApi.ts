@@ -1,3 +1,5 @@
+import type { InputFrame } from './input';
+
 /**
  * 无头验证契约。契约本体写在根目录 CLAUDE.md,这里是它的类型化落地。
  *
@@ -12,6 +14,15 @@ export interface DriftlineTestApi {
   setCamera(preset: string): void;
   /** 可断言的数值快照。后续里程碑往里加字段,不改已有字段含义。 */
   snapshot(): Record<string, number>;
+  /**
+   * M1 新增:直接注入操作意图,一直保持到下次调用。
+   *
+   * 没有它就没法在无头环境里测手感 —— 伪造键盘事件既脆弱又和真实
+   * 输入路径不是同一条码。
+   */
+  setInput(input: Partial<InputFrame>): void;
+  /** M1 新增:把载具放回出生点并清空输入。让一次页面加载能跑多个场景。 */
+  reset(): void;
 }
 
 declare global {

@@ -19,9 +19,14 @@ interface ShootOptions {
   camera: string;
   out: string | null;
   rebuild: boolean;
+  throttle: number;
+  steer: number;
+  brake: number;
 }
 
-const USAGE = `用法: npm run shoot -- [--seed=42] [--frames=120] [--camera=default] [--out=name.png] [--no-build]`;
+const USAGE = `用法: npm run shoot -- [--seed=42] [--frames=120] [--camera=chase]
+                     [--throttle=1] [--steer=0] [--brake=0] [--out=name.png] [--no-build]
+机位: chase(玩家视角) / side / front / top`;
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -62,10 +67,12 @@ async function main(): Promise<void> {
       seed: options.seed,
       frames: options.frames,
       camera: options.camera,
+      input: { throttle: options.throttle, steer: options.steer, airBrake: options.brake },
     });
 
     await mkdir(OUTPUT_DIR, { recursive: true });
-    const name = options.out ?? `${options.camera}-seed${options.seed}-f${options.frames}.png`;
+    const name =
+      options.out ?? `${options.camera}-seed${options.seed}-f${options.frames}.png`;
     const file = path.join(OUTPUT_DIR, name);
     await page.screenshot({ path: file });
 
@@ -87,9 +94,12 @@ function parseArgs(argv: readonly string[]): ShootOptions {
   const options: ShootOptions = {
     seed: 42,
     frames: 120,
-    camera: 'default',
+    camera: 'chase',
     out: null,
     rebuild: true,
+    throttle: 1,
+    steer: 0,
+    brake: 0,
   };
 
   for (const arg of argv) {
@@ -97,7 +107,7 @@ function parseArgs(argv: readonly string[]): ShootOptions {
       options.rebuild = false;
       continue;
     }
-    const match = /^--([a-z]+)=(.*)$/.exec(arg);
+    const match = /^--([a-z]+)=(-?[\w.\-]*)$/.exec(arg);
     if (match === null) {
       throw new Error(`无法解析参数 "${arg}"\n${USAGE}`);
     }
@@ -115,12 +125,29 @@ function parseArgs(argv: readonly string[]): ShootOptions {
       case 'out':
         options.out = value;
         break;
+      case 'throttle':
+        options.throttle = requireNumber(value, 'throttle');
+        break;
+      case 'steer':
+        options.steer = requireNumber(value, 'steer');
+        break;
+      case 'brake':
+        options.brake = requireNumber(value, 'brake');
+        break;
       default:
         throw new Error(`未知参数 "--${key}"\n${USAGE}`);
     }
   }
 
   return options;
+}
+
+function requireNumber(value: string, name: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`--${name} 需要数字,收到 "${value}"`);
+  }
+  return parsed;
 }
 
 function requireInteger(value: string, name: string): number {

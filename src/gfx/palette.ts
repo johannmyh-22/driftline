@@ -11,9 +11,9 @@ export interface Palette {
   nadir: Color;
   ground: Color;
   gridMajor: Color;
-  gridMinor: Color;
-  spinner: Color;
-  spinnerEdge: Color;
+  craftHull: Color;
+  craftAccent: Color;
+  craftGlow: Color;
   keyLight: Color;
   fillLight: Color;
 }
@@ -29,9 +29,10 @@ export function createPalette(rng: Rng): Palette {
     nadir: hsl(wrap(baseHue + 0.12), 0.35, 0.1),
     ground: hsl(groundHue, 0.45, 0.17),
     gridMajor: hsl(wrap(groundHue + 0.5), 0.9, 0.72),
-    gridMinor: hsl(wrap(groundHue + 0.5), 0.6, 0.45),
-    spinner: hsl(wrap(baseHue + 0.5), 0.62, 0.55),
-    spinnerEdge: hsl(wrap(baseHue + 0.5), 0.95, 0.78),
+    // 载具取地面的补色:不管 seed 转到哪儿,车都不会陷进背景里。
+    craftHull: hsl(wrap(groundHue + 0.5), 0.5, 0.56),
+    craftAccent: hsl(wrap(groundHue + 0.58), 0.72, 0.66),
+    craftGlow: hsl(wrap(groundHue + 0.62), 0.95, 0.72),
     keyLight: hsl(wrap(baseHue + 0.06), 0.25, 0.92),
     fillLight: hsl(baseHue, 0.45, 0.55),
   };
