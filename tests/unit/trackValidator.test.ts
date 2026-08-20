@@ -44,7 +44,7 @@ const LIMITS: TrackLimits = { halfWidth: 8, minCurvatureRadius: 100, maxGrade: 0
  * `throw new Error('未实现')` 还在,漏掉了会立刻炸,不会静默放行。
  */
 
-describe.skip('curvatureRadiusAt', () => {
+describe('curvatureRadiusAt', () => {
   it('正圆上每一点的曲率半径都等于圆半径', () => {
     const points = circle(150, 120);
     for (let i = 0; i < points.length; i++) {
@@ -77,7 +77,7 @@ describe.skip('curvatureRadiusAt', () => {
   });
 });
 
-describe.skip('gradeAt', () => {
+describe('gradeAt', () => {
   it('平的赛道坡度是 0', () => {
     const points = circle(150, 120);
     for (let i = 0; i < points.length; i++) {
@@ -118,7 +118,7 @@ describe.skip('gradeAt', () => {
   });
 });
 
-describe.skip('findSelfIntersections', () => {
+describe('findSelfIntersections', () => {
   it('正圆不自交', () => {
     expect(findSelfIntersections(circle(150, 120), 8)).toEqual([]);
   });
@@ -126,6 +126,20 @@ describe.skip('findSelfIntersections', () => {
   it('相邻线段不算自交 —— 否则每一对都会误报', () => {
     // 半径小到相邻点间距远小于条带宽度,但它仍然是一条合法的圆形赛道。
     expect(findSelfIntersections(circle(60, 200), 8)).toEqual([]);
+  });
+
+  it('共用端点的相邻线段永远不算自交,哪怕点很稀疏', () => {
+    // 边长 100 米、只有 4 个点的方形闭环。相邻段的弧长距离(100)远超
+    // 4 * halfWidth(32),如果只靠弧长阈值排除,这条完全合法的赛道会被
+    // 报出 4 处「距离为 0」的自交 —— 那是首尾相接,不是压到自己。
+    const square: TrackPoint[] = [
+      { x: 0, y: 0, z: 0 },
+      { x: 100, y: 0, z: 0 },
+      { x: 100, y: 0, z: 100 },
+      { x: 0, y: 0, z: 100 },
+    ];
+    expect(findSelfIntersections(square, 8)).toEqual([]);
+    expect(validateTrack(square, { ...LIMITS, minCurvatureRadius: 20 }).ok).toBe(true);
   });
 
   it('8 字形会被抓出来', () => {
@@ -151,7 +165,7 @@ describe.skip('findSelfIntersections', () => {
   });
 });
 
-describe.skip('validateTrack', () => {
+describe('validateTrack', () => {
   it('宽敞的平圆合格', () => {
     const result = validateTrack(circle(150, 120), LIMITS);
     expect(result.ok).toBe(true);
