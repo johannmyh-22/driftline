@@ -1,0 +1,34 @@
+{
+  "name": "driftline",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "低多边形反重力计时赛 —— 零二进制资产,一切程序化生成",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:visual": "playwright test",
+    "shoot": "tsx scripts/shoot.ts"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "~1.56.1",
+    "@types/node": "^22.18.12",
+    "@types/pngjs": "^6.0.5",
+    "@types/three": "^0.185.4",
+    "pngjs": "^7.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.11"
+  }
+}
