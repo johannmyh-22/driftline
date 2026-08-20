@@ -149,7 +149,8 @@ describe('护栏碰撞', () => {
       }
     }
 
-    expect(maxLateral).toBeLessThanOrEqual(course.outerHalfWidth + 0.01);
+    // 车体中心停在墙内侧一个半宽的位置,车身才不会穿进护栏。
+    expect(maxLateral).toBeLessThanOrEqual(course.outerHalfWidth - VEHICLE.halfWidth + 0.01);
   });
 
   it('正面撞墙比擦墙掉速多 —— 否则贴着墙磨会变成最快跑法', () => {

@@ -246,7 +246,8 @@ export class Vehicle {
    * 反过来的话贴着墙磨会变成最快跑法。
    */
   private resolveWall(): void {
-    const limit = this.hit.wallDistance;
+    // 减掉车体半宽:夹车体中心的话护栏会从车身正中穿过去。
+    const limit = this.hit.wallDistance - VEHICLE.halfWidth;
     if (!Number.isFinite(limit)) {
       return;
     }

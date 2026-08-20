@@ -54,6 +54,13 @@ export const VEHICLE = {
    */
   lateralGripLimit: 26,
 
+  /**
+   * 车体半宽(米),用于撞墙判定。
+   *
+   * 夹的是车体中心,不减掉半宽的话护栏会从车身正中穿过去,看着像穿模。
+   * 和 gfx/craft.ts 里的外形对得上即可,不需要精确。
+   */
+  halfWidth: 1.3,
   /** 撞墙:法向速度的反弹系数。低一点,贴着墙弹来弹去很蠢。 */
   wallRestitution: 0.25,
   /**
