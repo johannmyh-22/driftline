@@ -1,16 +1,17 @@
 import path from 'node:path';
 import { type Page, expect, test } from '@playwright/test';
 import { PNG } from 'pngjs';
+import type { InputFrame } from '../../src/core/input';
 import { OUTPUT_DIR, VISUAL_TEST_PORT, driveScene, previewUrl } from '../../scripts/harness';
 
 const BASE_URL = previewUrl(VISUAL_TEST_PORT);
 const SEED = 42;
 const OTHER_SEED = 7;
 
-// 阈值取实测值的 1/6 左右:纯色/黑屏是 0,正常画面在 2400 上下,中间留足够宽的沟。
+// 阈值取实测值的 1/3 左右:纯色/黑屏是 0,正常画面在 1300~1500,中间留足够宽的沟。
 const MIN_LUMINANCE_VARIANCE = 400;
 const MIN_DISTINCT_COLORS = 200;
-// 换 seed 后平均色至少要差这么多。实测 seed 42 与 7 差约 26。
+// 换 seed 后平均色至少要差这么多。
 const MIN_SEED_COLOR_DELTA = 8;
 
 interface FrameStats {
@@ -77,15 +78,37 @@ async function shoot(page: Page, name: string): Promise<FrameStats> {
   return analyseFrame(buffer);
 }
 
+/** 复位 → 设输入 → 步进,不重新加载页面。一次加载能跑完多个场景。 */
+async function run(
+  page: Page,
+  input: Partial<InputFrame>,
+  frames: number,
+): Promise<Record<string, number>> {
+  return page.evaluate(
+    ({ input: partial, frames: count }: { input: Partial<InputFrame>; frames: number }) => {
+      const api = window.__DRIFTLINE_TEST__;
+      if (api === undefined) {
+        throw new Error('__DRIFTLINE_TEST__ 未挂载');
+      }
+      api.reset();
+      api.setInput(partial);
+      api.advance(count);
+      return api.snapshot();
+    },
+    { input, frames },
+  );
+}
+
 test('渲染出有内容的画面,且页面没有报错', async ({ page }) => {
   const problems = watchForProblems(page);
 
   const snapshot = await driveScene(page, BASE_URL, {
     seed: SEED,
     frames: 120,
-    camera: 'default',
+    camera: 'chase',
+    input: { throttle: 1 },
   });
-  const stats = await shoot(page, `smoke-default-seed${SEED}.png`);
+  const stats = await shoot(page, `smoke-chase-seed${SEED}.png`);
 
   expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
   expect(stats.distinctColors).toBeGreaterThan(MIN_DISTINCT_COLORS);
@@ -93,28 +116,49 @@ test('渲染出有内容的画面,且页面没有报错', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
-test('低机位同样出图,机位切换生效', async ({ page }) => {
+test('油门真的能开动车,并且画面跟着变', async ({ page }) => {
   const problems = watchForProblems(page);
+  await driveScene(page, BASE_URL, { seed: SEED, frames: 0, camera: 'chase' });
 
-  await driveScene(page, BASE_URL, { seed: SEED, frames: 120, camera: 'default' });
-  const front = await shoot(page, `smoke-default-b-seed${SEED}.png`);
+  const idle = await run(page, {}, 90);
+  const idleStats = await shoot(page, 'smoke-idle.png');
 
-  await page.evaluate(() => {
-    const api = window.__DRIFTLINE_TEST__;
-    if (api === undefined) {
-      throw new Error('__DRIFTLINE_TEST__ 未挂载');
-    }
-    api.setCamera('low');
-  });
-  const low = await shoot(page, `smoke-low-seed${SEED}.png`);
+  const moved = await run(page, { throttle: 1 }, 90);
+  const movedStats = await shoot(page, 'smoke-throttle.png');
 
-  expect(low.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
-  expect(low.meanColor).not.toEqual(front.meanColor);
+  // 静止时几乎不动(只有悬浮沉降),给油后应该跑出几十米。
+  expect(Math.abs(idle['z'] ?? 0)).toBeLessThan(1);
+  expect(moved['z'] ?? 0).toBeGreaterThan(30);
+  expect(moved['groundSpeed'] ?? 0).toBeGreaterThan(30);
+  expect(movedStats.meanColor).not.toEqual(idleStats.meanColor);
   expect(problems).toEqual([]);
 });
 
+test('转向会改变朝向,并让车侧滑', async ({ page }) => {
+  await driveScene(page, BASE_URL, { seed: SEED, frames: 0, camera: 'chase' });
+
+  const straight = await run(page, { throttle: 1 }, 150);
+  const turned = await run(page, { throttle: 1, steer: 1 }, 150);
+  await shoot(page, 'smoke-turn.png');
+
+  expect(Math.abs(straight['yaw'] ?? 0)).toBeLessThan(1e-9);
+  expect(turned['yaw'] ?? 0).toBeGreaterThan(1);
+  // 转弯时速度方向落后于车头,表现为负的侧向速度。
+  expect(turned['lateralSpeed'] ?? 0).toBeLessThan(-0.5);
+});
+
+test('冲过地形会脱离地面,阴影提供落点参照', async ({ page }) => {
+  await driveScene(page, BASE_URL, { seed: SEED, frames: 0, camera: 'chase' });
+
+  const airborne = await run(page, { throttle: 1 }, 180);
+  await shoot(page, 'smoke-airborne.png');
+
+  expect(airborne['grounded']).toBe(0);
+  expect(airborne['clearance'] ?? 0).toBeGreaterThan(3);
+});
+
 test('advance(60) 精确推进 60 帧', async ({ page }) => {
-  const before = await driveScene(page, BASE_URL, { seed: SEED, frames: 30, camera: 'default' });
+  const before = await driveScene(page, BASE_URL, { seed: SEED, frames: 30, camera: 'chase' });
 
   const after = await page.evaluate(() => {
     const api = window.__DRIFTLINE_TEST__;
@@ -128,11 +172,10 @@ test('advance(60) 精确推进 60 帧', async ({ page }) => {
   expect(before['frame']).toBe(30);
   expect((after['frame'] ?? 0) - (before['frame'] ?? 0)).toBe(60);
   expect(after['elapsed']).toBeCloseTo(90 / 60, 10);
-  expect(after['spinnerRotation']).toBeGreaterThan(before['spinnerRotation'] ?? 0);
 });
 
-test('同 seed 跑两次,数值完全一致', async ({ page }) => {
-  const options = { seed: SEED, frames: 90, camera: 'default' } as const;
+test('同 seed 同输入跑两次,数值完全一致', async ({ page }) => {
+  const options = { seed: SEED, frames: 150, camera: 'chase', input: { throttle: 1, steer: 0.6 } };
 
   const first = await driveScene(page, BASE_URL, options);
   const second = await driveScene(page, BASE_URL, options);
@@ -140,21 +183,34 @@ test('同 seed 跑两次,数值完全一致', async ({ page }) => {
   expect(second).toEqual(first);
 });
 
-test('换 seed 会换掉画面配色', async ({ page }) => {
-  await driveScene(page, BASE_URL, { seed: SEED, frames: 120, camera: 'default' });
-  const a = await shoot(page, `smoke-default-seed${SEED}-a.png`);
+test('换 seed 会换掉地形与配色', async ({ page }) => {
+  // 跑够远才有意义:出生点周围是强制压平的,120 帧还没出那片平地,
+  // 两个 seed 的高度当然一模一样 —— 那不能说明地形没变。
+  const options = { frames: 300, camera: 'chase', input: { throttle: 1 } } as const;
 
-  await driveScene(page, BASE_URL, { seed: OTHER_SEED, frames: 120, camera: 'default' });
-  const b = await shoot(page, `smoke-default-seed${OTHER_SEED}.png`);
+  const a = await driveScene(page, BASE_URL, { seed: SEED, ...options });
+  const aStats = await shoot(page, `smoke-chase-seed${SEED}-a.png`);
+
+  const b = await driveScene(page, BASE_URL, { seed: OTHER_SEED, ...options });
+  const bStats = await shoot(page, `smoke-chase-seed${OTHER_SEED}.png`);
 
   const delta = Math.max(
-    ...a.meanColor.map((channel, index) => Math.abs(channel - (b.meanColor[index] ?? 0))),
+    ...aStats.meanColor.map((channel, index) => Math.abs(channel - (bStats.meanColor[index] ?? 0))),
   );
   expect(delta).toBeGreaterThan(MIN_SEED_COLOR_DELTA);
+  // 同样的输入在不同地形上必然跑出不同结果。
+  expect(b).not.toEqual(a);
 });
 
-test('未知机位会明确报错,而不是悄悄画错', async ({ page }) => {
-  await driveScene(page, BASE_URL, { seed: SEED, frames: 1, camera: 'default' });
+test('固定机位可用,且未知机位会明确报错', async ({ page }) => {
+  await driveScene(page, BASE_URL, {
+    seed: SEED,
+    frames: 90,
+    camera: 'side',
+    input: { throttle: 1 },
+  });
+  const side = await shoot(page, 'smoke-side.png');
+  expect(side.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
 
   const message = await page.evaluate(() => {
     const api = window.__DRIFTLINE_TEST__;
@@ -168,7 +224,6 @@ test('未知机位会明确报错,而不是悄悄画错', async ({ page }) => {
       return error instanceof Error ? error.message : String(error);
     }
   });
-
   expect(message).toContain('未知机位');
 });
 
@@ -181,8 +236,11 @@ test('不带 test=1 时自行跑主循环,且不暴露测试接口', async ({ pa
 
   const stats = await shoot(page, 'smoke-realtime.png');
   const exposed = await page.evaluate(() => window.__DRIFTLINE_TEST__ !== undefined);
+  // 实时模式下要有速度读数,人类试玩时靠它给出具体数值反馈。
+  const readout = await page.textContent('#readout');
 
   expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
   expect(exposed).toBe(false);
+  expect(readout).toContain('km/h');
   expect(problems).toEqual([]);
 });

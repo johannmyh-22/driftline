@@ -8,11 +8,25 @@
 
 ## 状态
 
-M0(骨架与验证回路)已就位:Vite + TypeScript strict + three.js、固定步长主循环、
+M1(手感)开发中:悬浮载具、输入层与输入录制、跟随相机、带跳台和起伏的大平地。
+**只做手感,没有赛道 / 计时 / 圈数** —— 那些属于 M2 与 M4。
+
+M0(骨架与验证回路)已合并:Vite + TypeScript strict + three.js、固定步长主循环、
 seeded PRNG、`?test=1` 确定性步进接口、Playwright 无头截图与冒烟测试。
-场景里那个旋转多面体只是管线验证用的占位物,M1 会整个换掉。
 
 路线图见 [docs/PLAN.md](docs/PLAN.md)。
+
+## 操作
+
+| 键 | 作用 |
+|---|---|
+| `W` / `↑` | 油门 |
+| `S` / `↓` | 倒车 |
+| `A` `D` / `←` `→` | 转向 |
+| `Space` / `Shift` | 空气刹(减速 + 增加抓地,用来刹车入弯) |
+
+手感数值全部集中在 [`src/game/tuning.ts`](src/game/tuning.ts),调手感只改那一个文件。
+`tests/unit/vehicle.test.ts` 里的断言区间就是当前调校的实测值,改了 tuning 要回去同步。
 
 ## 开发
 
@@ -33,11 +47,13 @@ npm run dev
 `shoot` 可以带参数:
 
 ```bash
-npm run shoot -- --seed=7 --camera=low --frames=240 --out=low.png
-npm run shoot -- --no-build          # 复用现有 dist,连拍时省掉重复构建
+npm run shoot -- --seed=7 --frames=240 --steer=0.8 --out=turn.png
+npm run shoot -- --camera=side --throttle=0     # 静止侧视,看载具本身
+npm run shoot -- --no-build                     # 复用现有 dist,连拍时省掉重复构建
 ```
 
-机位可选 `default` / `low` / `top` / `wide`。
+机位:`chase`(玩家视角,默认)/ `side` / `front` / `top`。
+`--throttle` / `--steer` / `--brake` 是步进期间一直保持的操作输入。
 
 ## 设计约束
 
