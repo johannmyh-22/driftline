@@ -1,14 +1,19 @@
+import type { Race } from './race';
+
 /**
- * M1 的最小读数条 —— **不是 HUD**。
+ * 最小读数条 —— **不是 HUD**。
  *
- * 真正的 HUD(圈时、delta、小地图)属于 M4。这里只放两样东西:
- * 操作说明(不然没人知道按什么键)和速度数字(验收要求「反馈请给具体
- * 数值方向」,没有读数就只能靠形容词)。M4 接手时整个删掉。
+ * 真正的 HUD(分段 delta、小地图、菜单)属于 M4。这里只放让当前里程碑能被
+ * 验收的最少信息:操作说明(不然没人知道按什么键)、速度(M1 要求「反馈请给
+ * 具体数值方向」),以及 M2 加的圈数与圈时 —— 圈计时是 M2 的交付物,
+ * 没有任何显示的话人类无法确认它在工作。M4 接手时整个删掉。
  */
 export class Readout {
   private readonly root: HTMLDivElement;
   private readonly speed: HTMLSpanElement;
+  private readonly timing: HTMLParagraphElement;
   private shown = -1;
+  private shownTiming = '';
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -24,20 +29,39 @@ export class Readout {
     this.speed.textContent = '0';
     value.append(this.speed, document.createTextNode(' km/h'));
 
-    this.root.append(value, help);
+    this.timing = document.createElement('p');
+    this.timing.className = 'readout-timing';
+
+    this.root.append(this.timing, value, help);
     parent.append(this.root);
   }
 
-  update(metersPerSecond: number): void {
+  update(metersPerSecond: number, race: Race | null): void {
     const kmh = Math.round(metersPerSecond * 3.6);
     // DOM 写入比读取贵得多,数字没变就别碰它。
     if (kmh !== this.shown) {
       this.shown = kmh;
       this.speed.textContent = String(kmh);
     }
+
+    const timing =
+      race === null
+        ? ''
+        : `第 ${race.laps + 1} 圈 · ${formatTime(race.lapTime)}` +
+          (race.bestLapTime > 0 ? ` · 最快 ${formatTime(race.bestLapTime)}` : '');
+    if (timing !== this.shownTiming) {
+      this.shownTiming = timing;
+      this.timing.textContent = timing;
+    }
   }
 
   dispose(): void {
     this.root.remove();
   }
+}
+
+function formatTime(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds - minutes * 60;
+  return `${minutes}:${rest.toFixed(2).padStart(5, '0')}`;
 }

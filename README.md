@@ -8,11 +8,13 @@
 
 ## 状态
 
-M1(手感)开发中:悬浮载具、输入层与输入录制、跟随相机、带跳台和起伏的大平地。
-**只做手感,没有赛道 / 计时 / 圈数** —— 那些属于 M2 与 M4。
+M2(赛道生成)开发中:由 seed 生成带侧倾的闭环赛道、护栏与起跑线、赛道外程序化
+地形、检查点与圈计时、出界重置。**还没有分段 delta / 小地图 / 菜单 / 幽灵回放**
+—— 那些属于 M4。
 
-M0(骨架与验证回路)已合并:Vite + TypeScript strict + three.js、固定步长主循环、
-seeded PRNG、`?test=1` 确定性步进接口、Playwright 无头截图与冒烟测试。
+M1(手感)已合并:悬浮载具、输入层与输入录制、跟随相机。
+M0(骨架与验证回路)已合并:固定步长主循环、seeded PRNG、`?test=1` 确定性步进接口、
+Playwright 无头截图与冒烟测试。
 
 路线图见 [docs/PLAN.md](docs/PLAN.md)。
 
@@ -25,7 +27,9 @@ seeded PRNG、`?test=1` 确定性步进接口、Playwright 无头截图与冒烟
 | `A` `D` / `←` `→` | 转向 |
 | `Space` / `Shift` | 空气刹(减速 + 增加抓地,用来刹车入弯) |
 
-手感数值全部集中在 [`src/game/tuning.ts`](src/game/tuning.ts),调手感只改那一个文件。
+`?course=flat` 可以切回 M1 那块带跳台的平地 —— 没有赛道干扰,调手感更干净。
+
+手感与赛道数值全部集中在 [`src/game/tuning.ts`](src/game/tuning.ts),调参只改那一个文件。
 `tests/unit/vehicle.test.ts` 里的断言区间就是当前调校的实测值,改了 tuning 要回去同步。
 
 ## 开发
@@ -52,7 +56,7 @@ npm run shoot -- --camera=side --throttle=0     # 静止侧视,看载具本身
 npm run shoot -- --no-build                     # 复用现有 dist,连拍时省掉重复构建
 ```
 
-机位:`chase`(玩家视角,默认)/ `side` / `front` / `top`。
+机位:`chase`(玩家视角,默认)/ `side` / `front` / `top` / `map`(俯瞰整条赛道)。
 `--throttle` / `--steer` / `--brake` 是步进期间一直保持的操作输入。
 
 ## 设计约束

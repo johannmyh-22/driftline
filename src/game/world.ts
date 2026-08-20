@@ -20,6 +20,7 @@ import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
+import { Race } from './race';
 import { type TrackLayout, generateTrack } from './trackLayout';
 import { Vehicle } from './vehicle';
 
@@ -55,6 +56,8 @@ export class World {
   readonly chase: ChaseCamera;
   /** 赛道布局。`flat` 场地下是 null。 */
   readonly track: TrackLayout | null;
+  /** 检查点与圈计时。`flat` 场地下是 null —— 那块地没有赛道可计圈。 */
+  readonly race: Race | null;
 
   private readonly craft: Group;
   private readonly shadow = new GroundShadow();
@@ -83,6 +86,7 @@ export class World {
       this.scene.add(createGround(field, rng.fork(), palette));
     }
 
+    this.race = this.track === null ? null : new Race(this.track);
     this.vehicle = new Vehicle(this.field);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
@@ -111,6 +115,7 @@ export class World {
 
   /** 把载具放到起跑线,车头朝赛道前进方向。平地场景就是原点朝 +Z。 */
   spawnAtStart(): void {
+    this.race?.reset();
     const start = this.track?.samples[0];
     if (start === undefined) {
       this.vehicle.reset();
@@ -134,6 +139,7 @@ export class World {
     this.input.airBrake = input.airBrake;
 
     this.vehicle.update(this.input, dt);
+    this.race?.update(this.vehicle, dt);
     this.chase.update(this.vehicle, dt);
   }
 

@@ -126,9 +126,9 @@ test('油门真的能开动车,并且画面跟着变', async ({ page }) => {
   const moved = await run(page, { throttle: 1 }, 90);
   const movedStats = await shoot(page, 'smoke-throttle.png');
 
-  // 静止时几乎不动(只有悬浮沉降),给油后应该跑出几十米。
-  expect(Math.abs(idle['z'] ?? 0)).toBeLessThan(1);
-  expect(moved['z'] ?? 0).toBeGreaterThan(30);
+  // 静止时几乎不动(只有悬浮沉降),给油后应该沿赛道跑出几十米。
+  expect(idle['arc'] ?? 99).toBeLessThan(1);
+  expect(moved['arc'] ?? 0).toBeGreaterThan(30);
   expect(moved['groundSpeed'] ?? 0).toBeGreaterThan(30);
   expect(movedStats.meanColor).not.toEqual(idleStats.meanColor);
   expect(problems).toEqual([]);
@@ -144,21 +144,74 @@ test('按右转就往右跑,并且会侧滑', async ({ page }) => {
   await shoot(page, 'smoke-turn.png');
   const left = await run(page, { throttle: 1, steer: -1 }, 150);
 
-  expect(straight['x']).toBe(0);
-  expect(right['x'] ?? 0).toBeLessThan(-5);
-  expect(left['x'] ?? 0).toBeGreaterThan(5);
+  // 出生点在赛道起跑线上,车头朝切线方向,所以不能再假设「起点在原点朝 +Z」。
+  // 改成比较三者的横向位置:右转必须落在直行的右边,左转落在左边。
+  const straightLateral = straight['lateral'] ?? 0;
+  expect(right['lateral'] ?? 0).toBeGreaterThan(straightLateral);
+  expect(left['lateral'] ?? 0).toBeLessThan(straightLateral);
   // 右转时速度方向落后于车头,相对车身在向左滑,所以「向右的侧向速度」为负。
   expect(right['lateralSpeed'] ?? 0).toBeLessThan(-0.5);
 });
 
-test('冲过地形会脱离地面,阴影提供落点参照', async ({ page }) => {
+test('起跑时在赛道上,且圈计时从零开始', async ({ page }) => {
+  const snapshot = await driveScene(page, BASE_URL, { seed: SEED, frames: 1, camera: 'chase' });
+  await shoot(page, 'smoke-start.png');
+
+  expect(snapshot['onTrack']).toBe(1);
+  expect(snapshot['laps']).toBe(0);
+  expect(Math.abs(snapshot['lateral'] ?? 99)).toBeLessThan(1);
+  expect(snapshot['arc']).toBe(0);
+});
+
+test('沿赛道跑会推进弧长,且圈计时字段接通了', async ({ page }) => {
   await driveScene(page, BASE_URL, { seed: SEED, frames: 0, camera: 'chase' });
 
-  const airborne = await run(page, { throttle: 1 }, 180);
-  await shoot(page, 'smoke-airborne.png');
+  const early = await run(page, { throttle: 1 }, 60);
+  const later = await page.evaluate(() => {
+    const api = window.__DRIFTLINE_TEST__;
+    if (api === undefined) {
+      throw new Error('__DRIFTLINE_TEST__ 未挂载');
+    }
+    api.advance(60);
+    return api.snapshot();
+  });
 
-  expect(airborne['grounded']).toBe(0);
-  expect(airborne['clearance'] ?? 0).toBeGreaterThan(3);
+  expect(later['arc'] ?? 0).toBeGreaterThan(early['arc'] ?? 0);
+  // 检查点推进和整圈计时由 tests/unit/race.test.ts 覆盖(含 10 个 seed 实跑整圈)。
+  // 这里只验证浏览器侧的接线:字段存在、圈时在走。
+  expect(later['laps']).toBe(0);
+  expect(later['lapTime'] ?? 0).toBeGreaterThan(early['lapTime'] ?? 0);
+});
+
+test('俯瞰机位能看到完整赛道', async ({ page }) => {
+  await driveScene(page, BASE_URL, { seed: SEED, frames: 1, camera: 'map' });
+  const stats = await shoot(page, 'smoke-map.png');
+  expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+  expect(stats.distinctColors).toBeGreaterThan(MIN_DISTINCT_COLORS);
+});
+
+test('?course=flat 切回 M1 那块平地', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  await page.goto(`${BASE_URL}?test=1&seed=${SEED}&course=flat`, { waitUntil: 'load' });
+  await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+  await page.evaluate(async () => {
+    const api = window.__DRIFTLINE_TEST__;
+    if (api === undefined) {
+      throw new Error('__DRIFTLINE_TEST__ 未挂载');
+    }
+    await api.ready;
+    api.setInput({ throttle: 1 });
+    api.advance(180);
+  });
+  const snapshot = await page.evaluate(() => window.__DRIFTLINE_TEST__?.snapshot() ?? {});
+  const stats = await shoot(page, 'smoke-flat.png');
+
+  // 平地场景没有赛道,所以没有圈数,而且整块地都算「在路面上」。
+  expect(snapshot['laps']).toBe(0);
+  expect(snapshot['onTrack']).toBe(1);
+  expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+  expect(problems).toEqual([]);
 });
 
 test('advance(60) 精确推进 60 帧', async ({ page }) => {

@@ -58,7 +58,7 @@ function boot(container: HTMLDivElement): void {
     },
     render: (alpha) => {
       world.present(alpha);
-      readout?.update(world.vehicle.groundSpeed);
+      readout?.update(world.vehicle.groundSpeed, world.race);
       renderer.render(world.scene, world.camera);
     },
   });
@@ -116,6 +116,12 @@ function boot(container: HTMLDivElement): void {
         onTrack: world.vehicle.onTrack ? 1 : 0,
         lateral: world.vehicle.lateral,
         arc: world.vehicle.arc,
+        laps: world.race?.laps ?? 0,
+        lapTime: world.race?.lapTime ?? 0,
+        lastLapTime: world.race?.lastLapTime ?? 0,
+        bestLapTime: world.race?.bestLapTime ?? 0,
+        checkpoint: world.race?.lastCheckpoint ?? 0,
+        resets: world.race?.resets ?? 0,
       }),
     });
 

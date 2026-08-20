@@ -75,3 +75,10 @@ body {
     transition: none;
   }
 }
+
+.readout-timing {
+  margin: 0 0 0.15rem;
+  font-size: 0.82rem;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+}
