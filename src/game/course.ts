@@ -4,6 +4,8 @@ import { TerrainNoise } from './terrainNoise';
 import type { TrackLayout } from './trackLayout';
 import { TRACK } from './tuning';
 
+const normalScratch = new Float32Array(3);
+
 /** 横向分档数。条带每一段被切成这么多列,列数越多侧倾越平滑。 */
 const LATERAL_DIVISIONS = 10;
 /** 空间索引的格子边长(米)。 */
@@ -120,6 +122,11 @@ export class Course implements GroundQuery {
     return blend <= 0 ? trackY : trackY + (this.terrain.heightAt(x, z) - trackY) * blend;
   }
 
+  /** 赛道外地形的高度。条带内也能问,用来做路肩到地形的过渡。 */
+  terrainHeightAt(x: number, z: number): number {
+    return this.terrain.heightAt(x, z);
+  }
+
   /**
    * 向下查询。先用空间索引找出附近的中心线段,再判断落在条带内还是外。
    *
@@ -172,11 +179,20 @@ export class Course implements GroundQuery {
    * `lateral` 是每个三角形所在的横向分档中点(-1..1 归一化),上色时用来
    * 区分路面、路肩和边线。
    */
-  buildRibbonTriangles(): { positions: Float32Array; lateral: Float32Array } {
+  buildRibbonTriangles(): {
+    positions: Float32Array;
+    normals: Float32Array;
+    uvs: Float32Array;
+    lateral: Float32Array;
+  } {
     const quads = this.rows * LATERAL_DIVISIONS;
     const positions = new Float32Array(quads * 6 * 3);
+    const normals = new Float32Array(quads * 6 * 3);
+    const uvs = new Float32Array(quads * 6 * 2);
     const lateral = new Float32Array(quads * 2);
     let o = 0;
+    let n = 0;
+    let u = 0;
     let l = 0;
 
     const push = (row: number, col: number): void => {
@@ -184,6 +200,17 @@ export class Course implements GroundQuery {
       positions[o++] = this.vx[index] ?? 0;
       positions[o++] = this.vy[index] ?? 0;
       positions[o++] = this.vz[index] ?? 0;
+
+      // 逐顶点法线取自网格邻居的叉积,而不是三角面法线:写实材质要靠平滑
+      // 着色 + 法线贴图出细节,面法线会把条带画成一段段折面。
+      this.vertexNormal(row, col, normalScratch);
+      normals[n++] = normalScratch[0] ?? 0;
+      normals[n++] = normalScratch[1] ?? 1;
+      normals[n++] = normalScratch[2] ?? 0;
+
+      // UV:横向按实际米数、纵向按弧长,贴图才不会在弯道里被拉伸。
+      uvs[u++] = (-this.outerHalfWidth + col * this.lateralStep) / TRACK.textureScale;
+      uvs[u++] = ((row % this.rows) * this.layout.spacing) / TRACK.textureScale;
     };
 
     for (let row = 0; row < this.rows; row++) {
@@ -204,7 +231,40 @@ export class Course implements GroundQuery {
       }
     }
 
-    return { positions, lateral };
+    return { positions, normals, uvs, lateral };
+  }
+
+  /** 网格顶点处的平滑法线:沿行、沿列各取中心差分,叉积即为法线。 */
+  private vertexNormal(row: number, col: number, out: Float32Array): void {
+    const prevRow = (row - 1 + this.rows) % this.rows;
+    const nextRow = (row + 1) % this.rows;
+    const loCol = col > 0 ? col - 1 : col;
+    const hiCol = col < this.columns - 1 ? col + 1 : col;
+
+    const a = this.vertexIndex(prevRow, col);
+    const b = this.vertexIndex(nextRow, col);
+    const c = this.vertexIndex(row, loCol);
+    const d = this.vertexIndex(row, hiCol);
+
+    const alongX = (this.vx[b] ?? 0) - (this.vx[a] ?? 0);
+    const alongY = (this.vy[b] ?? 0) - (this.vy[a] ?? 0);
+    const alongZ = (this.vz[b] ?? 0) - (this.vz[a] ?? 0);
+    const acrossX = (this.vx[d] ?? 0) - (this.vx[c] ?? 0);
+    const acrossY = (this.vy[d] ?? 0) - (this.vy[c] ?? 0);
+    const acrossZ = (this.vz[d] ?? 0) - (this.vz[c] ?? 0);
+
+    let nx = acrossY * alongZ - acrossZ * alongY;
+    let ny = acrossZ * alongX - acrossX * alongZ;
+    let nz = acrossX * alongY - acrossY * alongX;
+    if (ny < 0) {
+      nx = -nx;
+      ny = -ny;
+      nz = -nz;
+    }
+    const inv = 1 / (Math.hypot(nx, ny, nz) || 1);
+    out[0] = nx * inv;
+    out[1] = ny * inv;
+    out[2] = nz * inv;
   }
 
   /** 最近一次 nearestRow 的段内参数。和返回值配套使用,避免多返回一个对象。 */

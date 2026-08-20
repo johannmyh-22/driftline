@@ -1,4 +1,4 @@
-import { WebGLRenderer } from 'three';
+import { ACESFilmicToneMapping, PCFSoftShadowMap, WebGLRenderer } from 'three';
 import {
   type InputFrame,
   KeyboardInput,
@@ -7,6 +7,7 @@ import {
 } from './core/input';
 import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
+import { SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
 import { Readout } from './game/hud';
 import { type CourseKind, World } from './game/world';
@@ -40,9 +41,19 @@ function boot(container: HTMLDivElement): void {
   });
   // 测试模式锁死 DPR,否则不同机器的 devicePixelRatio 会让截图分辨率漂移。
   renderer.setPixelRatio(testMode ? 1 : Math.min(window.devicePixelRatio, 2));
+  // ACES:把高动态范围压进屏幕能显示的范围。没有它,亮部会直接切平成一片死白,
+  // 那是「电脑画的」最明显的特征之一。
+  renderer.toneMapping = ACESFilmicToneMapping;
+  renderer.toneMappingExposure = SKY.exposure;
+  renderer.shadowMap.enabled = true;
+  // PCF soft:硬阴影边缘在低仰角太阳下像贴纸,而 VSM 在 SwiftShader 上不稳。
+  renderer.shadowMap.type = PCFSoftShadowMap;
   container.append(renderer.domElement);
 
   const world = new World(new Rng(seed), courseKind);
+  // 环境贴图要用渲染器把天空烘出来,所以只能等到这里。烘一次,天空是静态的。
+  world.scene.environment = world.atmosphere.buildEnvironment(renderer);
+  world.scene.environmentIntensity = SKY.environmentIntensity;
 
   const scripted = new ScriptedInput();
   const keyboard = testMode ? null : new KeyboardInput();

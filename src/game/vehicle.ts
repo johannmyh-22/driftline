@@ -160,9 +160,23 @@ export class Vehicle {
   }
 
   private applySteering(input: InputFrame, dt: number): void {
-    const speed01 = normalize01(this.groundSpeed, 0, REFERENCE_TOP_SPEED);
+    const speed = this.groundSpeed;
+    const speed01 = normalize01(speed, 0, REFERENCE_TOP_SPEED);
     // 速度越高转向上限越低,否则高速原地打转,速度感全丢。
-    const maxYawRate = lerp(VEHICLE.yawRateMax, VEHICLE.yawRateAtTopSpeed, speed01);
+    const envelope = lerp(VEHICLE.yawRateMax, VEHICLE.yawRateAtTopSpeed, speed01);
+
+    /*
+     * 真正的上限来自侧向力:稳态过弯时 ω = a_lat / v,能维持的转向速率完全由
+     * 地面能给多大的侧向加速度决定。
+     *
+     * 不加这一层的话,抓地力有上限而转向没有 —— 车头能瞬间甩过去,速度矢量
+     * 还朝着原方向,侧滑角一路涨到 170°,也就是打转。实测 186 km/h 满舵两秒
+     * 就能把车转成倒着走,速度从 212 崩到 57。「车太轻、很飘」就是这么来的。
+     */
+    const capacity = VEHICLE.lateralGripLimit + VEHICLE.airBrakeGripBonus * input.airBrake;
+    const sustainable = (capacity * VEHICLE.yawSlideAllowance) / Math.max(speed, 6);
+    const maxYawRate = Math.min(envelope, sustainable);
+
     const authority = this.grounded ? 1 : VEHICLE.yawAuthorityAirborne;
 
     // 取负:steer 为正表示向右,而 yaw 增大是向左(见类注释)。
@@ -170,6 +184,39 @@ export class Vehicle {
     const lambda = input.steer === 0 ? VEHICLE.yawRecenter : VEHICLE.yawResponse;
     this.yawRate = damp(this.yawRate, target, lambda, dt);
     this.yaw += this.yawRate * dt;
+
+    this.applySlipRestoring(dt);
+  }
+
+  /**
+   * 侧滑回正:把车头往速度方向拉。
+   *
+   * 这是车辆自稳的来源。正常过弯时侧滑角只有几度,这个力很轻,不会妨碍转向;
+   * 一旦打转起来侧滑角几十度,它就成了主导项,把车头拽回行进方向。
+   */
+  private applySlipRestoring(dt: number): void {
+    if (!this.grounded) {
+      return;
+    }
+    const speed = this.groundSpeed;
+    if (speed < VEHICLE.slipRestoringMinSpeed) {
+      return;
+    }
+
+    // 速度方向相对车头的有符号夹角。用 atan2 而不是 acos:需要方向,不只是大小。
+    const headingX = Math.sin(this.yaw);
+    const headingZ = Math.cos(this.yaw);
+    const along = this.velocity.x * headingX + this.velocity.z * headingZ;
+    const across = this.velocity.x * headingZ - this.velocity.z * headingX;
+    const slip = Math.atan2(across, along);
+
+    // 倒着开时 atan2 会给出接近 ±π 的角,那时候不该把车头强行拧过去。
+    if (Math.abs(slip) > Math.PI * 0.6) {
+      return;
+    }
+
+    const blend = 1 - Math.exp(-VEHICLE.slipRestoring * dt);
+    this.yaw += slip * blend;
   }
 
   private applyThrust(input: InputFrame, dt: number): void {
@@ -232,7 +279,10 @@ export class Vehicle {
       // 法线在横向上的分量给出路面的横向坡度;车往哪边滑,那边是上坡就得分。
       const slope = -(this.hit.normalX * rightward.x + this.hit.normalZ * rightward.z) /
         this.hit.normalY;
-      budget += Math.max(0, VEHICLE.gravity * slope * Math.sign(this.lateralSpeed));
+      // 夹到赛道最大侧倾能给的量:赛道外的陡坡不该白送无上限的抓地力,
+      // 不然贴着山壁跑反而比在赛道上抓得还狠。
+      const capped = clamp(slope * Math.sign(this.lateralSpeed), 0, VEHICLE.maxBankSlope);
+      budget += VEHICLE.gravity * capped;
     }
 
     return budget;

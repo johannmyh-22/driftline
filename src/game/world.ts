@@ -1,7 +1,5 @@
 import {
-  DirectionalLight,
   Group,
-  HemisphereLight,
   type PerspectiveCamera,
   Quaternion,
   Scene,
@@ -12,8 +10,7 @@ import type { Rng } from '../core/rng';
 import { createCraft } from '../gfx/craft';
 import { createGround } from '../gfx/ground';
 import { createPalette } from '../gfx/palette';
-import { GroundShadow } from '../gfx/shadowBlob';
-import { createSky } from '../gfx/sky';
+import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
 import { ChaseCamera } from './chaseCamera';
@@ -56,11 +53,12 @@ export class World {
   readonly chase: ChaseCamera;
   /** 赛道布局。`flat` 场地下是 null。 */
   readonly track: TrackLayout | null;
+  /** 大气与太阳。环境贴图要等渲染器就绪后才能烘。 */
+  readonly atmosphere: Atmosphere;
   /** 检查点与圈计时。`flat` 场地下是 null —— 那块地没有赛道可计圈。 */
   readonly race: Race | null;
 
   private readonly craft: Group;
-  private readonly shadow = new GroundShadow();
   private readonly prevPosition = new Vector3();
   private readonly prevOrientation = new Quaternion();
   private preset = 'chase';
@@ -70,7 +68,9 @@ export class World {
   constructor(rng: Rng, kind: CourseKind = 'race') {
     const palette = createPalette(rng.fork());
 
-    this.scene.add(createSky(palette));
+    this.atmosphere = new Atmosphere(rng.fork());
+    this.scene.add(this.atmosphere.sky);
+    this.scene.add(this.atmosphere.sunLight);
 
     if (kind === 'race') {
       const layout = generateTrack(rng.fork());
@@ -95,18 +95,9 @@ export class World {
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft);
 
-    this.scene.add(this.shadow.mesh);
 
-    // 一主一补:主光造明暗面,半球光把背光面从死黑里拉回来。
-    const key = new DirectionalLight(palette.keyLight, 2.4);
-    key.position.set(90, 160, 60);
-    key.name = 'key-light';
-    this.scene.add(key);
-
-    const fill = new HemisphereLight(palette.horizon, palette.fillLight, 0.5);
-    fill.name = 'fill-light';
-    this.scene.add(fill);
-
+    // 背光面不再靠半球光去补,改由 IBL 提供 —— 环境反射来自真实的大气散射,
+    // 明暗过渡和天空是一致的,而不是人为塞一个补光。
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
     this.chase.snapTo(this.vehicle);
@@ -149,7 +140,8 @@ export class World {
 
     this.craft.position.copy(shownPosition);
     this.craft.quaternion.copy(shownOrientation);
-    this.shadow.update(this.field, shownPosition.x, shownPosition.z, shownPosition.y);
+    // 阴影相机只罩住车周围一小块,必须跟着车走。
+    this.atmosphere.followShadow(shownPosition.x, shownPosition.y, shownPosition.z);
 
     if (this.preset === 'chase') {
       this.chase.present(alpha);

@@ -35,10 +35,11 @@ export function createGround(field: Heightfield, rng: Rng, palette: Palette): Me
 
     const onGridLine = ix % GRID_PERIOD === 0 || iz % GRID_PERIOD === 0;
 
-    tint.copy(palette.ground);
+    const albedo = palette.terrainSurface.base;
+    tint.setRGB(albedo[0] ?? 0.2, albedo[1] ?? 0.2, albedo[2] ?? 0.2);
     if (onGridLine) {
       // 只是提亮一档,不是换个颜色 —— 一格就有 4 米宽,真按亮色画会变成公路。
-      tint.lerp(palette.gridMajor, 0.14);
+      tint.multiplyScalar(1.3);
     }
     // 越高越亮:坡和山包不用靠光照也能读出形状。
     tint.offsetHSL(0, 0, Math.min(0.22, height * 0.022) + rng.range(-0.035, 0.035));
