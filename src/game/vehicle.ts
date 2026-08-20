@@ -6,7 +6,10 @@ import { REFERENCE_TOP_SPEED, VEHICLE } from './tuning';
 
 // 每帧路径上的临时量,全部提到模块作用域复用。60Hz 下新建 Vector3 的 GC 抖动看得见。
 const forward = new Vector3();
-const right = new Vector3();
+/** 驾驶员的右手边 = forward × up。侧滑与抓地用这个。 */
+const rightward = new Vector3();
+/** 车体模型的局部 +X 轴。模型朝 +Z 建,所以它指向驾驶员的**左**边。 */
+const bodyX = new Vector3();
 const up = new Vector3();
 const scratch = new Vector3();
 const basis = new Matrix4();
@@ -21,8 +24,12 @@ const HARD_FLOOR = 0.3;
 /**
  * 悬浮载具。自写速度积分 + 弹簧悬浮,不用物理引擎。
  *
- * 车头朝向局部 +Z。偏航角 `yaw` 绕世界 Y 轴,`yaw = 0` 时车头指向 +Z;
- * yaw 增大 = 俯视顺时针 = 右转。
+ * 车头朝向局部 +Z。偏航角 `yaw` 绕世界 Y 轴,`yaw = 0` 时车头指向 +Z。
+ *
+ * **yaw 增大 = 俯视逆时针 = 左转。** 因为 `forward = (sin yaw, 0, cos yaw)`,
+ * yaw 变大是把 +Z 扫向 +X,在右手系里俯视看就是逆时针。所以右转输入要取负号。
+ * 这条一开始写反了,而且单测只断言「yaw 与 steer 同号」—— 那正是搞反的那件事,
+ * 于是测试和 bug 用了同一个前提,必然通过。现在转向测试改成断言车最后跑到哪边。
  *
  * 所有手感数字都在 `tuning.ts`,这里只写「怎么算」,不写「算多少」。
  */
@@ -36,7 +43,11 @@ export class Vehicle {
   grounded = false;
   /** 当前离地高度(车体原点到地面)。 */
   clearance = 0;
-  /** 车体坐标系下的侧向速度,正值表示向右滑。漂移感就看它。 */
+  /**
+   * 侧向速度,**正值 = 向驾驶员右手边滑**。漂移感就看它。
+   *
+   * 右转时速度方向落后于车头,所以是向左滑,这个值为负 —— 别被符号绕进去。
+   */
   lateralSpeed = 0;
 
   private readonly field: Heightfield;
@@ -78,7 +89,7 @@ export class Vehicle {
     this.grounded = this.clearance < VEHICLE.hoverRange;
 
     forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    rightward.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
 
     this.applyHover(dt);
     this.applySteering(input, dt);
@@ -132,7 +143,8 @@ export class Vehicle {
     const maxYawRate = lerp(VEHICLE.yawRateMax, VEHICLE.yawRateAtTopSpeed, speed01);
     const authority = this.grounded ? 1 : VEHICLE.yawAuthorityAirborne;
 
-    const target = input.steer * maxYawRate * authority;
+    // 取负:steer 为正表示向右,而 yaw 增大是向左(见类注释)。
+    const target = -input.steer * maxYawRate * authority;
     const lambda = input.steer === 0 ? VEHICLE.yawRecenter : VEHICLE.yawResponse;
     this.yawRate = damp(this.yawRate, target, lambda, dt);
     this.yaw += this.yawRate * dt;
@@ -161,7 +173,7 @@ export class Vehicle {
   }
 
   private applyLateralGrip(input: InputFrame, dt: number): void {
-    this.lateralSpeed = this.velocity.dot(right);
+    this.lateralSpeed = this.velocity.dot(rightward);
 
     let grip = this.grounded ? VEHICLE.lateralGrip : VEHICLE.lateralGripAirborne;
     if (this.grounded) {
@@ -169,7 +181,7 @@ export class Vehicle {
     }
 
     const removed = this.lateralSpeed * (1 - Math.exp(-grip * dt));
-    this.velocity.addScaledVector(right, -removed);
+    this.velocity.addScaledVector(rightward, -removed);
   }
 
   private updateOrientation(dt: number): void {
@@ -194,12 +206,19 @@ export class Vehicle {
       forward.set(0, 0, 1);
     }
     forward.normalize();
-    right.copy(up).cross(forward).normalize();
+    // up × forward 得到的是模型的局部 +X(驾驶员左手边),makeBasis 要的正是它。
+    bodyX.copy(up).cross(forward).normalize();
 
-    basis.makeBasis(right, up, forward);
+    basis.makeBasis(bodyX, up, forward);
     this.orientation.setFromRotationMatrix(basis);
 
-    const bank = clamp(this.lateralSpeed * VEHICLE.bankPerLateralSpeed, -VEHICLE.bankMax, VEHICLE.bankMax);
+    // 车身向弯内压坡度:右转时向左滑(lateralSpeed 为负),要把右半边压下去。
+    // 绕局部 +Z 正向旋转会把局部 +X(左半边)抬起来,所以这里取负号。
+    const bank = clamp(
+      -this.lateralSpeed * VEHICLE.bankPerLateralSpeed,
+      -VEHICLE.bankMax,
+      VEHICLE.bankMax,
+    );
     bankQuat.setFromAxisAngle(AXIS_Z, bank);
     this.orientation.multiply(bankQuat);
 

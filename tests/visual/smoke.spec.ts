@@ -134,17 +134,21 @@ test('油门真的能开动车,并且画面跟着变', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
-test('转向会改变朝向,并让车侧滑', async ({ page }) => {
+test('按右转就往右跑,并且会侧滑', async ({ page }) => {
   await driveScene(page, BASE_URL, { seed: SEED, frames: 0, camera: 'chase' });
 
+  // 断言位置而不是 yaw 的符号:yaw 正方向是左是右,正是当初搞反的那件事。
+  // 出生时车头朝 +Z,它的右手边是世界 -X。
   const straight = await run(page, { throttle: 1 }, 150);
-  const turned = await run(page, { throttle: 1, steer: 1 }, 150);
+  const right = await run(page, { throttle: 1, steer: 1 }, 150);
   await shoot(page, 'smoke-turn.png');
+  const left = await run(page, { throttle: 1, steer: -1 }, 150);
 
-  expect(Math.abs(straight['yaw'] ?? 0)).toBeLessThan(1e-9);
-  expect(turned['yaw'] ?? 0).toBeGreaterThan(1);
-  // 转弯时速度方向落后于车头,表现为负的侧向速度。
-  expect(turned['lateralSpeed'] ?? 0).toBeLessThan(-0.5);
+  expect(straight['x']).toBe(0);
+  expect(right['x'] ?? 0).toBeLessThan(-5);
+  expect(left['x'] ?? 0).toBeGreaterThan(5);
+  // 右转时速度方向落后于车头,相对车身在向左滑,所以「向右的侧向速度」为负。
+  expect(right['lateralSpeed'] ?? 0).toBeLessThan(-0.5);
 });
 
 test('冲过地形会脱离地面,阴影提供落点参照', async ({ page }) => {
