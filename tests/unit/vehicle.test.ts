@@ -127,14 +127,41 @@ describe('Vehicle 加速与阻力', () => {
 });
 
 describe('Vehicle 转向', () => {
-  it('满舵会持续改变朝向,方向与输入符号一致', () => {
-    const right = makeVehicle();
-    drive(right, input({ throttle: 1, steer: 1 }), 2);
-    expect(right.yaw).toBeGreaterThan(0.5);
+  /**
+   * 断言的是「车最后跑到了哪一边」,不是 yaw 的符号。
+   *
+   * 之前那版断言「yaw 与 steer 同号」,而 yaw 正方向到底是左还是右,正是当时
+   * 搞反的那件事 —— 断言和 bug 共用同一个错误前提,83 条测试全绿也拦不住,
+   * 最后是人试玩时发现 A 和 D 反了。位置断言不依赖任何内部约定,复制不了这个错。
+   *
+   * 出生时 yaw = 0、车头朝 +Z。此时「车头的右手边」= forward × up
+   * = (0,0,1) × (0,1,0) = (-1,0,0),也就是世界的 -X。
+   */
+  it('按右转,车就往车头的右边跑(A/D 不能反)', () => {
+    // 先直线加速再打方向,并且只打 1 秒:静止起步满舵 2 秒会转过 200° 以上,
+    // 车绕回来了,终点位置就说明不了「往哪边偏」。
+    const measure = (steer: number): number => {
+      const v = makeVehicle();
+      drive(v, input({ throttle: 1 }), 3);
+      expect(v.position.x).toBe(0);
+      drive(v, input({ throttle: 1, steer }), 1);
+      return v.position.x;
+    };
 
+    expect(measure(1)).toBeLessThan(-2);
+    expect(measure(-1)).toBeGreaterThan(2);
+  });
+
+  it('左右满舵的轨迹关于出发方向镜像', () => {
+    // 这条不看方向只看对称,所以从静止起步、转多少圈都无所谓。
+    const right = makeVehicle();
     const left = makeVehicle();
+    drive(right, input({ throttle: 1, steer: 1 }), 2);
     drive(left, input({ throttle: 1, steer: -1 }), 2);
-    expect(left.yaw).toBeLessThan(-0.5);
+
+    expect(right.position.x).toBeCloseTo(-left.position.x, 6);
+    expect(right.position.z).toBeCloseTo(left.position.z, 6);
+    expect(right.yaw).toBeCloseTo(-left.yaw, 6);
   });
 
   it('高速转向率明显低于低速 —— 否则高速就变成原地打转', () => {
@@ -149,11 +176,12 @@ describe('Vehicle 转向', () => {
     expect(Math.abs(fast.yawRate)).toBeLessThan(Math.abs(slow.yawRate) * 0.65);
   });
 
-  it('转向时会有侧滑,方向与转向相反(转弯的速度落后于车头)', () => {
+  it('转向时会有侧滑,方向与转向相反(速度落后于车头)', () => {
     const v = makeVehicle();
     drive(v, input({ throttle: 1 }), 20);
     drive(v, input({ throttle: 1, steer: 1 }), 1.5);
 
+    // 右转 → 速度方向落后于车头,即相对车身在向左滑 → 「向右的侧向速度」为负。
     expect(v.lateralSpeed).toBeLessThan(-1);
   });
 
@@ -183,15 +211,16 @@ describe('Vehicle 转向', () => {
     drive(ground, input({ throttle: 1 }), 10);
     const groundYaw = ground.yaw;
     drive(ground, input({ throttle: 1, steer: 1 }), 0.5);
-    const groundDelta = ground.yaw - groundYaw;
+    const groundDelta = Math.abs(ground.yaw - groundYaw);
 
     const air = makeVehicle();
     drive(air, input({ throttle: 1 }), 10);
     air.position.y += 30;
     const airYaw = air.yaw;
     drive(air, input({ throttle: 1, steer: 1 }), 0.5);
-    const airDelta = air.yaw - airYaw;
+    const airDelta = Math.abs(air.yaw - airYaw);
 
+    // 只比大小:方向已经由上面的位置断言守住了,这里管的是「空中转不动」。
     expect(airDelta).toBeGreaterThan(0);
     expect(airDelta).toBeLessThan(groundDelta * 0.6);
   });
