@@ -1,5 +1,11 @@
 import { defineConfig } from '@playwright/test';
-import { CHROMIUM_ARGS, VIEWPORT, VISUAL_TEST_PORT, previewUrl } from './scripts/harness';
+import {
+  CHROMIUM_ARGS,
+  PREVIEW_HOST,
+  VIEWPORT,
+  VISUAL_TEST_PORT,
+  previewUrl,
+} from './scripts/harness';
 
 export default defineConfig({
   testDir: 'tests/visual',
@@ -19,11 +25,12 @@ export default defineConfig({
     launchOptions: { args: CHROMIUM_ARGS },
   },
   webServer: {
-    command: `npm run build && npm run preview -- --port ${VISUAL_TEST_PORT} --strictPort`,
+    command: `npm run build && npm run preview -- --host ${PREVIEW_HOST} --port ${VISUAL_TEST_PORT} --strictPort`,
     url: previewUrl(VISUAL_TEST_PORT),
     reuseExistingServer: !process.env['CI'],
     timeout: 180_000,
-    stdout: 'ignore',
+    // 留着 stdout:preview 起不来时,CI 日志里得看得到 vite 说了什么。
+    stdout: 'pipe',
     stderr: 'pipe',
   },
 });

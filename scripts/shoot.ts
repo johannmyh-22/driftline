@@ -6,6 +6,7 @@ import { build, preview } from 'vite';
 import {
   CHROMIUM_ARGS,
   OUTPUT_DIR,
+  PREVIEW_HOST,
   SHOOT_PORT,
   VIEWPORT,
   driveScene,
@@ -38,7 +39,7 @@ async function main(): Promise<void> {
   try {
     server = await preview({
       logLevel: 'warn',
-      preview: { port: SHOOT_PORT, strictPort: true },
+      preview: { host: PREVIEW_HOST, port: SHOOT_PORT, strictPort: true },
     });
 
     browser = await chromium.launch({ args: CHROMIUM_ARGS });
