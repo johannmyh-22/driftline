@@ -145,15 +145,20 @@ export class Course implements GroundQuery {
     const rightZ = a.tangentX;
     const lateral = (x - a.x) * rightX + (z - a.z) * rightZ;
 
-    out.lateral = lateral;
-    out.segment = bestRow;
-    out.arc = a.arc + bestT * this.layout.spacing;
+    const arc = a.arc + bestT * this.layout.spacing;
+    const applyTrackFields = (): void => {
+      out.lateral = lateral;
+      out.segment = bestRow;
+      out.arc = arc;
+      out.tangentX = a.tangentX;
+      out.tangentZ = a.tangentZ;
+      out.wallDistance = this.outerHalfWidth;
+    };
+    applyTrackFields();
 
     if (Math.abs(lateral) > this.outerHalfWidth) {
       this.fillFromTerrain(x, z, out);
-      out.lateral = lateral;
-      out.segment = bestRow;
-      out.arc = a.arc + bestT * this.layout.spacing;
+      applyTrackFields();
       return;
     }
 
@@ -349,6 +354,9 @@ export class Course implements GroundQuery {
     out.lateral = Number.POSITIVE_INFINITY;
     out.arc = 0;
     out.segment = 0;
+    out.tangentX = 0;
+    out.tangentZ = 1;
+    out.wallDistance = Number.POSITIVE_INFINITY;
   }
 
   private cellIndexAt(x: number, z: number): number {

@@ -1,11 +1,30 @@
 # driftline
 
-低多边形反重力计时赛(anti-grav time trial)。Web / TypeScript / three.js。
+反重力计时赛(anti-grav time trial)。Web / TypeScript / three.js。
 **零二进制资产** —— 所有几何体、贴图、音效都由代码生成。
+
+## 视觉方向:写实(2026-08 由人类改定)
+
+原定的「低多边形」风格**已作废**。目标改为尽量接近实拍照片的画面。
+
+零二进制资产这条**不变** —— 贴图可以在运行时用 shader / canvas 程序化生成成
+`DataTexture`,不需要任何素材文件。写实和零资产不冲突。
+
+这条方向有一条硬天花板,别拿它去要求做不到的事:
+
+- **能做到接近实拍的**:光照(IBL 环境反射、真实阴影、AO)、大气散射天空、
+  PBR 材质(程序化生成沥青 / 混凝土 / 岩石的法线与粗糙度)、色调映射与后处理。
+  这些是程序化生成最擅长、也是拉近真实感最有效的部分。
+- **做不到实拍级的**:复杂的**造型**。手写 `BufferGeometry` 做不出照片级的
+  载具外形。地形和赛道可以靠加密网格 + 法线贴图补,载具会是明显的短板。
+
+所以判断标准是:**材质与光照按实拍要求,造型受限于程序化生成**。
+
+物理同理:过弯要有速度代价、撞墙要有损失,不做「怎么开都能拽回来」的街机手感。
 
 ## 最重要的三条
 
-1. **不要引入二进制资产**。没有 `.glb` / `.fbx` / `.png` 贴图 / `.mp3`。模型用 `BufferGeometry` 手写或 primitive 组合,贴图用 canvas / shader 生成,音效用 Web Audio 合成。仓库里应该只有文本文件。
+1. **不要引入二进制资产**。没有 `.glb` / `.fbx` / `.png` 贴图 / `.mp3`。模型用 `BufferGeometry` 手写或程序化生成,贴图用 canvas / shader 生成到 `DataTexture`,音效用 Web Audio 合成。仓库里应该只有文本文件。
 2. **改完必须自己看画面**。跑 `npm run shoot` 生成截图,然后用 Read 工具读取 `tests/visual/__output__/*.png` 亲眼确认。不要只靠 `npm run build` 通过就宣称完成 —— 编译通过和画面正确是两件事。
 3. **一个里程碑一个 PR**。范围见 `docs/PLAN.md`。不要顺手做下一个里程碑的事,也不要"顺便重构"。
 
@@ -47,6 +66,7 @@ window.__DRIFTLINE_TEST__ = {
 |---|---|
 | 构建 | Vite + TypeScript(strict) |
 | 渲染 | three.js,**裸用,不要 React / R3F** |
+| 材质 | PBR(`MeshStandardMaterial` / `MeshPhysicalMaterial`),贴图运行时程序化生成 |
 | 物理 | **不用物理引擎**。自写 raycast 悬浮 + 速度积分控制器 |
 | 后处理 | `EffectComposer`:bloom + SMAA + vignette |
 | 音频 | Web Audio API 程序化合成 |

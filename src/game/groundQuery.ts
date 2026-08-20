@@ -17,6 +17,11 @@ export interface GroundHit {
   segment: number;
   /** 是否踩在可跑的路面上。平地场景恒为 true。 */
   onTrack: boolean;
+  /** 赛道前进方向的水平切线(单位向量)。撞墙时要靠它算墙面朝向。 */
+  tangentX: number;
+  tangentZ: number;
+  /** 护栏所在的横向距离。没有墙时是 Infinity。 */
+  wallDistance: number;
 }
 
 export function createGroundHit(): GroundHit {
@@ -29,6 +34,9 @@ export function createGroundHit(): GroundHit {
     arc: 0,
     segment: 0,
     onTrack: true,
+    tangentX: 0,
+    tangentZ: 1,
+    wallDistance: Number.POSITIVE_INFINITY,
   };
 }
 
