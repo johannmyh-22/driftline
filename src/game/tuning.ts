@@ -226,5 +226,37 @@ export const TRACK = {
   outOfBoundsGrace: 2.2,
 } as const;
 
+/**
+ * 大气与光照。写实感的绝大部分来自这一段,不是来自几何体。
+ *
+ * 用的是 Preetham 大气散射模型(three 自带的 Sky),而不是渐变色卡:
+ * 天空的颜色梯度、地平线的浑浊、太阳周围的辉光都是算出来的,
+ * 这些细节正是「看着像照片」和「看着像插画」的分界。
+ */
+export const SKY = {
+  /** 大气浑浊度。低 = 干净通透,高 = 雾霾感、地平线发白。 */
+  turbidity: 3.4,
+  /** 瑞利散射强度,决定天空的蓝有多深。 */
+  rayleigh: 2.1,
+  /** 米氏散射:太阳周围那圈辉光的强度与聚集度。 */
+  mieCoefficient: 0.006,
+  mieDirectionalG: 0.79,
+
+  /** 太阳仰角(度)。低角度出长影子和暖色,是最容易出「照片感」的时段。 */
+  elevationMin: 9,
+  elevationMax: 26,
+  /** 太阳方位角(度),由 seed 决定,换 seed 光就换方向。 */
+  azimuthMin: -170,
+  azimuthMax: 170,
+
+  /** 色调映射曝光。ACES 下这个值直接决定画面的明暗基调。 */
+  exposure: 0.62,
+
+  /** 太阳光强度。物理光照单位下这个数比「1」大得多是正常的。 */
+  sunIntensity: 3.4,
+  /** 环境光(IBL)强度倍率。 */
+  environmentIntensity: 1,
+} as const;
+
 /** 用于把速度归一化成 0..1(FOV、转向衰减都靠它)。 */
 export const REFERENCE_TOP_SPEED = 88;
