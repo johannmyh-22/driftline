@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
-import { Course, createCourseHit } from '../../src/game/course';
+import { Course } from '../../src/game/course';
+import { createGroundHit } from '../../src/game/groundQuery';
 import { generateTrack } from '../../src/game/trackLayout';
 
 function makeCourse(seed = 42): Course {
@@ -11,7 +12,7 @@ function makeCourse(seed = 42): Course {
 describe('Course 与渲染网格的一致性', () => {
   it('物理查询落在渲染网格的三角面上 —— 车贴合的面就是看到的面', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
     const { positions } = course.buildRibbonTriangles();
     const triangles = positions.length / 9;
 
@@ -39,7 +40,7 @@ describe('Course 与渲染网格的一致性', () => {
 
   it('法线是单位向量且朝上', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
     const rng = new Rng(7);
 
     for (let n = 0; n < 500; n++) {
@@ -59,7 +60,7 @@ describe('Course 与渲染网格的一致性', () => {
 describe('Course 横向定位', () => {
   it('中心线上横向距离接近 0,且判定在赛道上', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
 
     for (const sample of course.layout.samples) {
       course.sample(sample.x, sample.z, hit);
@@ -70,7 +71,7 @@ describe('Course 横向定位', () => {
 
   it('横向距离的正方向是车头的右手边', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
     const sample = course.layout.samples[40];
     if (sample === undefined) {
       throw new Error('采样点缺失');
@@ -87,7 +88,7 @@ describe('Course 横向定位', () => {
 
   it('离开条带外缘就不算在赛道上', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
     const sample = course.layout.samples[80];
     if (sample === undefined) {
       throw new Error('采样点缺失');
@@ -100,7 +101,7 @@ describe('Course 横向定位', () => {
 
   it('弧长沿赛道单调推进,一圈回到起点', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
     const samples = course.layout.samples;
 
     let previous = -1;
@@ -120,8 +121,8 @@ describe('Course 横向定位', () => {
 describe('Course 侧倾', () => {
   it('弯道外侧比内侧高', () => {
     const course = makeCourse();
-    const inner = createCourseHit();
-    const outer = createCourseHit();
+    const inner = createGroundHit();
+    const outer = createGroundHit();
 
     let checked = 0;
     for (const sample of course.layout.samples) {
@@ -150,7 +151,7 @@ describe('Course 侧倾', () => {
 
   it('侧倾处法线跟着倾斜,不是一直朝正上方', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
 
     let maxTilt = 0;
     for (const sample of course.layout.samples) {
@@ -166,7 +167,7 @@ describe('Course 确定性与性能', () => {
   it('同 seed 查询结果完全一致', () => {
     const read = (): number[] => {
       const course = makeCourse(9);
-      const hit = createCourseHit();
+      const hit = createGroundHit();
       const out: number[] = [];
       const rng = new Rng(3);
       for (let i = 0; i < 200; i++) {
@@ -180,7 +181,7 @@ describe('Course 确定性与性能', () => {
 
   it('查询够快 —— 每帧要问几十次', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
     const rng = new Rng(5);
 
     const started = Date.now();
@@ -194,7 +195,7 @@ describe('Course 确定性与性能', () => {
 
   it('任意位置都不产生 NaN', () => {
     const course = makeCourse();
-    const hit = createCourseHit();
+    const hit = createGroundHit();
     const rng = new Rng(13);
 
     for (let i = 0; i < 2000; i++) {

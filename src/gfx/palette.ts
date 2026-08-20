@@ -11,6 +11,11 @@ export interface Palette {
   nadir: Color;
   ground: Color;
   gridMajor: Color;
+  road: Color;
+  roadEdge: Color;
+  shoulder: Color;
+  guardrail: Color;
+  startLine: Color;
   craftHull: Color;
   craftAccent: Color;
   craftGlow: Color;
@@ -28,6 +33,13 @@ export function createPalette(rng: Rng): Palette {
     horizon: hsl(wrap(baseHue + 0.08), 0.72, 0.58),
     nadir: hsl(wrap(baseHue + 0.12), 0.35, 0.1),
     ground: hsl(groundHue, 0.45, 0.17),
+    // 路面刻意压得比地形更暗、更去饱和:赛道要在画面里读作「一条带子」,
+    // 靠的是它和周围地形的明度差,不是它自己有多花。
+    road: hsl(wrap(groundHue + 0.06), 0.1, 0.2),
+    roadEdge: hsl(wrap(baseHue + 0.5), 0.85, 0.72),
+    shoulder: hsl(wrap(groundHue + 0.02), 0.3, 0.3),
+    guardrail: hsl(wrap(baseHue + 0.5), 0.7, 0.55),
+    startLine: hsl(0, 0, 0.88),
     gridMajor: hsl(wrap(groundHue + 0.5), 0.9, 0.72),
     // 载具取地面的补色:不管 seed 转到哪儿,车都不会陷进背景里。
     craftHull: hsl(wrap(groundHue + 0.5), 0.5, 0.56),

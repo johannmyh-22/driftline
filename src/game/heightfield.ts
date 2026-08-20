@@ -1,16 +1,5 @@
 import type { Rng } from '../core/rng';
-
-/** 一次向下地面查询的结果。复用同一个对象,别在每帧路径上新建。 */
-export interface GroundHit {
-  height: number;
-  normalX: number;
-  normalY: number;
-  normalZ: number;
-}
-
-export function createGroundHit(): GroundHit {
-  return { height: 0, normalX: 0, normalY: 1, normalZ: 0 };
-}
+import type { GroundHit, GroundQuery } from './groundQuery';
 
 interface Ramp {
   x: number;
@@ -46,7 +35,7 @@ const RIM_HEIGHT = 14;
  * 用解析高度场而不是对 mesh 做 `Raycaster`:后者每次相交都要分配对象,
  * 60Hz 下的 GC 抖动看得见,而且结果依赖 BVH 实现细节、不好复现。
  */
-export class Heightfield {
+export class Heightfield implements GroundQuery {
   readonly size = SIZE;
   readonly cells = CELLS;
   readonly step = SIZE / CELLS;
@@ -116,6 +105,12 @@ export class Heightfield {
     out.normalX = nx * inv;
     out.normalY = inv;
     out.normalZ = nz * inv;
+
+    // 平地场景没有赛道概念:整块地都算「路面」,没有出界也没有弧长。
+    out.onTrack = true;
+    out.lateral = 0;
+    out.arc = 0;
+    out.segment = 0;
   }
 
   /**

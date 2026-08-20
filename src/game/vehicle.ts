@@ -1,7 +1,7 @@
 import { Matrix4, Quaternion, Vector3 } from 'three';
 import type { InputFrame } from '../core/input';
 import { clamp, damp, lerp, normalize01 } from '../core/mathx';
-import { type GroundHit, type Heightfield, createGroundHit } from './heightfield';
+import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
 import { REFERENCE_TOP_SPEED, VEHICLE } from './tuning';
 
 // 每帧路径上的临时量,全部提到模块作用域复用。60Hz 下新建 Vector3 的 GC 抖动看得见。
@@ -43,6 +43,12 @@ export class Vehicle {
   grounded = false;
   /** 当前离地高度(车体原点到地面)。 */
   clearance = 0;
+  /** 是否踩在可跑的路面上。出界判定和圈计时看它。 */
+  onTrack = true;
+  /** 到赛道中心线的有符号横向距离,正值在右侧。 */
+  lateral = 0;
+  /** 沿赛道的弧长位置(米)。 */
+  arc = 0;
   /**
    * 侧向速度,**正值 = 向驾驶员右手边滑**。漂移感就看它。
    *
@@ -50,12 +56,12 @@ export class Vehicle {
    */
   lateralSpeed = 0;
 
-  private readonly field: Heightfield;
+  private readonly field: GroundQuery;
   private readonly hit: GroundHit = createGroundHit();
   private readonly surfaceUp = new Vector3(0, 1, 0);
   private smoothedForwardAccel = 0;
 
-  constructor(field: Heightfield) {
+  constructor(field: GroundQuery) {
     this.field = field;
     this.reset();
   }
@@ -87,6 +93,9 @@ export class Vehicle {
     this.field.sample(this.position.x, this.position.z, this.hit);
     this.clearance = this.position.y - this.hit.height;
     this.grounded = this.clearance < VEHICLE.hoverRange;
+    this.onTrack = this.hit.onTrack;
+    this.lateral = this.hit.lateral;
+    this.arc = this.hit.arc;
 
     forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     rightward.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw));

@@ -1,6 +1,6 @@
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import { clamp, damp, lerp, normalize01 } from '../core/mathx';
-import { type GroundHit, type Heightfield, createGroundHit } from './heightfield';
+import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
 import { CAMERA, REFERENCE_TOP_SPEED } from './tuning';
 import type { Vehicle } from './vehicle';
 
@@ -26,7 +26,7 @@ const rollQuat = new Quaternion();
 export class ChaseCamera {
   readonly camera: PerspectiveCamera;
 
-  private readonly field: Heightfield;
+  private readonly field: GroundQuery;
   private readonly hit: GroundHit = createGroundHit();
 
   private readonly position = new Vector3();
@@ -39,7 +39,7 @@ export class ChaseCamera {
   private prevFov: number = CAMERA.fovBase;
   private prevRoll = 0;
 
-  constructor(field: Heightfield, aspect = 16 / 9) {
+  constructor(field: GroundQuery, aspect = 16 / 9) {
     this.field = field;
     this.camera = new PerspectiveCamera(CAMERA.fovBase, aspect, 0.1, 3000);
   }

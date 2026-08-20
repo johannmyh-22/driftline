@@ -1,6 +1,6 @@
 import { BufferAttribute, BufferGeometry, Mesh, MeshBasicMaterial } from 'three';
 import { clamp, lerp } from '../core/mathx';
-import { type GroundHit, type Heightfield, createGroundHit } from '../game/heightfield';
+import { type GroundHit, type GroundQuery, createGroundHit } from '../game/groundQuery';
 
 const SEGMENTS = 24;
 /** 离地多高时完全淡出。再高的落点参照也没有意义了。 */
@@ -57,7 +57,7 @@ export class GroundShadow {
     this.mesh.renderOrder = 1;
   }
 
-  update(field: Heightfield, x: number, z: number, y: number): void {
+  update(field: GroundQuery, x: number, z: number, y: number): void {
     field.sample(x, z, this.hit);
     const altitude = Math.max(0, y - this.hit.height);
     const t = clamp(altitude / FADE_HEIGHT, 0, 1);

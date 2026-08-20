@@ -1,4 +1,5 @@
 import type { Rng } from '../core/rng';
+import type { GroundHit, GroundQuery } from './groundQuery';
 import { TerrainNoise } from './terrainNoise';
 import type { TrackLayout } from './trackLayout';
 import { TRACK } from './tuning';
@@ -7,34 +8,6 @@ import { TRACK } from './tuning';
 const LATERAL_DIVISIONS = 10;
 /** 空间索引的格子边长(米)。 */
 const INDEX_CELL = 24;
-
-export interface CourseHit {
-  height: number;
-  normalX: number;
-  normalY: number;
-  normalZ: number;
-  /** 到中心线的有符号横向距离,**正值在赛道右侧**。 */
-  lateral: number;
-  /** 沿赛道的弧长位置(米),从起跑线算起。 */
-  arc: number;
-  /** 最近的中心线采样下标。 */
-  segment: number;
-  /** 是否踩在赛道条带(含路肩)上。 */
-  onTrack: boolean;
-}
-
-export function createCourseHit(): CourseHit {
-  return {
-    height: 0,
-    normalX: 0,
-    normalY: 1,
-    normalZ: 0,
-    lateral: 0,
-    arc: 0,
-    segment: 0,
-    onTrack: false,
-  };
-}
 
 /**
  * 赛道 + 赛道外地形,合成一个统一的向下查询。
@@ -48,7 +21,7 @@ export function createCourseHit(): CourseHit {
  * 赛道外的地形是噪声函数 + 有限差分法线,**没有做到面级精确**。那里是出界区,
  * 踩上去会被重置回检查点,不值得为它多维护一张网格。
  */
-export class Course {
+export class Course implements GroundQuery {
   readonly layout: TrackLayout;
   readonly halfWidth: number;
   /** 含路肩的外缘半宽。超出它就算离开条带。 */
@@ -101,19 +74,50 @@ export class Course {
       minZ = Math.min(minZ, this.vz[i] ?? 0);
       maxZ = Math.max(maxZ, this.vz[i] ?? 0);
     }
-    this.gridMinX = minX - INDEX_CELL;
-    this.gridMinZ = minZ - INDEX_CELL;
-    this.gridCols = Math.ceil((maxX - minX) / INDEX_CELL) + 3;
-    this.gridRows = Math.ceil((maxZ - minZ) / INDEX_CELL) + 3;
+    const pad = TRACK.terrainFlattenRadius + INDEX_CELL;
+    this.gridMinX = minX - pad;
+    this.gridMinZ = minZ - pad;
+    this.gridCols = Math.ceil((maxX - minX + pad * 2) / INDEX_CELL) + 2;
+    this.gridRows = Math.ceil((maxZ - minZ + pad * 2) / INDEX_CELL) + 2;
 
     const { cellStart, cellItems } = this.buildIndex();
     this.cellStart = cellStart;
     this.cellItems = cellItems;
   }
 
-  /** 赛道外地形的高度。条带内也能问,用来做路肩到地形的过渡。 */
-  terrainHeightAt(x: number, z: number): number {
-    return this.terrain.heightAt(x, z);
+  /**
+   * 赛道外的地面高度,**已经按走廊压平**。
+   *
+   * 地形网格和路肩过渡都必须用它而不是裸噪声,否则赛道边缘会立起一堵墙。
+   */
+  groundHeightAt(x: number, z: number): number {
+    const row = this.nearestRow(x, z);
+    const sample = row >= 0 ? this.layout.samples[row] : undefined;
+    if (sample === undefined) {
+      return this.terrain.heightAt(x, z);
+    }
+    const lateral = Math.abs(
+      (x - sample.x) * -sample.tangentZ + (z - sample.z) * sample.tangentX,
+    );
+    return this.blendTerrain(sample.y, lateral, x, z);
+  }
+
+  /**
+   * 走廊内把地形高度压向赛道高度。
+   *
+   * 条带范围内(lateral <= 外缘半宽)直接返回赛道高度,而不是裸噪声 ——
+   * 分段返回不同东西会在条带外缘留下一道高度断崖,车开过去会被弹飞。
+   *
+   * 不走空间索引,由调用方把所在的中心线采样传进来:条带网格是在索引建好
+   * **之前**构造的,那时候查索引会直接崩。
+   */
+  private blendTerrain(trackY: number, lateral: number, x: number, z: number): number {
+    const blend = smoothstep(
+      this.outerHalfWidth,
+      this.outerHalfWidth + TRACK.terrainFlattenRadius,
+      lateral,
+    );
+    return blend <= 0 ? trackY : trackY + (this.terrain.heightAt(x, z) - trackY) * blend;
   }
 
   /**
@@ -121,39 +125,9 @@ export class Course {
    *
    * 全程不分配对象 —— 它在每帧路径上,而且贴地阴影一帧要问二十几次。
    */
-  sample(x: number, z: number, out: CourseHit): void {
-    const cell = this.cellIndexAt(x, z);
-    let bestRow = -1;
-    let bestDistSq = Infinity;
-    let bestT = 0;
-
-    if (cell >= 0) {
-      const start = this.cellStart[cell] ?? 0;
-      const end = this.cellStart[cell + 1] ?? start;
-      for (let k = start; k < end; k++) {
-        const row = this.cellItems[k] ?? 0;
-        const a = this.layout.samples[row];
-        const b = this.layout.samples[(row + 1) % this.rows];
-        if (a === undefined || b === undefined) {
-          continue;
-        }
-
-        const abx = b.x - a.x;
-        const abz = b.z - a.z;
-        const lenSq = abx * abx + abz * abz;
-        const t =
-          lenSq > 0 ? clamp01(((x - a.x) * abx + (z - a.z) * abz) / lenSq) : 0;
-        const px = a.x + abx * t;
-        const pz = a.z + abz * t;
-        const distSq = (x - px) * (x - px) + (z - pz) * (z - pz);
-
-        if (distSq < bestDistSq) {
-          bestDistSq = distSq;
-          bestRow = row;
-          bestT = t;
-        }
-      }
-    }
+  sample(x: number, z: number, out: GroundHit): void {
+    const bestRow = this.nearestRow(x, z);
+    const bestT = this.nearestT;
 
     if (bestRow < 0) {
       this.fillFromTerrain(x, z, out);
@@ -228,6 +202,48 @@ export class Course {
     return { positions, lateral };
   }
 
+  /** 最近一次 nearestRow 的段内参数。和返回值配套使用,避免多返回一个对象。 */
+  private nearestT = 0;
+
+  /** 用空间索引找最近的中心线段。找不到返回 -1。 */
+  private nearestRow(x: number, z: number): number {
+    const cell = this.cellIndexAt(x, z);
+    this.nearestT = 0;
+    if (cell < 0) {
+      return -1;
+    }
+
+    let bestRow = -1;
+    let bestDistSq = Infinity;
+    const start = this.cellStart[cell] ?? 0;
+    const end = this.cellStart[cell + 1] ?? start;
+
+    for (let k = start; k < end; k++) {
+      const row = this.cellItems[k] ?? 0;
+      const a = this.layout.samples[row];
+      const b = this.layout.samples[(row + 1) % this.rows];
+      if (a === undefined || b === undefined) {
+        continue;
+      }
+
+      const abx = b.x - a.x;
+      const abz = b.z - a.z;
+      const lenSq = abx * abx + abz * abz;
+      const t = lenSq > 0 ? clamp01(((x - a.x) * abx + (z - a.z) * abz) / lenSq) : 0;
+      const px = a.x + abx * t;
+      const pz = a.z + abz * t;
+      const distSq = (x - px) * (x - px) + (z - pz) * (z - pz);
+
+      if (distSq < bestDistSq) {
+        bestDistSq = distSq;
+        bestRow = row;
+        this.nearestT = t;
+      }
+    }
+
+    return bestRow;
+  }
+
   private vertexIndex(row: number, col: number): number {
     return (row % this.rows) * this.columns + col;
   }
@@ -256,8 +272,9 @@ export class Course {
         if (overshoot > 0) {
           // 路肩:从路面边缘平滑过渡到地形高度,不留台阶。
           const edgeY = sample.y + Math.sign(d) * this.halfWidth * tanBank;
+          const target = this.blendTerrain(sample.y, Math.abs(d), px, pz);
           const blend = smoothstep(0, TRACK.shoulderWidth, overshoot);
-          y = edgeY + (this.terrain.heightAt(px, pz) - edgeY) * blend;
+          y = edgeY + (target - edgeY) * blend;
         }
 
         const index = this.vertexIndex(row, col);
@@ -274,7 +291,7 @@ export class Course {
     row: number,
     t: number,
     lateral: number,
-    out: CourseHit,
+    out: GroundHit,
   ): void {
     const raw = (lateral + this.outerHalfWidth) / this.lateralStep;
     let col = Math.floor(raw);
@@ -317,11 +334,11 @@ export class Course {
     out.height = ny !== 0 ? ay - (nx * (x - ax) + nz * (z - az)) / ny : ay;
   }
 
-  private fillFromTerrain(x: number, z: number, out: CourseHit): void {
-    const h = this.terrain.heightAt(x, z);
+  private fillFromTerrain(x: number, z: number, out: GroundHit): void {
+    const h = this.groundHeightAt(x, z);
     const e = 1.5;
-    const dx = (this.terrain.heightAt(x + e, z) - this.terrain.heightAt(x - e, z)) / (2 * e);
-    const dz = (this.terrain.heightAt(x, z + e) - this.terrain.heightAt(x, z - e)) / (2 * e);
+    const dx = (this.groundHeightAt(x + e, z) - this.groundHeightAt(x - e, z)) / (2 * e);
+    const dz = (this.groundHeightAt(x, z + e) - this.groundHeightAt(x, z - e)) / (2 * e);
     const inv = 1 / Math.hypot(-dx, 1, -dz);
 
     out.height = h;
@@ -368,10 +385,13 @@ export class Course {
           }
         }
 
-        const x0 = Math.floor((minX - this.gridMinX) / INDEX_CELL);
-        const x1 = Math.floor((maxX - this.gridMinX) / INDEX_CELL);
-        const z0 = Math.floor((minZ - this.gridMinZ) / INDEX_CELL);
-        const z1 = Math.floor((maxZ - this.gridMinZ) / INDEX_CELL);
+        // 索引范围要覆盖压平走廊:走廊内的点也得找得到最近的中心线段,
+        // 否则那一圈会掉回裸噪声,压平就断在半路。
+        const pad = TRACK.terrainFlattenRadius;
+        const x0 = Math.floor((minX - pad - this.gridMinX) / INDEX_CELL);
+        const x1 = Math.floor((maxX + pad - this.gridMinX) / INDEX_CELL);
+        const z0 = Math.floor((minZ - pad - this.gridMinZ) / INDEX_CELL);
+        const z1 = Math.floor((maxZ + pad - this.gridMinZ) / INDEX_CELL);
 
         for (let cz = z0; cz <= z1; cz++) {
           for (let cx = x0; cx <= x1; cx++) {

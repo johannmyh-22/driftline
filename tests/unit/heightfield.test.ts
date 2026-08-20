@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
-import { Heightfield, createGroundHit } from '../../src/game/heightfield';
+import { createGroundHit } from '../../src/game/groundQuery';
+import { Heightfield } from '../../src/game/heightfield';
 
 function field(seed = 42): Heightfield {
   return new Heightfield(new Rng(seed));

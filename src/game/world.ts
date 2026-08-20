@@ -14,12 +14,18 @@ import { createGround } from '../gfx/ground';
 import { createPalette } from '../gfx/palette';
 import { GroundShadow } from '../gfx/shadowBlob';
 import { createSky } from '../gfx/sky';
+import { createTerrainMesh } from '../gfx/terrainMesh';
+import { createTrackMesh } from '../gfx/trackMesh';
 import { ChaseCamera } from './chaseCamera';
+import { Course } from './course';
+import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
+import { type TrackLayout, generateTrack } from './trackLayout';
 import { Vehicle } from './vehicle';
 
 const shownPosition = new Vector3();
 const shownOrientation = new Quaternion();
+const mapCentre = new Vector3();
 
 
 /** 固定机位:回归截图用,和玩家实际在用的跟随机位分开。 */
@@ -29,18 +35,26 @@ const FIXED_PRESETS: Readonly<Record<string, { back: number; side: number; up: n
   top: { back: 0.01, side: 0, up: 22 },
 };
 
-export const CAMERA_PRESET_NAMES = ['chase', ...Object.keys(FIXED_PRESETS)];
+/** 俯瞰整条赛道的调试机位。M2 的构图和自交问题,只有从这个高度才看得出来。 */
+const MAP_PRESET = 'map';
+
+export const CAMERA_PRESET_NAMES = ['chase', ...Object.keys(FIXED_PRESETS), MAP_PRESET];
 
 /**
  * M1 的世界:一块带跳台和起伏的大平地 + 一辆悬浮载具 + 跟随相机。
  *
  * 只做手感,不做内容 —— 没有赛道、检查点、计时。那些是 M2 / M4。
  */
+/** 场地种类。`flat` 是 M1 那块带跳台的平地,留着单独调手感用。 */
+export type CourseKind = 'race' | 'flat';
+
 export class World {
   readonly scene = new Scene();
-  readonly field: Heightfield;
+  readonly field: GroundQuery;
   readonly vehicle: Vehicle;
   readonly chase: ChaseCamera;
+  /** 赛道布局。`flat` 场地下是 null。 */
+  readonly track: TrackLayout | null;
 
   private readonly craft: Group;
   private readonly shadow = new GroundShadow();
@@ -50,16 +64,29 @@ export class World {
   private readonly fixedCamera: PerspectiveCamera;
   private readonly input: InputFrame = createInputFrame();
 
-  constructor(rng: Rng) {
+  constructor(rng: Rng, kind: CourseKind = 'race') {
     const palette = createPalette(rng.fork());
 
-    this.field = new Heightfield(rng.fork());
+    this.scene.add(createSky(palette));
+
+    if (kind === 'race') {
+      const layout = generateTrack(rng.fork());
+      const course = new Course(layout, rng.fork());
+      this.track = layout;
+      this.field = course;
+      this.scene.add(createTerrainMesh(course, rng.fork(), palette));
+      this.scene.add(createTrackMesh(course, rng.fork(), palette));
+    } else {
+      const field = new Heightfield(rng.fork());
+      this.track = null;
+      this.field = field;
+      this.scene.add(createGround(field, rng.fork(), palette));
+    }
+
     this.vehicle = new Vehicle(this.field);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
-
-    this.scene.add(createSky(palette));
-    this.scene.add(createGround(this.field, rng.fork(), palette));
+    this.spawnAtStart();
 
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft);
@@ -80,6 +107,17 @@ export class World {
     this.prevOrientation.copy(this.vehicle.orientation);
     this.chase.snapTo(this.vehicle);
     this.present(1);
+  }
+
+  /** 把载具放到起跑线,车头朝赛道前进方向。平地场景就是原点朝 +Z。 */
+  spawnAtStart(): void {
+    const start = this.track?.samples[0];
+    if (start === undefined) {
+      this.vehicle.reset();
+      return;
+    }
+    // forward = (sin yaw, 0, cos yaw),所以由切线反解 yaw 用 atan2(x, z)。
+    this.vehicle.reset(start.x, start.z, Math.atan2(start.tangentX, start.tangentZ));
   }
 
   get camera(): PerspectiveCamera {
@@ -115,7 +153,7 @@ export class World {
   }
 
   setCameraPreset(preset: string): void {
-    if (preset !== 'chase' && FIXED_PRESETS[preset] === undefined) {
+    if (preset !== 'chase' && preset !== MAP_PRESET && FIXED_PRESETS[preset] === undefined) {
       throw new RangeError(`未知机位 "${preset}",可用:${CAMERA_PRESET_NAMES.join(', ')}`);
     }
     this.preset = preset;
@@ -137,7 +175,44 @@ export class World {
     this.fixedCamera.updateProjectionMatrix();
   }
 
+  /** 把整条赛道框进画面。构图和自交这类问题只有从这个高度才看得出来。 */
+  private frameWholeTrack(fallback: Vector3): void {
+    const samples = this.track?.samples;
+    if (samples === undefined || samples.length === 0) {
+      this.fixedCamera.position.set(fallback.x, fallback.y + 400, fallback.z + 1);
+      this.fixedCamera.up.set(0, 1, 0);
+      this.fixedCamera.lookAt(fallback);
+      return;
+    }
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (const sample of samples) {
+      minX = Math.min(minX, sample.x);
+      maxX = Math.max(maxX, sample.x);
+      minZ = Math.min(minZ, sample.z);
+      maxZ = Math.max(maxZ, sample.z);
+    }
+
+    const centreX = (minX + maxX) / 2;
+    const centreZ = (minZ + maxZ) / 2;
+    const span = Math.max(maxX - minX, maxZ - minZ);
+
+    mapCentre.set(centreX, 0, centreZ);
+    // 略微偏后而不是正上方:纯垂直俯视时 lookAt 的 roll 没有定义,画面会莫名歪掉。
+    this.fixedCamera.position.set(centreX, span * 0.95, centreZ + span * 0.28);
+    this.fixedCamera.up.set(0, 1, 0);
+    this.fixedCamera.lookAt(mapCentre);
+  }
+
   private updateFixedCamera(target: Vector3): void {
+    if (this.preset === MAP_PRESET) {
+      this.frameWholeTrack(target);
+      return;
+    }
+
     const config = FIXED_PRESETS[this.preset];
     if (config === undefined) {
       return;
