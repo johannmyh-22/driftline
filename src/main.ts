@@ -9,7 +9,7 @@ import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
 import { installTestApi } from './core/testApi';
 import { Readout } from './game/hud';
-import { World } from './game/world';
+import { type CourseKind, World } from './game/world';
 import './style.css';
 
 const DEFAULT_SEED = 1337;
@@ -17,6 +17,8 @@ const DEFAULT_SEED = 1337;
 const params = new URLSearchParams(window.location.search);
 const testMode = params.get('test') === '1';
 const seed = parseSeed(params.get('seed'), DEFAULT_SEED);
+// ?course=flat 切回 M1 那块带跳台的平地。调手感时没有赛道干扰更干净。
+const courseKind: CourseKind = params.get('course') === 'flat' ? 'flat' : 'race';
 
 const mount = document.querySelector<HTMLDivElement>('#app');
 if (mount === null) {
@@ -40,7 +42,7 @@ function boot(container: HTMLDivElement): void {
   renderer.setPixelRatio(testMode ? 1 : Math.min(window.devicePixelRatio, 2));
   container.append(renderer.domElement);
 
-  const world = new World(new Rng(seed));
+  const world = new World(new Rng(seed), courseKind);
 
   const scripted = new ScriptedInput();
   const keyboard = testMode ? null : new KeyboardInput();
@@ -56,7 +58,7 @@ function boot(container: HTMLDivElement): void {
     },
     render: (alpha) => {
       world.present(alpha);
-      readout?.update(world.vehicle.groundSpeed);
+      readout?.update(world.vehicle.groundSpeed, world.race);
       renderer.render(world.scene, world.camera);
     },
   });
@@ -94,7 +96,7 @@ function boot(container: HTMLDivElement): void {
       },
       reset: () => {
         scripted.reset();
-        world.vehicle.reset();
+        world.spawnAtStart();
         world.chase.snapTo(world.vehicle);
         world.present(1);
       },
@@ -111,6 +113,15 @@ function boot(container: HTMLDivElement): void {
         clearance: world.vehicle.clearance,
         lateralSpeed: world.vehicle.lateralSpeed,
         grounded: world.vehicle.grounded ? 1 : 0,
+        onTrack: world.vehicle.onTrack ? 1 : 0,
+        lateral: world.vehicle.lateral,
+        arc: world.vehicle.arc,
+        laps: world.race?.laps ?? 0,
+        lapTime: world.race?.lapTime ?? 0,
+        lastLapTime: world.race?.lastLapTime ?? 0,
+        bestLapTime: world.race?.bestLapTime ?? 0,
+        checkpoint: world.race?.lastCheckpoint ?? 0,
+        resets: world.race?.resets ?? 0,
       }),
     });
 

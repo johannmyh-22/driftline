@@ -47,7 +47,9 @@ export function createSky(palette: Palette): Mesh {
 
   const sky = new Mesh(new SphereGeometry(1, 32, 16), material);
   sky.name = 'sky';
-  sky.scale.setScalar(400);
+  // 半径要大过任何机位的高度。M2 的俯瞰机位能升到一千多米,
+  // 球太小的话相机会跑到球外面,画面四角直接露黑。
+  sky.scale.setScalar(2600);
   // 天空永远在最里层且不参与裁剪:相机怎么转都不该看到边界。
   sky.renderOrder = -1;
   sky.frustumCulled = false;

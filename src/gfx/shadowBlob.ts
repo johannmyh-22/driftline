@@ -1,14 +1,23 @@
 import { BufferAttribute, BufferGeometry, Mesh, MeshBasicMaterial } from 'three';
 import { clamp, lerp } from '../core/mathx';
-import { type GroundHit, type Heightfield, createGroundHit } from '../game/heightfield';
+import { type GroundHit, type GroundQuery, createGroundHit } from '../game/groundQuery';
 
 const SEGMENTS = 24;
 /** 离地多高时完全淡出。再高的落点参照也没有意义了。 */
 const FADE_HEIGHT = 14;
 const RADIUS_GROUNDED = 1.7;
 const RADIUS_HIGH = 3.8;
-/** 抬离地面的量。只用来避开共面闪烁,肉眼看不出来。 */
-const LIFT = 0.12;
+/**
+ * 抬离地面的量。
+ *
+ * 赛道上取小值即可:条带网格和物理查询用的是同一张顶点表,两者严格一致,
+ * 抬高只为避开共面闪烁。
+ *
+ * 赛道外必须给大得多的余量:地形网格按 9 米格线性化,而阴影是按平滑的噪声
+ * 函数逐顶点采样的,斜坡上阴影会陷到三角面下面被裁掉,表现为一道细月牙。
+ */
+const LIFT_ON_TRACK = 0.12;
+const LIFT_OFF_TRACK = 1.1;
 
 /**
  * 贴地阴影。不是真阴影 —— 是一块跟着车走、按离地高度缩放淡出的圆片。
@@ -57,8 +66,9 @@ export class GroundShadow {
     this.mesh.renderOrder = 1;
   }
 
-  update(field: Heightfield, x: number, z: number, y: number): void {
+  update(field: GroundQuery, x: number, z: number, y: number): void {
     field.sample(x, z, this.hit);
+    const lift = this.hit.onTrack ? LIFT_ON_TRACK : LIFT_OFF_TRACK;
     const altitude = Math.max(0, y - this.hit.height);
     const t = clamp(altitude / FADE_HEIGHT, 0, 1);
 
@@ -71,7 +81,7 @@ export class GroundShadow {
     const radius = lerp(RADIUS_GROUNDED, RADIUS_HIGH, t);
 
     this.positions[0] = x;
-    this.positions[1] = this.hit.height + LIFT;
+    this.positions[1] = this.hit.height + lift;
     this.positions[2] = z;
 
     for (let i = 0; i < SEGMENTS; i++) {
@@ -82,7 +92,7 @@ export class GroundShadow {
 
       const o = (i + 1) * 3;
       this.positions[o] = px;
-      this.positions[o + 1] = this.hit.height + LIFT;
+      this.positions[o + 1] = this.hit.height + lift;
       this.positions[o + 2] = pz;
     }
 
