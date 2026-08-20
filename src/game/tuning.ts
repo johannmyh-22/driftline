@@ -171,6 +171,12 @@ export const TRACK = {
    */
   maxBankRatePerMeter: 0.003,
 
+  /** 路肩宽度(米)。路面边缘到地形之间的过渡带,压上去还能开,但会掉速。 */
+  shoulderWidth: 7,
+  /** 赛道外地形的噪声特征尺度与幅度(米)。 */
+  terrainScale: 260,
+  terrainAmplitude: 34,
+
   /** 检查点数量。出界重置回最近的那个。 */
   checkpointCount: 24,
   /** 离中心线超过这个距离就算出界。给了半宽之外的缓冲,压到路肩不会被立刻拽回去。 */
