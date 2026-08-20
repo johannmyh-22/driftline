@@ -84,8 +84,11 @@ export function createPalette(rng: Rng): Palette {
     guardrail: linear(0.32, 0.33, 0.35),
     startLine: linear(0.5, 0.49, 0.46),
 
-    craftHull: new Color().setHSL(theme.craftHue, 0.18, 0.34),
-    craftAccent: new Color().setHSL(theme.craftHue, 0.3, 0.5),
+    // 金属材质下基色是**反射的色调**而不是亮度,所以要比直觉暗:
+    // 上一版取 0.34 亮度,配上高强度太阳和 IBL 直接过曝成一片惨白。
+    // 电介质车漆下基色直接决定车身颜色,可以给足饱和度。
+    craftHull: new Color().setHSL(theme.craftHue, 0.55, 0.16),
+    craftAccent: new Color().setHSL(theme.craftHue, 0.45, 0.26),
     craftGlow: new Color().setHSL(0.55, 0.9, 0.62),
   };
 }

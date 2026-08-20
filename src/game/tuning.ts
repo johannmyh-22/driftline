@@ -289,6 +289,11 @@ export const SKY = {
   sunIntensity: 3.4,
   /** 环境光(IBL)强度倍率。 */
   environmentIntensity: 1,
+
+  /** 阴影图分辨率。翻倍会让 SwiftShader 的截图回路明显变慢,先取够用的值。 */
+  shadowMapSize: 1024,
+  /** 阴影相机覆盖载具周围多少米(半宽)。越小越锐,但远处就没影子了。 */
+  shadowExtent: 70,
 } as const;
 
 /** 用于把速度归一化成 0..1(FOV、转向衰减都靠它)。 */

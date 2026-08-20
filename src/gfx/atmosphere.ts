@@ -59,6 +59,27 @@ export class Atmosphere {
     this.sunLight = new DirectionalLight(0xffffff, SKY.sunIntensity);
     this.sunLight.name = 'sun';
     this.sunLight.position.copy(this.sunDirection).multiplyScalar(600);
+
+    /*
+     * 阴影相机只罩住载具周围一小块。
+     *
+     * 赛道横跨一千多米,用一张阴影图盖全场的话每个像素要负责好几米,
+     * 车影会糊成一坨。跟着车走、只覆盖 SHADOW_EXTENT 米,阴影才够锐。
+     * 远处没有投影 —— 那里本来也看不出有没有。
+     */
+    this.sunLight.castShadow = true;
+    this.sunLight.shadow.mapSize.set(SKY.shadowMapSize, SKY.shadowMapSize);
+    const shadowCamera = this.sunLight.shadow.camera;
+    shadowCamera.left = -SKY.shadowExtent;
+    shadowCamera.right = SKY.shadowExtent;
+    shadowCamera.top = SKY.shadowExtent;
+    shadowCamera.bottom = -SKY.shadowExtent;
+    shadowCamera.near = 1;
+    shadowCamera.far = 1400;
+    shadowCamera.updateProjectionMatrix();
+    // 低仰角太阳下,影子在接触点附近容易出现自遮挡条纹,normalBias 比 bias 更稳。
+    this.sunLight.shadow.normalBias = 0.06;
+    this.sunLight.shadow.bias = -0.0004;
   }
 
   /**
@@ -88,6 +109,18 @@ export class Atmosphere {
 
     this.environmentTexture = target.texture;
     return target.texture;
+  }
+
+  /** 让阴影相机跟着载具走。每帧调用,不分配对象。 */
+  followShadow(x: number, y: number, z: number): void {
+    this.sunLight.target.position.set(x, y, z);
+    this.sunLight.target.updateMatrixWorld();
+    this.sunLight.position.set(
+      x + this.sunDirection.x * 600,
+      y + this.sunDirection.y * 600,
+      z + this.sunDirection.z * 600,
+    );
+    this.sunLight.updateMatrixWorld();
   }
 
   dispose(): void {

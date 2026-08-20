@@ -10,7 +10,6 @@ import type { Rng } from '../core/rng';
 import { createCraft } from '../gfx/craft';
 import { createGround } from '../gfx/ground';
 import { createPalette } from '../gfx/palette';
-import { GroundShadow } from '../gfx/shadowBlob';
 import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
@@ -60,7 +59,6 @@ export class World {
   readonly race: Race | null;
 
   private readonly craft: Group;
-  private readonly shadow = new GroundShadow();
   private readonly prevPosition = new Vector3();
   private readonly prevOrientation = new Quaternion();
   private preset = 'chase';
@@ -97,7 +95,6 @@ export class World {
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft);
 
-    this.scene.add(this.shadow.mesh);
 
     // 背光面不再靠半球光去补,改由 IBL 提供 —— 环境反射来自真实的大气散射,
     // 明暗过渡和天空是一致的,而不是人为塞一个补光。
@@ -143,7 +140,8 @@ export class World {
 
     this.craft.position.copy(shownPosition);
     this.craft.quaternion.copy(shownOrientation);
-    this.shadow.update(this.field, shownPosition.x, shownPosition.z, shownPosition.y);
+    // 阴影相机只罩住车周围一小块,必须跟着车走。
+    this.atmosphere.followShadow(shownPosition.x, shownPosition.y, shownPosition.z);
 
     if (this.preset === 'chase') {
       this.chase.present(alpha);

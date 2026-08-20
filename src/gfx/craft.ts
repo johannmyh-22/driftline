@@ -5,7 +5,7 @@ import {
   Group,
   Mesh,
   MeshBasicMaterial,
-  MeshStandardMaterial,
+  MeshPhysicalMaterial,
   Vector3,
 } from 'three';
 import type { Rng } from '../core/rng';
@@ -35,9 +35,9 @@ export function createCraft(rng: Rng, palette: Palette): Group {
   for (const sign of [-1, 1]) {
     group.add(
       flatPart(mirrorX(FIN_POINTS, sign), FIN_FACES, palette.craftAccent, rng, {
-        roughness: 0.3,
-        metalness: 0.2,
-        spread: 0.05,
+        roughness: 0.35,
+        metalness: 0.6,
+        spread: 0.04,
       }),
     );
   }
@@ -84,15 +84,23 @@ function flatPart(
   }
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
 
-  return new Mesh(
+  const mesh = new Mesh(
     geometry,
-    new MeshStandardMaterial({
+    // 车漆是「金属漆 + 清漆」的夹层,不是裸金属:纯 metalness=1 会反射成镀铬。
+    // clearcoat 那一层薄而光滑的高光,才是「车漆」区别于「塑料」和「铁皮」的地方。
+    new MeshPhysicalMaterial({
       vertexColors: true,
       flatShading: true,
       roughness: options.roughness,
       metalness: options.metalness,
+      clearcoat: 0.9,
+      clearcoatRoughness: 0.06,
     }),
   );
+  // 车身投影是唯一真实的高度参照,必须投也必须接(自阴影)。
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
 }
 
 const centroid = new Vector3();

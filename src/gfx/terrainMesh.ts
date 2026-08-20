@@ -132,5 +132,6 @@ export function createTerrainMesh(course: Course, rng: Rng, palette: Palette): M
     }),
   );
   mesh.name = 'terrain';
+  mesh.receiveShadow = true;
   return mesh;
 }

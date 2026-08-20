@@ -91,6 +91,7 @@ function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
     }),
   );
   mesh.name = 'track-ribbon';
+  mesh.receiveShadow = true;
   return mesh;
 }
 
@@ -156,5 +157,7 @@ function createGuardrails(course: Course, palette: Palette): Mesh {
     }),
   );
   mesh.name = 'guardrail';
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   return mesh;
 }

@@ -1,4 +1,4 @@
-import { ACESFilmicToneMapping, WebGLRenderer } from 'three';
+import { ACESFilmicToneMapping, PCFSoftShadowMap, WebGLRenderer } from 'three';
 import {
   type InputFrame,
   KeyboardInput,
@@ -45,6 +45,9 @@ function boot(container: HTMLDivElement): void {
   // 那是「电脑画的」最明显的特征之一。
   renderer.toneMapping = ACESFilmicToneMapping;
   renderer.toneMappingExposure = SKY.exposure;
+  renderer.shadowMap.enabled = true;
+  // PCF soft:硬阴影边缘在低仰角太阳下像贴纸,而 VSM 在 SwiftShader 上不稳。
+  renderer.shadowMap.type = PCFSoftShadowMap;
   container.append(renderer.domElement);
 
   const world = new World(new Rng(seed), courseKind);
