@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "低多边形反重力计时赛 —— 零二进制资产,一切程序化生成",
+  "description": "写实风格的反重力计时赛 —— 零二进制资产,一切程序化生成",
   "license": "MIT",
   "engines": {
     "node": ">=22.12.0"
@@ -15,7 +15,8 @@
     "build": "vite build",
     "test": "vitest run",
     "test:visual": "playwright test",
-    "shoot": "tsx scripts/shoot.ts"
+    "shoot": "tsx scripts/shoot.ts",
+    "perf": "tsx scripts/perf.ts"
   },
   "dependencies": {
     "three": "^0.185.1"
