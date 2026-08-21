@@ -19,7 +19,7 @@
     "perf": "tsx scripts/perf.ts"
   },
   "dependencies": {
-    "@dimforge/rapier3d": "^0.20.0",
+    "@dimforge/rapier3d-compat": "^0.20.0",
     "three": "^0.185.1"
   },
   "devDependencies": {
