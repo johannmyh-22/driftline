@@ -1,7 +1,11 @@
 # driftline
 
-反重力计时赛(anti-grav time trial)。Web / TypeScript / three.js。
-**零二进制资产** —— 所有几何体、贴图、音效都由代码生成。
+写实向计时赛。Web / TypeScript / three.js。
+**素材零二进制** —— 所有几何体、贴图、音效都由代码生成。
+
+> **载具方向已变(2026-08-21 由人类改定):反重力悬浮 → 真实车辆。**
+> 物理换成 Rapier 引擎 + 四轮 raycast(取舍分析与代价见 `docs/HANDOFF.md` 第十节)。
+> 悬浮相关的物理、数值、造型逐步作废;赛道生成、渲染管线、截图回路全部留用。
 
 ## 视觉方向:写实(2026-08 由人类改定)
 
@@ -25,6 +29,20 @@
 ## 最重要的三条
 
 1. **不要引入二进制资产**。没有 `.glb` / `.fbx` / `.png` 贴图 / `.mp3`。模型用 `BufferGeometry` 手写或程序化生成,贴图用 canvas / shader 生成到 `DataTexture`,音效用 Web Audio 合成。仓库里应该只有文本文件。
+
+   **唯一的破例:物理引擎运行时(Rapier 的 `.wasm`),2026-08-21 由人类拍板。**
+   破例的范围写死在这里,别拿它当口子:
+
+   - 破的是**依赖**这一格 —— 一个从 npm 装进 `node_modules`、由构建产出到
+     `dist/` 的编译产物。**仓库里仍然只有文本文件**,这条一个字没松。
+   - **不破的是素材那一格。** 几何体、贴图、音效、字体,一律仍然由代码生成,
+     一个素材文件都不许进。「反正已经有 wasm 了」不是理由 —— 破例的理由是
+     「物理求解器没法用 TypeScript 手写到可用质量」,而贴图和音效恰恰可以,
+     这个项目已经证明了。
+   - 代价是量过的:首屏传输 202 KB → 997 KB(gzip,其中 wasm 762 KB 是独立
+     资源、并行加载、单独缓存)。选独立 `.wasm` 而不是 base64 内联的
+     `rapier3d-compat`,是因为后者要 1285 KB —— base64 把 wasm 的压缩率毁了。
+     体积本身留到 M6 处理。
 2. **改完必须自己看画面**。跑 `npm run shoot` 生成截图,然后用 Read 工具读取 `tests/visual/__output__/*.png` 亲眼确认。不要只靠 `npm run build` 通过就宣称完成 —— 编译通过和画面正确是两件事。
 3. **一个里程碑一个 PR**。范围见 `docs/PLAN.md`。不要顺手做下一个里程碑的事,也不要"顺便重构"。
 
@@ -58,6 +76,12 @@ window.__DRIFTLINE_TEST__ = {
 
 主循环用 **fixed timestep**(累加器 + 固定 dt),渲染插值。这不是可选项 —— 后期再改会波及所有物理和回放代码。
 
+**引入引擎之后,「同 seed 逐帧复现」这条要重新定义。** 求解器是迭代的、对浮点
+累加顺序敏感,原来那种逐位相等的复现不再成立。世界生成(赛道、地形、配色、
+太阳)仍然必须逐位可复现 —— 那部分不经过引擎。车辆轨迹改成带容差比对,
+M4 的幽灵回放存**位置轨迹**而不是存输入重放。**容差要按实测的发散量定,
+不许为了让测试变绿而放宽。**
+
 截图只做**粗粒度回归**(非黑屏、构图大致正确、无报错),不做像素级比对:SwiftShader 与真 GPU 输出有差异。
 
 ## 技术选型(已定,不要替换)
@@ -67,7 +91,7 @@ window.__DRIFTLINE_TEST__ = {
 | 构建 | Vite + TypeScript(strict) |
 | 渲染 | three.js,**裸用,不要 React / R3F** |
 | 材质 | PBR(`MeshStandardMaterial` / `MeshPhysicalMaterial`),贴图运行时程序化生成 |
-| 物理 | **不用物理引擎**。自写 raycast 悬浮 + 速度积分控制器 |
+| 物理 | **Rapier**(`@dimforge/rapier3d`,独立 `.wasm`)+ **自写四轮 raycast 与轮胎模型** |
 | 后处理 | `EffectComposer`:bloom + SMAA + vignette |
 | 音频 | Web Audio API 程序化合成 |
 | UI/HUD | DOM overlay,不要在 canvas 里排文字 |
