@@ -22,11 +22,12 @@ interface ShootOptions {
   throttle: number;
   steer: number;
   brake: number;
+  extra: string;
 }
 
 const USAGE = `用法: npm run shoot -- [--seed=42] [--frames=120] [--camera=chase]
                      [--throttle=1] [--steer=0] [--brake=0] [--out=name.png] [--no-build]
-机位: chase(玩家视角) / side / front / top`;
+机位: chase(玩家视角) / side / front / top / map`;
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -68,6 +69,7 @@ async function main(): Promise<void> {
       frames: options.frames,
       camera: options.camera,
       input: { throttle: options.throttle, steer: options.steer, airBrake: options.brake },
+      extra: options.extra,
     });
 
     await mkdir(OUTPUT_DIR, { recursive: true });
@@ -100,6 +102,7 @@ function parseArgs(argv: readonly string[]): ShootOptions {
     throttle: 1,
     steer: 0,
     brake: 0,
+    extra: '',
   };
 
   for (const arg of argv) {
@@ -107,7 +110,7 @@ function parseArgs(argv: readonly string[]): ShootOptions {
       options.rebuild = false;
       continue;
     }
-    const match = /^--([a-z]+)=(-?[\w.\-]*)$/.exec(arg);
+    const match = /^--([a-z]+)=(.*)$/.exec(arg);
     if (match === null) {
       throw new Error(`无法解析参数 "${arg}"\n${USAGE}`);
     }
@@ -133,6 +136,9 @@ function parseArgs(argv: readonly string[]): ShootOptions {
         break;
       case 'brake':
         options.brake = requireNumber(value, 'brake');
+        break;
+      case 'extra':
+        options.extra = value;
         break;
       default:
         throw new Error(`未知参数 "--${key}"\n${USAGE}`);

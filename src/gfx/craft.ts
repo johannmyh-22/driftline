@@ -9,6 +9,7 @@ import {
   Vector3,
 } from 'three';
 import type { Rng } from '../core/rng';
+import { CRAFT } from '../game/tuning';
 import type { Palette } from './palette';
 
 type Point = readonly [number, number, number];
@@ -20,7 +21,18 @@ type Face = readonly [number, number, number];
  * 每块都是凸的,所以绕序不用逐面手算:统一按「法线要背离该块的重心」
  * 自动翻正。手写十几个面的 winding 是纯粹的抄写错误来源。
  */
-export function createCraft(rng: Rng, palette: Palette): Group {
+export interface Craft {
+  readonly group: Group;
+  /**
+   * 尾焰强度,0..1。0 是滑行,1 是全速全油门。
+   *
+   * 只改亮度、不改几何:THRUSTER_POINTS 是车尾的局部坐标,拿 scale 拉长会把它
+   * 拽向原点、穿进车身里。
+   */
+  setThrust(level: number): void;
+}
+
+export function createCraft(rng: Rng, palette: Palette): Craft {
   const group = new Group();
   group.name = 'craft';
 
@@ -34,25 +46,51 @@ export function createCraft(rng: Rng, palette: Palette): Group {
 
   for (const sign of [-1, 1]) {
     group.add(
+      // 侧翼和车体一样是车漆,不是裸金属。metalness 0.6 那一版在强 IBL 下会
+      // 反射出一块比尾焰还亮的白斑 —— 和车漆那条坑同源:金属度一高,基色就不再
+      // 决定颜色、只决定反射色调,车身自己的颜色就没了。
       flatPart(mirrorX(FIN_POINTS, sign), FIN_FACES, palette.craftAccent, rng, {
-        roughness: 0.35,
-        metalness: 0.6,
+        roughness: 0.32,
+        metalness: 0.22,
         spread: 0.04,
       }),
     );
   }
 
-  // 尾部亮条:截图里一眼看出车头朝哪、有没有翻过来。
+  /*
+   * 尾部亮条。除了「一眼看出车头朝哪」,它现在还是**速度反馈**的主要来源。
+   *
+   * 做法是把颜色推进 HDR 区间,让链上的 bloom 自己去决定辉光有多大 ——
+   * 全速时超过 bloom 阈值就自然烧出光晕,松油门时落回阈值以下、辉光消失。
+   * 零额外 pass,只动一个颜色。
+   *
+   * 注意这里**不能**再用 `toneMapped: false`:色调映射已经搬到链末的 OutputPass,
+   * 它对整张缓冲做,不看单个材质的这个标志 —— 留着只会误导下一个读代码的人。
+   */
+  const glow = new Color();
+  const thrusterMaterials: MeshBasicMaterial[] = [];
   for (const sign of [-1, 1]) {
+    const material = new MeshBasicMaterial({ color: palette.craftGlow });
     const thruster = new Mesh(
       geometryFrom(mirrorX(THRUSTER_POINTS, sign), THRUSTER_FACES),
-      new MeshBasicMaterial({ color: palette.craftGlow, toneMapped: false }),
+      material,
     );
     thruster.name = 'craft-thruster';
+    thrusterMaterials.push(material);
     group.add(thruster);
   }
 
-  return group;
+  return {
+    group,
+    setThrust(level: number): void {
+      const eased = Math.min(1, Math.max(0, level));
+      const gain = CRAFT.thrusterIdleGain + (CRAFT.thrusterFullGain - CRAFT.thrusterIdleGain) * eased;
+      glow.copy(palette.craftGlow).multiplyScalar(gain);
+      for (const material of thrusterMaterials) {
+        material.color.copy(glow);
+      }
+    },
+  };
 }
 
 interface PartOptions {

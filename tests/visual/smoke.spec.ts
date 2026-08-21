@@ -13,11 +13,25 @@ const MIN_LUMINANCE_VARIANCE = 400;
 const MIN_DISTINCT_COLORS = 200;
 // 换 seed 后平均色至少要差这么多。
 const MIN_SEED_COLOR_DELTA = 8;
+/*
+ * 地面(画面下半幅)的亮度区间。实测健康值在 42~148 之间,两头都留了余量:
+ * 下限拦「地面变成纯黑剪影」(坏掉时实测 0.0~1.3),上限拦「逆光冲成一片白」。
+ */
+const MIN_GROUND_LUMINANCE = 15;
+const MAX_GROUND_LUMINANCE = 215;
 
 interface FrameStats {
   luminanceVariance: number;
   distinctColors: number;
   meanColor: readonly [number, number, number];
+  /**
+   * 画面下半幅的平均亮度 —— 也就是「地面那一半」。
+   *
+   * 单独盯这个数,是因为**方差和平均色都抓不到「地面全黑」**:天空正常而地面
+   * 归零时,画面对比度反而更大、方差更高,断言只会更容易通过。这个项目已经
+   * 两次栽在这上面(bloom 的 NaN、天空辐射溢出污染 IBL)。
+   */
+  lowerMeanLuminance: number;
 }
 
 /**
@@ -34,6 +48,9 @@ function analyseFrame(buffer: Buffer): FrameStats {
   let red = 0;
   let green = 0;
   let blue = 0;
+  let lower = 0;
+  let lowerCount = 0;
+  const lowerFrom = Math.floor(png.height * 0.55);
 
   // 每 3 个像素采一个,1280x720 下仍有 30 万样本,足够稳。
   for (let i = 0; i < data.length; i += 12) {
@@ -42,6 +59,10 @@ function analyseFrame(buffer: Buffer): FrameStats {
     const b = data[i + 2] ?? 0;
     const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
+    if (Math.floor(i / 4 / png.width) >= lowerFrom) {
+      lower += luminance;
+      lowerCount++;
+    }
     sum += luminance;
     sumSquares += luminance * luminance;
     count++;
@@ -56,6 +77,7 @@ function analyseFrame(buffer: Buffer): FrameStats {
     luminanceVariance: sumSquares / count - mean * mean,
     distinctColors: colors.size,
     meanColor: [red / count, green / count, blue / count],
+    lowerMeanLuminance: lower / Math.max(1, lowerCount),
   };
 }
 
@@ -259,6 +281,41 @@ test('换 seed 会换掉地形与配色', async ({ page }) => {
   expect(b).not.toEqual(a);
 });
 
+/*
+ * 这条是「换 seed 会换掉地形与配色」拦不住的那一类:**画面在某些 seed 上整个失效**。
+ *
+ * 两次都是同一个形状的 bug —— HDR 值溢出成 Inf/NaN,再被摊到一大片:
+ * 一次是 bloom 的模糊核污染全屏,一次是天空的辐射值把 PMREM 烘出的环境贴图
+ * 变成 NaN、所有 PBR 材质一起变黑。两次都**只在部分 seed 上出现**,而
+ * `npm run shoot` 的默认 seed 42 恰好都幸免,回归截图全是好的。
+ *
+ * 所以这里做两件上面那些断言做不到的事:逐个 seed 断言、并且单独盯**下半幅**
+ * 的亮度。天空正常而地面归零时,整幅的方差反而更高 —— 只看方差是看不见的。
+ *
+ * 每个 seed 都跑到赛道深处再拍:起跑线那一段朝向固定,背光路段根本走不到。
+ */
+test('每个 seed 在赛道各处都渲染出有内容的画面', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  for (const seed of [1337, 7, 1]) {
+    for (const frames of [30, 420]) {
+      await driveScene(page, BASE_URL, { seed, frames, camera: 'chase', input: { throttle: 1 } });
+      const stats = await shoot(page, `smoke-seed${seed}-f${frames}.png`);
+      const where = `seed ${seed} 第 ${frames} 帧`;
+
+      expect(stats.luminanceVariance, `${where} 的画面方差`).toBeGreaterThan(
+        MIN_LUMINANCE_VARIANCE,
+      );
+      expect(stats.distinctColors, `${where} 的颜色数`).toBeGreaterThan(MIN_DISTINCT_COLORS);
+      expect(stats.lowerMeanLuminance, `${where} 的地面亮度`).toBeGreaterThan(MIN_GROUND_LUMINANCE);
+      // 过曝的另一头也要拦:逆光 seed 上 bloom 阈值取低了会把画面冲成一片白。
+      expect(stats.lowerMeanLuminance, `${where} 的地面亮度`).toBeLessThan(MAX_GROUND_LUMINANCE);
+    }
+  }
+
+  expect(problems).toEqual([]);
+});
+
 test('固定机位可用,且未知机位会明确报错', async ({ page }) => {
   await driveScene(page, BASE_URL, {
     seed: SEED,
@@ -290,6 +347,9 @@ test('不带 test=1 时自行跑主循环,且不暴露测试接口', async ({ pa
   // 这条路径就是 Pages 上线后真实用户看到的那条:它挂了页面就是黑屏。
   await page.goto(BASE_URL, { waitUntil: 'load' });
   await page.waitForSelector('#app canvas');
+  // canvas 元素出现 ≠ 画面上有东西。等主循环自己报告首帧已画完,
+  // 否则在慢机器上拍到的是一张空白,而失败信息只会说「方差不够」。
+  await page.waitForFunction(() => document.documentElement.dataset['painted'] === '1');
 
   const stats = await shoot(page, 'smoke-realtime.png');
   const exposed = await page.evaluate(() => window.__DRIFTLINE_TEST__ !== undefined);

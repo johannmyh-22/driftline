@@ -309,6 +309,26 @@ export class Course implements GroundQuery {
     return bestRow;
   }
 
+  /**
+   * 条带某一侧外缘的顶点序列(xyz 依次排列,每行一组)。
+   *
+   * 护栏必须坐在**条带自己的外缘顶点**上。上一版是照着 `sample.y` 和 `bank` 另算
+   * 一套高度、还带一个 0.5 的经验系数,于是墙底和路肩外缘对不上,远看就是一条
+   * 浮在地上的带子。这是不变量「物理查询的面 == 渲染出来的面」在装饰物上的推论:
+   * **同一条边只能有一个高度**,想用就来这里取,不要自己再算一遍。
+   */
+  buildEdgeLine(side: -1 | 1): Float64Array {
+    const col = side < 0 ? 0 : this.columns - 1;
+    const line = new Float64Array(this.rows * 3);
+    for (let row = 0; row < this.rows; row++) {
+      const index = this.vertexIndex(row, col);
+      line[row * 3] = this.vx[index] ?? 0;
+      line[row * 3 + 1] = this.vy[index] ?? 0;
+      line[row * 3 + 2] = this.vz[index] ?? 0;
+    }
+    return line;
+  }
+
   private vertexIndex(row: number, col: number): number {
     return (row % this.rows) * this.columns + col;
   }

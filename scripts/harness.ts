@@ -4,6 +4,7 @@ import type { InputFrame } from '../src/core/input';
 /** Playwright 与 `npm run shoot` 各起一个 preview,端口错开,互不打架。 */
 export const VISUAL_TEST_PORT = 4173;
 export const SHOOT_PORT = 4174;
+export const PERF_PORT = 4175;
 
 /** 与 `vite.config.ts` 的 `base` 保持一致。 */
 export const BASE_PATH = '/driftline/';
@@ -43,6 +44,8 @@ export interface SceneOptions {
   camera: string;
   /** 步进期间一直保持的操作输入。不给就是松手滑行。 */
   input?: Partial<InputFrame>;
+  /** 追加到 URL 上的查询串,例如 `post=ao`。用来单独看某一级后处理的效果。 */
+  extra?: string;
 }
 
 /**
@@ -56,7 +59,8 @@ export async function driveScene(
   baseUrl: string,
   options: SceneOptions,
 ): Promise<Record<string, number>> {
-  await page.goto(`${baseUrl}?test=1&seed=${options.seed}`, { waitUntil: 'load' });
+  const suffix = options.extra === undefined || options.extra === '' ? '' : `&${options.extra}`;
+  await page.goto(`${baseUrl}?test=1&seed=${options.seed}${suffix}`, { waitUntil: 'load' });
 
   await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
   await page.evaluate(async () => {

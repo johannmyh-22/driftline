@@ -53,6 +53,7 @@ export class Atmosphere {
       sunPosition.value.copy(this.sunDirection);
     }
 
+    clampSkyRadiance(sky);
     this.sky = sky;
 
     // 平行光要和天空里那颗太阳指向一致,否则影子方向和天空对不上,一眼假。
@@ -127,6 +128,37 @@ export class Atmosphere {
     this.environmentTexture?.dispose();
     this.sky.geometry.dispose();
   }
+}
+
+/**
+ * 给天空的输出加一道上限。
+ *
+ * **不加的话,太阳仰角一超过约 15 度,整个场景的光照就会消失。** 表现是天空正常、
+ * 地面和赛道变成纯黑剪影 —— 看着像「地形没被照亮」,其实是 NaN。
+ *
+ * 链条是这样的:Preetham 模型在太阳附近的辐射值能到上千(shader 里 `EE = 1000`),
+ * 太阳越高峰值越大;这片天空要被 `PMREMGenerator` 烘成环境贴图,而 PMREM 的
+ * render target 是 `HalfFloatType`,上限 65504;一旦溢出成 Inf,后续的卷积就产出
+ * NaN,整张环境贴图报废。**所有** PBR 材质采样到它之后输出 NaN,于是全黑。
+ *
+ * NaN 的传染性让这个问题格外难认:把 `environmentIntensity` 调成 0 也救不回来,
+ * 因为 `0 * NaN` 还是 NaN —— 这一点和 bloom 那条钳制同源,见
+ * `gfx/postprocess.ts` 的 `clampBloomInput()`。
+ *
+ * 钳制只削掉太阳盘那一小块的峰值,天空的颜色梯度、地平线的浑浊、太阳周围的辉光
+ * 都不受影响 —— 那些区域的值离上限还远。
+ */
+function clampSkyRadiance(sky: Sky): void {
+  const material = sky.material;
+  const anchor = 'gl_FragColor = vec4( texColor, 1.0 );';
+  if (!material.fragmentShader.includes(anchor)) {
+    throw new Error('Sky 着色器变了,天空的辐射钳制补丁没打上');
+  }
+  material.fragmentShader = material.fragmentShader.replace(
+    anchor,
+    `gl_FragColor = vec4( min( texColor, vec3( ${SKY.radianceCeiling.toFixed(1)} ) ), 1.0 );`,
+  );
+  material.needsUpdate = true;
 }
 
 /** `noUncheckedIndexedAccess` 下 uniform 查表返回可空,统一在这里判一次。 */
