@@ -22,7 +22,9 @@ M1(手感)已合并:悬浮载具、输入层与输入录制、跟随相机。
 M0(骨架与验证回路)已合并:固定步长主循环、seeded PRNG、`?test=1` 确定性步进接口、
 Playwright 无头截图与冒烟测试。
 
-路线图见 [docs/PLAN.md](docs/PLAN.md)。
+路线图见 [docs/PLAN.md](docs/PLAN.md),接手这个项目请先读
+[docs/HANDOFF.md](docs/HANDOFF.md) —— 里面记着几个「不会报错但会让项目慢慢烂掉」
+的不变量,以及这个项目已经踩过的坑。
 
 ## 操作
 

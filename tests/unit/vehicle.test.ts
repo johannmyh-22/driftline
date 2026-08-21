@@ -78,7 +78,7 @@ describe('Vehicle 加速与阻力', () => {
     expect(v.groundSpeed).toBeLessThan(90);
   });
 
-  it('0 → 100 km/h 在 1 秒出头', () => {
+  it('0 → 100 km/h 在 2 秒出头', () => {
     const v = makeVehicle();
     const go = input({ throttle: 1 });
     let frames = 0;
