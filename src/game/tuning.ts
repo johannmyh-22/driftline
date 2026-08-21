@@ -302,5 +302,63 @@ export const SKY = {
   shadowExtent: 70,
 } as const;
 
+/**
+ * 后处理链的数值。
+ *
+ * 通篇按「克制」取值:过量的 bloom 和暗角是「电脑画的」最明显的两个特征,
+ * 而写实的目标恰恰是让人看不出后处理在起作用。
+ */
+export const POST = {
+  /*
+   * 环境光遮蔽。
+   *
+   * 阴影贴图管的是「谁挡住了太阳」,管不了「相邻的面互相挡住了天光」——
+   * 护墙根部、路肩和路面的夹角、车体自身的凹处,靠的都是 AO。
+   *
+   * 半径按**反重力载具**的尺度取,这一点和普通赛车游戏不一样:车悬浮在地面
+   * 1.6~2.3 米上方,压根没有接触点,零点几米的半径什么也抓不到(实测画面平均
+   * 只差 2.8/255)。取到能跨过悬浮间隙,车底才会在路面上压出一片暗,
+   * 「贴地飞行」的高度感就是从这片暗来的。
+   */
+  /** 采样半径,单位是米。 */
+  aoRadius: 2.5,
+  aoDistanceExponent: 1,
+  aoThickness: 1,
+  aoScale: 1,
+  /** 每像素采样数。默认 16,减半后噪点由 pass 自带的降噪补,SwiftShader 上省一半。 */
+  aoSamples: 8,
+  /** AO 的混合强度。1 是全量,压一点避免暗部糊死。 */
+  aoIntensity: 0.85,
+  /** AO 按屏幕比例缩放后再算。AO 是低频信号,半分辨率看不出来。 */
+  aoResolutionScale: 0.5,
+
+  /*
+   * Bloom。阈值在**线性 HDR** 空间上判,不是 0..1 的显示值,而且是在乘曝光
+   * **之前** —— 曝光由链末的 OutputPass 施加,bloom 看到的是原始辐射值。
+   *
+   * 所以阈值要比直觉高得多。取 1.1 时天空整片都超阈,被 mip 链一模糊就抹到全屏,
+   * 整张图蒙上一层白雾、对比度全丢。现在只有太阳盘附近和尾焰能溢出。
+   */
+  bloomStrength: 0.3,
+  bloomRadius: 0.5,
+  bloomThreshold: 3.5,
+  /** bloom 按屏幕比例缩放后再算。输出本来就是一团模糊,半分辨率看不出区别。 */
+  bloomResolutionScale: 0.5,
+  /**
+   * 喂给 bloom 之前把亮度钳到这个上限(线性 HDR)。
+   * 太阳附近的天空能冲破 HalfFloat 的 65504 变成 Inf,不钳制会整屏变黑,
+   * 原因见 `gfx/postprocess.ts` 的 `clampBloomInput()`。
+   */
+  bloomInputCeiling: 60,
+
+  /*
+   * 暗角。`offset` 控制范围、`darkness` 控制混向的目标色。
+   * darkness 要贴近 1(混向纯黑),否则暗部会被这个 pass 反过来提亮。
+   * 现在的取值让四角约降 30%,画面中心完全不动。
+   */
+  vignetteOffset: 0.8,
+  vignetteDarkness: 1,
+} as const;
+
 /** 用于把速度归一化成 0..1(FOV、转向衰减都靠它)。 */
 export const REFERENCE_TOP_SPEED = 88;

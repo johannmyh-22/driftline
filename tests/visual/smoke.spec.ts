@@ -259,6 +259,32 @@ test('换 seed 会换掉地形与配色', async ({ page }) => {
   expect(b).not.toEqual(a);
 });
 
+/*
+ * bloom 曾经在**除 42 以外的大多数 seed** 上把整幅画面糊成黑色:某些太阳角度下
+ * 天空的 HDR 值冲破 HalfFloat 上限变成 Inf,被 bloom 的模糊核一摊就污染全屏。
+ *
+ * 之所以差点漏过去:`npm run shoot` 的默认 seed 正好是 42,所有回归截图都是好的,
+ * 只有实时模式(默认 seed 1337)是黑的。上面那条「换 seed 会换掉地形与配色」也拦不住
+ * —— 一张正常图和一张全黑图之间的平均色差**更大**,断言反而更容易通过。
+ *
+ * 所以这里逐个 seed 断言「画面有内容」,而不是断言两个 seed 之间有差异。
+ */
+test('每个 seed 都渲染出有内容的画面', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  for (const seed of [1337, 7, 1]) {
+    await driveScene(page, BASE_URL, { seed, frames: 30, camera: 'chase', input: { throttle: 1 } });
+    const stats = await shoot(page, `smoke-seed${seed}.png`);
+
+    expect(stats.luminanceVariance, `seed ${seed} 的画面方差`).toBeGreaterThan(
+      MIN_LUMINANCE_VARIANCE,
+    );
+    expect(stats.distinctColors, `seed ${seed} 的颜色数`).toBeGreaterThan(MIN_DISTINCT_COLORS);
+  }
+
+  expect(problems).toEqual([]);
+});
+
 test('固定机位可用,且未知机位会明确报错', async ({ page }) => {
   await driveScene(page, BASE_URL, {
     seed: SEED,
@@ -290,6 +316,9 @@ test('不带 test=1 时自行跑主循环,且不暴露测试接口', async ({ pa
   // 这条路径就是 Pages 上线后真实用户看到的那条:它挂了页面就是黑屏。
   await page.goto(BASE_URL, { waitUntil: 'load' });
   await page.waitForSelector('#app canvas');
+  // canvas 元素出现 ≠ 画面上有东西。等主循环自己报告首帧已画完,
+  // 否则在慢机器上拍到的是一张空白,而失败信息只会说「方差不够」。
+  await page.waitForFunction(() => document.documentElement.dataset['painted'] === '1');
 
   const stats = await shoot(page, 'smoke-realtime.png');
   const exposed = await page.evaluate(() => window.__DRIFTLINE_TEST__ !== undefined);
