@@ -34,3 +34,13 @@ export function normalize01(value: number, inMin: number, inMax: number): number
   }
   return clamp((value - inMin) / (inMax - inMin), 0, 1);
 }
+
+/** 在 `[edge0, edge1]` 之间做三次平滑过渡,两端导数为 0。区间外钳到 0 / 1。 */
+export function smoothstep(edge0: number, edge1: number, value: number): number {
+  const span = edge1 - edge0;
+  if (span === 0) {
+    return value < edge0 ? 0 : 1;
+  }
+  const t = clamp((value - edge0) / span, 0, 1);
+  return t * t * (3 - 2 * t);
+}

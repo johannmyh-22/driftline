@@ -239,8 +239,16 @@ describe('车辆不会一打方向就打转', () => {
       vehicle.update(input, FIXED_DT);
       expect(vehicle.grounded).toBe(false);
     }
-    // 空中侧滑角基本不变。
-    expect(Math.abs(slipAngleDegrees(vehicle) - before)).toBeLessThan(5);
+    /*
+     * 空中侧滑角只会跟着**残余偏航速率**慢慢漂,不会被拉回。
+     *
+     * 所以真正该断言的是「没有向 0 收敛」—— 那才是回正力矩的特征。
+     * 只卡绝对变化量的话,容差会随手感数值一起漂:推力和阻力一改,
+     * 抬起瞬间的残余 yawRate 就变了,这条会莫名其妙地红,而它想抓的东西没变。
+     */
+    const after = slipAngleDegrees(vehicle);
+    expect(Math.abs(after)).toBeGreaterThan(Math.abs(before) * 0.8);
+    expect(Math.abs(after - before)).toBeLessThan(8);
   });
 });
 

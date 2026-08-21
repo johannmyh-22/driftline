@@ -1,6 +1,6 @@
 import { Matrix4, Quaternion, Vector3 } from 'three';
 import type { InputFrame } from '../core/input';
-import { clamp, damp, lerp, normalize01 } from '../core/mathx';
+import { clamp, damp, lerp, normalize01, smoothstep } from '../core/mathx';
 import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
 import { REFERENCE_TOP_SPEED, VEHICLE } from './tuning';
 
@@ -178,9 +178,15 @@ export class Vehicle {
     const maxYawRate = Math.min(envelope, sustainable);
 
     const authority = this.grounded ? 1 : VEHICLE.yawAuthorityAirborne;
+    /*
+     * 低速时转向权限衰减到 0。上面那个 `Math.max(speed, 6)` 是为了避免除零,
+     * 副作用是**静止的车也能原地转头** —— 而偏航靠的是地面/气流给的侧向力,
+     * 没有速度就没有力可用。用平滑过渡而不是硬阈值,免得起步瞬间车头一跳。
+     */
+    const traction = smoothstep(0, VEHICLE.steerMinSpeed, speed);
 
     // 取负:steer 为正表示向右,而 yaw 增大是向左(见类注释)。
-    const target = -input.steer * maxYawRate * authority;
+    const target = -input.steer * maxYawRate * authority * traction;
     const lambda = input.steer === 0 ? VEHICLE.yawRecenter : VEHICLE.yawResponse;
     this.yawRate = damp(this.yawRate, target, lambda, dt);
     this.yaw += this.yawRate * dt;
