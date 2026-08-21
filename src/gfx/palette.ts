@@ -13,14 +13,15 @@ import type { SurfaceOptions } from './textures';
  * 贴图基色用线性空间的三元组,直接喂给程序化贴图生成器。
  */
 export interface Palette {
-  /** 地形与路面的 PBR 贴图参数。 */
+  /** 地形、路面与护墙的 PBR 贴图参数。 */
   terrainSurface: SurfaceOptions;
   roadSurface: SurfaceOptions;
+  wallSurface: SurfaceOptions;
 
-  /** 路肩、标线、护栏。 */
+  /** 路肩、标线、护墙压顶。 */
   shoulder: Color;
   roadEdge: Color;
-  guardrail: Color;
+  wallCap: Color;
   startLine: Color;
 
   /** 载具。 */
@@ -78,10 +79,21 @@ export function createPalette(rng: Rng): Palette {
       frequency: 16,
     },
 
+    wallSurface: {
+      // 混凝土的反照率 0.2~0.35,比沥青亮一个档;起伏比路面细,粗糙度也更高。
+      base: [0.235, 0.231, 0.222],
+      variation: 0.3,
+      roughness: 0.88,
+      roughnessVariation: 0.07,
+      bumpiness: 1.3,
+      frequency: 12,
+    },
+
     shoulder: linear(terrain[0] * 0.8, terrain[1] * 0.8, terrain[2] * 0.8),
     // 标线是脏白不是纯白:真实的路面标线被碾过、积过灰。
     roadEdge: linear(0.42, 0.41, 0.38),
-    guardrail: linear(0.32, 0.33, 0.35),
+    // 护墙的压顶。比墙身深一档:顶面积灰、被雨水冲刷,现实里从来不是最亮的那块。
+    wallCap: linear(0.62, 0.61, 0.585),
     startLine: linear(0.5, 0.49, 0.46),
 
     // 金属材质下基色是**反射的色调**而不是亮度,所以要比直觉暗:
