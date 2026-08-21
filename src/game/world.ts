@@ -18,7 +18,7 @@ import { Course } from './course';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
 import { Race } from './race';
-import { type TrackLayout, generateTrack } from './trackLayout';
+import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
 import { CRAFT, REFERENCE_TOP_SPEED } from './tuning';
 import { Vehicle } from './vehicle';
 
@@ -74,7 +74,13 @@ export class World {
     this.scene.add(this.atmosphere.sunLight);
 
     if (kind === 'race') {
-      const layout = generateTrack(rng.fork());
+      // 起点要避开逆光,而太阳方位角是 Atmosphere 定的,所以只能等它先造好。
+      // 换起点不消耗随机数,rng 的取用顺序不变 —— 同 seed 的赛道形状还是那条。
+      const layout = alignStartAwayFromSun(
+        generateTrack(rng.fork()),
+        this.atmosphere.sunDirection.x,
+        this.atmosphere.sunDirection.z,
+      );
       const course = new Course(layout, rng.fork());
       this.track = layout;
       this.field = course;
@@ -119,6 +125,23 @@ export class World {
 
   get camera(): PerspectiveCamera {
     return this.preset === 'chase' ? this.chase.camera : this.fixedCamera;
+  }
+
+  /**
+   * 车头方向和太阳方位角的夹角余弦:**1 = 正对太阳(逆光),-1 = 太阳在背后**。
+   *
+   * 逆光的强弱只有截图能看,而截图要先知道往哪开才拍得到 —— 这个值让
+   * 「跑到逆光路段」变成可搜索的量,不用靠猜帧数。跟随机位大致朝着车头,
+   * 所以它同时也是相机的逆光程度。
+   */
+  get sunAhead(): number {
+    const sun = this.atmosphere.sunDirection;
+    const horizontal = Math.hypot(sun.x, sun.z);
+    if (horizontal < 1e-6) {
+      return 0;
+    }
+    const yaw = this.vehicle.yaw;
+    return (Math.sin(yaw) * sun.x + Math.cos(yaw) * sun.z) / horizontal;
   }
 
   update(input: InputFrame, dt: number): void {

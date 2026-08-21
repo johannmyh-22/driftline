@@ -119,6 +119,18 @@ export class Postprocess {
    * 相机要每帧传进来:`World.camera` 在 chase 和固定机位之间切换,返回的是不同的
    * 相机对象,pass 里存的那个引用不会自己跟着换。
    */
+  /**
+   * 只给 `?bloom=` 这个调试开关用。定稿的值仍然只住在 `tuning.ts` 里。
+   *
+   * 逆光强度已经被人类打回来三次,每次「再收一档」都要重新 build + shoot
+   * 才能和上一版对比。有了它,一次构建就能拍完两档。
+   */
+  setBloomStrength(strength: number): void {
+    if (this.bloom !== null) {
+      this.bloom.strength = strength;
+    }
+  }
+
   render(camera: PerspectiveCamera): void {
     this.renderPass.camera = camera;
     if (this.gtao !== null) {

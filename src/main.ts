@@ -7,7 +7,7 @@ import {
 } from './core/input';
 import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
-import { SKY } from './game/tuning';
+import { POST, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
 import { Readout } from './game/hud';
@@ -31,6 +31,18 @@ const stages: readonly PostStage[] =
     : postParam.split(',').filter((name): name is PostStage =>
         (ALL_STAGES as readonly string[]).includes(name),
       );
+
+/*
+ * ?exposure=0.42&bloom=0.12 覆盖 tuning 里的两个逆光相关数值。
+ *
+ * 和 ?post= / ?course= 是同一类东西:把一个变量单独拎出来,才能判断画面问题
+ * 出在哪一层。逆光强度已经被人类打回来三次,而每次「再收一档」原本都要
+ * 重新 build 才能跟上一版对比 —— 有了这两个开关,一次构建就能拍完两档。
+ *
+ * **定稿的值仍然只住在 `tuning.ts` 里**,URL 参数不参与部署,也不进任何基准。
+ */
+const exposure = parseKnob(params.get('exposure'), SKY.exposure);
+const bloomStrength = parseKnob(params.get('bloom'), POST.bloomStrength);
 
 const mount = document.querySelector<HTMLDivElement>('#app');
 if (mount === null) {
@@ -58,7 +70,7 @@ function boot(container: HTMLDivElement): void {
   // 那是「电脑画的」最明显的特征之一。
   // 实际做这一步的是链末的 OutputPass,它从 renderer 上读这两个设置。
   renderer.toneMapping = ACESFilmicToneMapping;
-  renderer.toneMappingExposure = SKY.exposure;
+  renderer.toneMappingExposure = exposure;
   renderer.shadowMap.enabled = true;
   // PCF soft:硬阴影边缘在低仰角太阳下像贴纸,而 VSM 在 SwiftShader 上不稳。
   renderer.shadowMap.type = PCFSoftShadowMap;
@@ -70,6 +82,7 @@ function boot(container: HTMLDivElement): void {
   world.scene.environmentIntensity = SKY.environmentIntensity;
 
   const post = new Postprocess(renderer, world.scene, world.camera, stages);
+  post.setBloomStrength(bloomStrength);
 
   const scripted = new ScriptedInput();
   const keyboard = testMode ? null : new KeyboardInput();
@@ -158,6 +171,8 @@ function boot(container: HTMLDivElement): void {
         bestLapTime: world.race?.bestLapTime ?? 0,
         checkpoint: world.race?.lastCheckpoint ?? 0,
         resets: world.race?.resets ?? 0,
+        // 1 = 车头正对太阳(逆光),-1 = 太阳在背后。逆光路段靠它搜,不靠猜帧数。
+        sunAhead: world.sunAhead,
       }),
     });
 
@@ -167,6 +182,18 @@ function boot(container: HTMLDivElement): void {
     loop.advance(0);
     loop.start();
   }
+}
+
+/**
+ * 解析一个调试用的数值 URL 参数。**拿不准就退回 tuning 里的默认值** ——
+ * 打错一个字母不该让画面变成黑屏,那会把排查引到完全错误的方向上去。
+ */
+function parseKnob(raw: string | null, fallback: number): number {
+  if (raw === null) {
+    return fallback;
+  }
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function showFatal(error: unknown): void {
