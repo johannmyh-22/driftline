@@ -299,20 +299,32 @@ test('换 seed 会换掉地形与配色', async ({ page }) => {
 test('每个 seed 在赛道各处都渲染出有内容的画面', async ({ page }) => {
   const problems = watchForProblems(page);
 
-  for (const seed of [1337, 7, 1]) {
-    for (const frames of [30, 420]) {
-      await driveScene(page, BASE_URL, { seed, frames, camera: 'chase', input: { throttle: 1 } });
-      const stats = await shoot(page, `smoke-seed${seed}-f${frames}.png`);
-      const where = `seed ${seed} 第 ${frames} 帧`;
+  const check = (stats: FrameStats, where: string): void => {
+    expect(stats.luminanceVariance, `${where} 的画面方差`).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+    expect(stats.distinctColors, `${where} 的颜色数`).toBeGreaterThan(MIN_DISTINCT_COLORS);
+    expect(stats.lowerMeanLuminance, `${where} 的地面亮度`).toBeGreaterThan(MIN_GROUND_LUMINANCE);
+    // 过曝的另一头也要拦:逆光 seed 上 bloom 阈值取低了会把画面冲成一片白。
+    expect(stats.lowerMeanLuminance, `${where} 的地面亮度`).toBeLessThan(MAX_GROUND_LUMINANCE);
+  };
 
-      expect(stats.luminanceVariance, `${where} 的画面方差`).toBeGreaterThan(
-        MIN_LUMINANCE_VARIANCE,
-      );
-      expect(stats.distinctColors, `${where} 的颜色数`).toBeGreaterThan(MIN_DISTINCT_COLORS);
-      expect(stats.lowerMeanLuminance, `${where} 的地面亮度`).toBeGreaterThan(MIN_GROUND_LUMINANCE);
-      // 过曝的另一头也要拦:逆光 seed 上 bloom 阈值取低了会把画面冲成一片白。
-      expect(stats.lowerMeanLuminance, `${where} 的地面亮度`).toBeLessThan(MAX_GROUND_LUMINANCE);
-    }
+  for (const seed of [1337, 7, 1]) {
+    // 一个 seed 只加载一次页面,起步和深处两个点在同一次加载里连着推。
+    //
+    // 这么写的初衷是省 shader 编译(SwiftShader 上首帧要 7 秒),但**实测收益在
+    // 噪声里** —— 同一个 page 对象的多次 goto 之间,浏览器会复用编译好的 shader,
+    // 那笔钱本来就没花。保留只是因为代码更清晰、少三次页面加载也不亏。
+    // 想再提速的话别往这个方向使劲,见 docs/HANDOFF.md 的性能一节。
+    await driveScene(page, BASE_URL, { seed, frames: 30, camera: 'chase', input: { throttle: 1 } });
+    check(await shoot(page, `smoke-seed${seed}-f30.png`), `seed ${seed} 第 30 帧`);
+
+    await page.evaluate(() => {
+      const api = window.__DRIFTLINE_TEST__;
+      if (api === undefined) {
+        throw new Error('__DRIFTLINE_TEST__ 未挂载');
+      }
+      api.advance(390);
+    });
+    check(await shoot(page, `smoke-seed${seed}-f420.png`), `seed ${seed} 第 420 帧`);
   }
 
   expect(problems).toEqual([]);
