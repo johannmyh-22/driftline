@@ -1,5 +1,4 @@
 import {
-  Group,
   type PerspectiveCamera,
   Quaternion,
   Scene,
@@ -7,18 +6,20 @@ import {
 } from 'three';
 import { type InputFrame, createInputFrame } from '../core/input';
 import type { Rng } from '../core/rng';
-import { createCraft } from '../gfx/craft';
+import { type Craft, createCraft } from '../gfx/craft';
 import { createGround } from '../gfx/ground';
 import { createPalette } from '../gfx/palette';
 import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
+import { normalize01 } from '../core/mathx';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
 import { Race } from './race';
 import { type TrackLayout, generateTrack } from './trackLayout';
+import { CRAFT, REFERENCE_TOP_SPEED } from './tuning';
 import { Vehicle } from './vehicle';
 
 const shownPosition = new Vector3();
@@ -58,7 +59,7 @@ export class World {
   /** 检查点与圈计时。`flat` 场地下是 null —— 那块地没有赛道可计圈。 */
   readonly race: Race | null;
 
-  private readonly craft: Group;
+  private readonly craft: Craft;
   private readonly prevPosition = new Vector3();
   private readonly prevOrientation = new Quaternion();
   private preset = 'chase';
@@ -93,7 +94,7 @@ export class World {
     this.spawnAtStart();
 
     this.craft = createCraft(rng.fork(), palette);
-    this.scene.add(this.craft);
+    this.scene.add(this.craft.group);
 
 
     // 背光面不再靠半球光去补,改由 IBL 提供 —— 环境反射来自真实的大气散射,
@@ -138,8 +139,14 @@ export class World {
     shownPosition.lerpVectors(this.prevPosition, this.vehicle.position, alpha);
     shownOrientation.copy(this.prevOrientation).slerp(this.vehicle.orientation, alpha);
 
-    this.craft.position.copy(shownPosition);
-    this.craft.quaternion.copy(shownOrientation);
+    this.craft.group.position.copy(shownPosition);
+    this.craft.group.quaternion.copy(shownOrientation);
+    // 尾焰要油门和速度都满才到全亮:光有油门(起步)或光有速度(松手滑行)
+    // 都只是半亮,踩着油门冲刺才烧起来。
+    this.craft.setThrust(
+      this.input.throttle * CRAFT.thrustThrottleWeight +
+        normalize01(this.vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
+    );
     // 阴影相机只罩住车周围一小块,必须跟着车走。
     this.atmosphere.followShadow(shownPosition.x, shownPosition.y, shownPosition.z);
 

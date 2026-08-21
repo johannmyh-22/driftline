@@ -303,6 +303,26 @@ export const SKY = {
 } as const;
 
 /**
+ * 载具的视觉数值。造型是硬编码在 `gfx/craft.ts` 里的顶点表,这里只放会随
+ * 玩法状态变化的量。
+ */
+export const CRAFT = {
+  /*
+   * 尾焰亮度的倍率,乘在 `palette.craftGlow` 上,结果落在**线性 HDR** 空间。
+   *
+   * 关键是这两个值要**跨过 `POST.bloomThreshold`**:滑行时压在阈值以下,
+   * 尾焰只是一块亮色;全油门时冲过去,bloom 自然烧出光晕。速度感就来自这个
+   * 跨越的瞬间,而不是来自某个专门的特效。改 bloomThreshold 要回头核这两个数。
+   */
+  thrusterIdleGain: 1.1,
+  thrusterFullGain: 7,
+
+  /** 尾焰对速度的敏感度:油门占多少、速度占多少。两者都满才到全亮。 */
+  thrustThrottleWeight: 0.45,
+  thrustSpeedWeight: 0.55,
+} as const;
+
+/**
  * 后处理链的数值。
  *
  * 通篇按「克制」取值:过量的 bloom 和暗角是「电脑画的」最明显的两个特征,
@@ -339,17 +359,22 @@ export const POST = {
    * 所以阈值要比直觉高得多。取 1.1 时天空整片都超阈,被 mip 链一模糊就抹到全屏,
    * 整张图蒙上一层白雾、对比度全丢。现在只有太阳盘附近和尾焰能溢出。
    */
-  bloomStrength: 0.3,
+  bloomStrength: 0.22,
   bloomRadius: 0.5,
   bloomThreshold: 3.5,
   /** bloom 按屏幕比例缩放后再算。输出本来就是一团模糊,半分辨率看不出区别。 */
   bloomResolutionScale: 0.5,
   /**
    * 喂给 bloom 之前把亮度钳到这个上限(线性 HDR)。
-   * 太阳附近的天空能冲破 HalfFloat 的 65504 变成 Inf,不钳制会整屏变黑,
-   * 原因见 `gfx/postprocess.ts` 的 `clampBloomInput()`。
+   *
+   * 首要作用是防 Inf:太阳附近的天空能冲破 HalfFloat 的 65504 变成 Inf,
+   * 不钳制会整屏变黑(见 `gfx/postprocess.ts` 的 `clampBloomInput()`)。
+   *
+   * 但光防 Inf 不够 —— 取 60 时,正对太阳的机位整片天空都远超阈值,摊开之后
+   * 画面糊成一片白雾、细节全丢。真实相机逆光是会起光晕,但不会把画面吃掉。
+   * 压到这个量级,逆光时的光晕收在太阳周围。
    */
-  bloomInputCeiling: 60,
+  bloomInputCeiling: 12,
 
   /*
    * 暗角。`offset` 控制范围、`darkness` 控制混向的目标色。
