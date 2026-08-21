@@ -11,6 +11,7 @@ import { POST, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
 import { Readout } from './game/hud';
+import { initPhysics } from './game/physics';
 import { type CourseKind, World } from './game/world';
 import './style.css';
 
@@ -49,14 +50,15 @@ if (mount === null) {
   throw new Error('缺少 #app 挂载点');
 }
 
-try {
-  boot(mount);
-} catch (error) {
+// 物理引擎的 wasm 要先加载完才能造世界。**这是整个启动路径上唯一的 await** ——
+// 它一失败就什么都别渲染了,直接把错误糊到屏幕上,比留一块黑屏好排查。
+boot(mount).catch((error: unknown) => {
   showFatal(error);
-  throw error;
-}
+});
 
-function boot(container: HTMLDivElement): void {
+async function boot(container: HTMLDivElement): Promise<void> {
+  await initPhysics();
+
   const renderer = new WebGLRenderer({
     // 后处理链接上之后,canvas 自己的 MSAA 就是纯浪费:画面渲进 composer 的
     // render target,最后只往 canvas 上贴一个全屏 quad,而 quad 没有内部边缘可抗。

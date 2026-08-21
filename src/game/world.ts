@@ -17,6 +17,7 @@ import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
+import { Physics } from './physics';
 import { Race } from './race';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
 import { CRAFT, REFERENCE_TOP_SPEED } from './tuning';
@@ -58,6 +59,8 @@ export class World {
   readonly atmosphere: Atmosphere;
   /** 检查点与圈计时。`flat` 场地下是 null —— 那块地没有赛道可计圈。 */
   readonly race: Race | null;
+  /** 物理世界。**造 World 之前必须 await `initPhysics()`**,否则这里会抛。 */
+  readonly physics: Physics;
 
   private readonly craft: Craft;
   private readonly prevPosition = new Vector3();
@@ -94,7 +97,8 @@ export class World {
     }
 
     this.race = this.track === null ? null : new Race(this.track);
-    this.vehicle = new Vehicle(this.field);
+    this.physics = new Physics();
+    this.vehicle = new Vehicle(this.field, this.physics);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
     this.spawnAtStart();
