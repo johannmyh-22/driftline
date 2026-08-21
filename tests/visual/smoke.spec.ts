@@ -148,10 +148,12 @@ test('油门真的能开动车,并且画面跟着变', async ({ page }) => {
   const moved = await run(page, { throttle: 1 }, 90);
   const movedStats = await shoot(page, 'smoke-throttle.png');
 
-  // 静止时几乎不动(只有悬浮沉降),给油后应该沿赛道跑出几十米。
+  // 静止时几乎不动(只有悬浮沉降),给油后应该沿赛道跑出十几米。
+  // 门槛比早期低:起步加速度按人类反馈从 3g 降到约 1.2g(0→100 km/h 2.3 秒),
+  // 90 帧 = 1.5 秒,现在只够跑十几米。这里要的是「车真的动了」,不是具体距离。
   expect(idle['arc'] ?? 99).toBeLessThan(1);
-  expect(moved['arc'] ?? 0).toBeGreaterThan(30);
-  expect(moved['groundSpeed'] ?? 0).toBeGreaterThan(30);
+  expect(moved['arc'] ?? 0).toBeGreaterThan(10);
+  expect(moved['groundSpeed'] ?? 0).toBeGreaterThan(15);
   expect(movedStats.meanColor).not.toEqual(idleStats.meanColor);
   expect(problems).toEqual([]);
 });

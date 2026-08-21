@@ -86,8 +86,10 @@ describe('Vehicle 加速与阻力', () => {
       v.update(go, FIXED_DT);
       frames++;
     }
-    expect(frames / 60).toBeGreaterThan(0.5);
-    expect(frames / 60).toBeLessThan(1.4);
+    // 0.92 秒那一版是 3g 起步,人类试玩后判为「太快、不写实」。现在约 2.3 秒,
+    // 落在高性能量产车(2.5~3.5 秒)偏快的一档 —— 它毕竟是反重力赛车。
+    expect(frames / 60).toBeGreaterThan(1.8);
+    expect(frames / 60).toBeLessThan(3.0);
   });
 
   it('松油门会滑行减速,但不会倒车', () => {
@@ -96,7 +98,9 @@ describe('Vehicle 加速与阻力', () => {
     const before = v.groundSpeed;
 
     drive(v, input(), 3);
-    expect(v.groundSpeed).toBeLessThan(before * 0.7);
+    // 滑行衰减比以前慢得多:线性阻力从 0.18 降到 0.05(那是轮胎滚阻的量级,
+    // 而这台车没有轮胎)。松手后能滑很久,正是「没有轮胎」该有的样子。
+    expect(v.groundSpeed).toBeLessThan(before * 0.97);
     expect(v.groundSpeed).toBeGreaterThan(0);
   });
 
@@ -137,6 +141,38 @@ describe('Vehicle 转向', () => {
    * 出生时 yaw = 0、车头朝 +Z。此时「车头的右手边」= forward × up
    * = (0,0,1) × (0,1,0) = (-1,0,0),也就是世界的 -X。
    */
+  /*
+   * 静止时打满舵,车头一动不动 —— 这条是人类试玩时发现的:原来站着不动也能
+   * 原地左右转,像坦克不像车。
+   *
+   * 根因在 `applySteering()`:能维持的转向速率 `ω = a_lat / v` 的分母写了
+   * `Math.max(speed, 6)` 防除零,于是速度为 0 时它仍是个正数,转向权限没归零。
+   * 偏航靠的是地面/气流给的侧向力,没有速度就没有力可用。
+   */
+  it('静止时打满舵也不会原地转头', () => {
+    const v = makeVehicle();
+    // 先让悬浮沉降稳定下来,免得把「车还在往下掉」误当成有速度。
+    drive(v, input(), 1);
+    const yawBefore = v.yaw;
+
+    drive(v, input({ steer: 1 }), 2);
+
+    expect(v.groundSpeed).toBeLessThan(0.5);
+    expect(Math.abs(v.yaw - yawBefore)).toBeLessThan(0.02);
+  });
+
+  it('起步之后转向权限恢复', () => {
+    const v = makeVehicle();
+    drive(v, input({ throttle: 1 }), 2);
+    const yawBefore = v.yaw;
+
+    drive(v, input({ throttle: 1, steer: 1 }), 1);
+
+    // 跑起来了就该能转 —— 上面那条不能是靠「转向坏掉」通过的。
+    expect(v.groundSpeed).toBeGreaterThan(10);
+    expect(Math.abs(v.yaw - yawBefore)).toBeGreaterThan(0.2);
+  });
+
   it('按右转,车就往车头的右边跑(A/D 不能反)', () => {
     // 先直线加速再打方向,并且只打 1 秒:静止起步满舵 2 秒会转过 200° 以上,
     // 车绕回来了,终点位置就说明不了「往哪边偏」。

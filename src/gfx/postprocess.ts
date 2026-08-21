@@ -142,20 +142,6 @@ export class Postprocess {
     );
   }
 
-  debugSizes(renderer: WebGLRenderer): string {
-    const size = renderer.getSize(new Vector2());
-    const rt1 = this.composer.renderTarget1;
-    const b = this.bloom as unknown as { renderTargetBright?: { width: number; height: number } } | null;
-    const bright = b?.renderTargetBright;
-    return [
-      `renderer=${size.x}x${size.y} dpr=${renderer.getPixelRatio()}`,
-      `rt1=${rt1.width}x${rt1.height}`,
-      `bright=${bright ? `${bright.width}x${bright.height}` : 'n/a'}`,
-      `passes=${this.composer.passes.length}`,
-      `clearAlpha=${renderer.getClearAlpha()}`,
-      `autoClear=${String(renderer.autoClear)}`,
-    ].join(' ');
-  }
 
   dispose(): void {
     this.composer.dispose();

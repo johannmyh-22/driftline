@@ -80,7 +80,6 @@ function boot(container: HTMLDivElement): void {
   // 首帧画完才在 DOM 上打标记。SwiftShader 上一帧要一秒以上,「canvas 元素出现」
   // 远早于「画面上有东西」—— 冒烟测试拿前者当后者用,后处理一接上就开始拍到空白。
   let painted = false;
-  let dbgFrame = 0;
 
   const loop = new Loop({
     update: (dt) => {
@@ -92,10 +91,6 @@ function boot(container: HTMLDivElement): void {
       world.present(alpha);
       readout?.update(world.vehicle.groundSpeed, world.race);
       post.render(world.camera);
-      dbgFrame++;
-      if (dbgFrame === 1 || dbgFrame === 5) {
-        console.warn(`DBG f${dbgFrame} ${post.debugSizes(renderer)}`);
-      }
       if (!painted) {
         painted = true;
         document.documentElement.dataset['painted'] = '1';
