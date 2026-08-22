@@ -638,6 +638,26 @@ export class Vehicle {
       appliedSlot.fz = ctx.normalZ * ctx.load + tireFz;
       commitApplied(i);
 
+      // 轮胎级自回正力矩 (Self-Aligning Torque, SAT):
+      // 总拖距 = 机械拖距(恒定) + 气胎拖距(随滑移角增大衰减)
+      const u = Math.abs(wheel.slipAngle) / TIRE.peakSlipAngle;
+      const pneumatic = (TIRE.pneumaticTrail * Math.max(0, 1 - u)) / (1 + u * u);
+      const trail = TIRE.casterTrail + pneumatic;
+      const sat = -trail * fy;
+      // 接地印痕偏航阻尼 (随载荷缩放)
+      const yawDamp =
+        -TIRE.aligningDamping * s.wy * (ctx.load / TIRE.staticLoadPerWheel);
+      const totalWheelSAT = sat + yawDamp;
+
+      if (totalWheelSAT !== 0) {
+        this.physics.addTorque(
+          this.body,
+          ctx.normalX * totalWheelSAT,
+          ctx.normalY * totalWheelSAT,
+          ctx.normalZ * totalWheelSAT,
+        );
+      }
+
       totalLateralForce += fy;
 
       const budget = ctx.load * TIRE.mu0;
@@ -650,38 +670,8 @@ export class Vehicle {
     this.gripSaturation = saturation;
     this.lateralGripAccel = Math.abs(totalLateralForce) / CAR.mass;
 
-    // 自回正力矩与偏航阻尼: 按 tuning.ts VEHICLE.slipRestoring 施加
-    if (this.grounded && this.groundSpeed > VEHICLE.slipRestoringMinSpeed) {
-      const Iz = (CAR.mass * (CAR.bodyWidth * CAR.bodyWidth + CAR.bodyLength * CAR.bodyLength)) / 12;
-      const vLong = this.velocity.dot(chassisForward);
-      const vLeft = this.velocity.dot(chassisLeft);
-      const beta = Math.atan2(vLeft, Math.max(Math.abs(vLong), SLIP_SPEED_FLOOR));
-      const k = VEHICLE.slipRestoring * 8.0;
-      const c = 2.0 * Math.sqrt(k);
-      const restoreTorque = Iz * (k * beta - c * this.yawRate);
-      const coupleForce = restoreTorque / CAR.wheelBase;
-      const armL = CAR.wheelBase / 2;
-
-      this.physics.addForceAtPoint(
-        this.body,
-        chassisLeft.x * coupleForce,
-        chassisLeft.y * coupleForce,
-        chassisLeft.z * coupleForce,
-        s.x + chassisForward.x * armL,
-        s.y + chassisForward.y * armL,
-        s.z + chassisForward.z * armL,
-      );
-      this.physics.addForceAtPoint(
-        this.body,
-        -chassisLeft.x * coupleForce,
-        -chassisLeft.y * coupleForce,
-        -chassisLeft.z * coupleForce,
-        s.x - chassisForward.x * armL,
-        s.y - chassisForward.y * armL,
-        s.z - chassisForward.z * armL,
-      );
-    } else if (!this.grounded) {
-      const airDamp = Math.max(0, 1 - 4.0 * dt);
+    if (!this.grounded) {
+      const airDamp = Math.max(0, 1 - 10.0 * dt);
       this.physics.setVelocity(
         this.body,
         s.vx,

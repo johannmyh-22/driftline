@@ -134,6 +134,12 @@ export class Physics {
     body.addForceAtPoint(vecA, vecB, true);
   }
 
+  /** 在刚体上施加力矩(牛·米,世界坐标系)。力矩只作用一步,每步重置。 */
+  addTorque(body: RAPIER.RigidBody, tx: number, ty: number, tz: number): void {
+    vecA.x = tx; vecA.y = ty; vecA.z = tz;
+    body.addTorque(vecA, true);
+  }
+
   /** 在世界点上施加冲量(牛·秒)。撞墙这种瞬时事件用它,不用力。 */
   applyImpulseAtPoint(
     body: RAPIER.RigidBody,
