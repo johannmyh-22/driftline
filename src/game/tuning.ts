@@ -682,7 +682,7 @@ export const TIRE = {
    * 接地胎面相对地面旋转时产生的微观剪切阻尼力矩,随垂直载荷成正比缩放。
    * 为整车提供轮胎级的偏航振荡抑制,防止侧滑回正时出现无阻尼的高频摆头(tank slapper)。
    */
-  aligningDamping: 600,
+  aligningDamping: 350,
 } as const;
 
 /** 用于把速度归一化成 0..1(FOV、转向衰减都靠它)。 */
