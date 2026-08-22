@@ -205,3 +205,28 @@ describe('Course 确定性与性能', () => {
     }
   });
 });
+
+describe('Course 弧长边界与环回 (已知缺陷现状快照)', () => {
+  it('起跑线后方微小负向位移会环回至赛道末端弧长 (现状快照, 修复见 HANDOFF 第十八节)', () => {
+    const course = makeCourse(7);
+    const hit = createGroundHit();
+    const start = course.layout.samples[0];
+    if (start === undefined) {
+      throw new Error('采样点缺失');
+    }
+
+    // 在起跑线正后方微小距离 (沿着前进切线反方向倒退 0.01 米)
+    const epsilon = 0.01;
+    const testX = start.x - start.tangentX * epsilon;
+    const testZ = start.z - start.tangentZ * epsilon;
+
+    course.sample(testX, testZ, hit);
+
+    // 现状行为: 闭环赛道首尾相连, 空间索引将起跑线后方的点匹配到最后一个线段 (segment = rows - 1),
+    // 导致计算出的 arc 环绕至赛道总长度附近 (~2736m) 而非保留微小负值或 clamp 为 0。
+    // 这是已知缺陷的现状快照, 锁定当前行为防止无声变化, 修复方案与权衡见 HANDOFF 第十八节。
+    expect(hit.onTrack).toBe(true);
+    expect(hit.arc).toBeGreaterThan(course.layout.totalLength - course.layout.spacing - 1);
+    expect(hit.arc).toBeCloseTo(course.layout.totalLength - epsilon, 0);
+  });
+});
