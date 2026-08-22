@@ -603,3 +603,111 @@ M4 幽灵回放也可以继续存输入序列。守卫在 `tests/unit/physics.te
 - 把「容易做偏的三件事」显式写出来(载荷敏感性、过峰必须下降、NaN 防护)
 - 要求「故意改坏实现,确认测试会红」的自查
 - **但收回来时仍然要自己写探针实测** —— 见上面第 2 条,自查也没拦住那两个缺陷
+
+---
+
+## 十四、外包交接(deepseek-task-allocation,2026-08 诊断+重写轮)
+
+分支 `claude/deepseek-task-allocation-oxuiuo`,切自
+`claude/hopeful-meitner-jdm24i`。**只做了诊断和测试重写,没动手感/物理/
+造型,tuning.ts 一行没改。** 本节的目的是让下一个 session 拿到真实的门面状态,
+别像我接手时那样被「43 条 skip」挡住。
+
+### 四道门的实际状态(逐条贴输出要点)
+
+| 门 | 结果 | 说明 |
+|---|---|---|
+| `npm run typecheck` | ✅ | `tsc --noEmit` 静默通过 |
+| `npm run test -- --run` | ✅ | **184 passed + 17 expected fail,0 skipped**。那 17 条是刻意留红 |
+| `npm run build` | ✅ | 3,551 KB / gzip 1,299 KB(多出的约 1 MB 是 Rapier wasm,M6 处理) |
+| `npm run test:visual` | ⚠ | **11 passed / 2 failed**,且**这两处就是 spin bug 的现实体现,不是截图回路问题** |
+
+`test:visual` 的两个失败(都在 `tests/visual/smoke.spec.ts`):
+
+1. `油门真的能开动车,并且画面跟着变` —— `expect(moved['arc'] ?? 0).toBeGreaterThan(10)`
+   得到 `7.38`。满油门在赛道上车打转、走不远,所以 arc 不到 10。
+2. `起跑时在赛道上,且圈计时从零开始` —— `expect(snapshot['arc']).toBe(0)`
+   得到 `4.14e-05`。advance(1) 后车动了极微,arc 是浮点残差,不是 0。
+
+**按任务约束,这两个失败我都没改去迁就截图** —— 它们属于 spin bug 的
+现象,不是 Playwright/选择器/超时这类截图回路本身的问题。`test:visual` 的
+两个 failed 会在我修 spin bug / 或人类确认画面没问题之前一直留着,接手者
+别把它们当成「截图回路坏了」。
+
+### 任务 B:原地打转的诊断结论(详见 `docs/tasks/spin-diagnosis.md`)
+
+一句话:**车打转的根因是「后轮持续空转(滑移率 15~80 vs 设计峰值 0.12),
+摩擦圆被纵向吃光,后轴侧向抓地几乎归零(只剩前轮的 3~15%)」,叠加
+「左右后轮载荷不对称 → 纵向驱动力产生净偏航力矩」,一旦有了初始偏航就
+没有任何回正机制,于是转速单调放大到 1.98 rad/s、lateralSpeed 5.49。**
+
+三个 seed 实测(满油门直行 90 帧):seed 1337 峰值 yawRate 1.982 / 前 20 帧
+第 2 帧就真转;seed 1 峰值 1.271 / 第 4 帧;seed 42 峰值只有 0.214。
+**平地对照组 yawRate 全程 = 0**(四轮左右对称,纵向力矩两两抵消),证明
+这不是「单轮/左右写反」那种固定 bug,而是「驱动力矩 vs 后轮可用抓地力
+失配 + 载荷不对称点燃」的失稳。**seed 42 又是「恰好不发病」的那个 ——
+调这个 bug 千万别只信默认截图**(`HANDOFF` 第五节第 7 条的第三次变体)。
+
+探针:`npm run spin-probe -- --seeds=1337,1,42 --frames=90 --course=race`。
+原始 CSV 在 `tests/visual/__output__/diagnostics/`(已 gitignore,没提交)。
+
+### 任务 C:43 条 skipped 规格的重写情况
+
+三个文件的 `describe.skip` **全部去掉**,现在是 0 skipped。结论分两类:
+
+- **现在能绿、且断言真实约束的**(不锁死实现,留合理容差):
+  - `vehicle.test.ts`:四轮接地稳定、从高处落下回稳、**0→100 km/h 约 4.25s
+    恰好落在 HANDOFF 的「四秒出头」**、滑行不反向、空气刹强于滑行、倒车弱于
+    前进、静止打满舵不转头、**A/D 方向不反(位置断言)**、左右满舵镜像。
+  - `grip.test.ts`:**摩擦圆必须封得住** —— 随机操纵扫 6 秒,逐帧逐轮断言
+    每条胎合力 ≤ μ(load)·load·1.02(载荷敏感会让 μ 在低载上涨,所以上界
+    用 `mu0*(1+loadSensitivity)` 这个理论天花板);护栏含车。
+  - `race.test.ts`:检查点按顺序不跳、出界超过宽限时间重置回最近检查点、
+    宽限内回到赛道不传送。**注意:出界/挪车不再用 `position.x+=400`**(四轮
+    模型里 position 是刚体只读反影,直接改无效),一律走 `vehicle.reset()`。
+
+- **反映正确目标、但现在会红、且确定是 spin bug 导致的**:标
+  `it.fails('等 spin bug 修复后启用')`,共 **17 条**。**不允许为绿去改目标
+  数值迁就 bug**,接手修完 spin 后把 `.fails` 去掉即可。逐条:
+
+  | 文件 | 留红条文 | 为什么留红 |
+  |---|---|---|
+  | vehicle | 满油门直线 15s 不原地打转 | 正是 spin bug |
+  | vehicle | 高速满舵 2s 不原地画圈 | 同上 |
+  | grip | 全油门不减速冲弯滑向墙(必须有速度代价) | 车打转走不到墙、测不出饱和 |
+  | grip | 持续过弯峰值侧向抓地 1.3~1.6g 且 yawRate<2 | 打转读不到干净的过弯 |
+  | grip | 侧滑后车头被拉回行进方向(有回正力矩) | spin bug 无后轮回正 |
+  | race | 10 个 seed 各在 240s 内跑完一圈不出界 | 打转跑不完一圈(M2 主力验收) |
+  | race | 跑完一整圈才计圈、记录圈时与最快圈 | 同上 |
+  | race | 进度按已过检查点单调推进到 1 | 同上 |
+
+### 我改动的文件清单(相对分支基点的完整 diff)
+
+| 文件 | 改了什么 |
+|---|---|
+| `src/game/diagnostics.ts` | **新增**。轮子级遥测采集层:每帧把 already 算好的量复写进预分配缓冲,热路径不分配对象;`setTelemetryEnabled`/`readTelemetry` 只在探针开时工作,关闭零开销 |
+| `src/game/vehicle.ts` | 只加「把已算好的轮子数据写进 diagnostic 槽」的几处调用 + 把 `for..of` 换成带 index 的循环。**物理/轮胎逻辑零改动**(确定性与数值测试全绿) |
+| `src/main.ts` | test API 挂 `setTelemetryEnabled` / `readVehicleTelemetry` 两个方法 |
+| `src/core/testApi.ts` | `DriftlineTestApi` 接口加上述两方法 |
+| `scripts/spin-probe.ts` | **新增**。确定性步进探针,>=3 seed 逐帧采每轮数据导出 CSV+JSON,并算每轮 yaw 力矩来源分解 |
+| `tests/unit/diagnostics.test.ts` | **新增**。遥测开/关、读单帧有效、关闭不写缓冲,3 条 |
+| `tests/unit/{vehicle,grip,race}.test.ts` | 43 条 skip 全重写(见上节),0 skipped |
+| `package.json` | 加 `spin-probe` npm script |
+| `docs/tasks/spin-diagnosis.md` | **新增**。Task B 完整诊断 |
+
+### 我没做的事 / 我不确定的地方(明说)
+
+- **没做**:没调任何手感数值,`src/game/tuning.ts` 一个字节没动;没改车辆
+  物理/轮胎模型实现逻辑(vehicle/tire/physics 只有诊断接线,无行为变化);
+  没加造型/轮子(那是下个 PR);没顺手重构;没动别的分支、没开 PR、没合并。
+- **不确定 1**:`it.fails` 的 17 条是否每条都精准挂在「spin bug」上,我只
+  确认了它们是「跑不完/打转/测不出」这一类,没逐一核对每条挂在哪一行。
+  接手者若发现某条其实是别的 bug,请单独处理。
+- **不确定 2**:`test:visual` 的两个失败我判断是 spin bug 现象而非截图回路
+  问题,但没深挖(例如那个 `arc` 浮点 4.1e-5 到底是从 `advance(1)` 的
+  哪一步积累来的)。这可能值得单独看一眼。
+- **不确定 3**:诊断遥测的 `frameSlot` 用的是 `this.state`(Rapier 刚体原值),
+  `yaw` 用 `this.yaw`(writeBack 之后的值),两者来源一致但顺序上 `edit` 后
+  有细微差别,未做逐位对照 —— 对本次诊断结论无影响。
+- **遗留**:`docs/tasks/spin-diagnosis.md` 末尾写了「tuning.ts 一行没动」,
+  与本节一致;探针产物在 gitignore 的 `__output__/diagnostics/`,没提交。
