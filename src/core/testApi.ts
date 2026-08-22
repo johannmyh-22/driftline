@@ -1,4 +1,5 @@
 import type { InputFrame } from './input';
+import type { FrameTelemetry } from '../game/diagnostics';
 
 /**
  * 无头验证契约。契约本体写在根目录 CLAUDE.md,这里是它的类型化落地。
@@ -23,6 +24,15 @@ export interface DriftlineTestApi {
   setInput(input: Partial<InputFrame>): void;
   /** M1 新增:把载具放回出生点并清空输入。让一次页面加载能跑多个场景。 */
   reset(): void;
+  /**
+   * 「原地打转」诊断探针专用:开/关每帧的轮子级遥测采样。
+   *
+   * 采样是全静态的、每帧就地复写,不开销就不写;关掉后 vehicle 每帧照常跑。
+   * 探测脚本在 `advance(N)` 之后读 `readVehicleTelemetry()` 拿到最后一帧。
+   */
+  setTelemetryEnabled(flag: boolean): void;
+  /** 读走上一帧的轮子级遥测(在 advance/reset 之后调用)。 */
+  readVehicleTelemetry(): FrameTelemetry;
 }
 
 declare global {

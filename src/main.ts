@@ -9,6 +9,10 @@ import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
 import { POST, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
+import {
+  readTelemetry as readVehicleTelemetry,
+  setTelemetryEnabled,
+} from './game/diagnostics';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
 import { Readout } from './game/hud';
 import { initPhysics } from './game/physics';
@@ -151,6 +155,10 @@ async function boot(container: HTMLDivElement): Promise<void> {
         world.chase.snapTo(world.vehicle);
         world.present(1);
       },
+      setTelemetryEnabled: (flag) => {
+        setTelemetryEnabled(flag);
+      },
+      readVehicleTelemetry: () => readVehicleTelemetry(),
       snapshot: () => ({
         frame: loop.frame,
         elapsed: loop.elapsed,

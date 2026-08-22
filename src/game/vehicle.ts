@@ -4,6 +4,15 @@ import { clamp, damp, normalize01 } from '../core/mathx';
 import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
 import { type BodyState, type Physics, createBodyState } from './physics';
 import { type TireForce, type TireState, tireForce } from './tire';
+import {
+  appliedSlot,
+  beginTelemetryFrame,
+  commitApplied,
+  commitFrame,
+  commitWheel,
+  frameSlot,
+  wheelSlot,
+} from './diagnostics';
 import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
 
 // 每帧路径上的临时量,全部提到模块作用域复用。60Hz 下新建 Vector3 的 GC 抖动看得见。
@@ -190,6 +199,8 @@ export class Vehicle {
   update(input: InputFrame, dt: number): void {
     // 先清掉上一步的力:Rapier 的 addForce 是持续力,不清会逐帧累加成指数爆炸。
     this.physics.resetForces(this.body);
+    // 清空上一帧的遥测缓冲,免得「上一帧接地、这一帧离地」的轮子残留旧数据。
+    beginTelemetryFrame();
 
     this.physics.read(this.body, this.state);
     this.readBasis();
@@ -200,8 +211,12 @@ export class Vehicle {
     let groundedCount = 0;
     let saturation = 0;
 
-    for (const wheel of this.wheels) {
-      const result = this.driveWheel(wheel, input, dt);
+    for (let i = 0; i < this.wheels.length; i++) {
+      const wheel = this.wheels[i];
+      if (wheel === undefined) {
+        continue;
+      }
+      const result = this.driveWheel(wheel, i, input, dt);
       totalLateralForce += result.lateral;
       saturation = Math.max(saturation, result.saturation);
       if (wheel.grounded) {
@@ -219,6 +234,21 @@ export class Vehicle {
     this.physics.read(this.body, this.state);
     this.writeBack();
     this.resolveWall();
+
+    // 诊断探针的整车帧采样(read 之后才算数),只复写预分配槽,见 diagnostics.ts。
+    frameSlot.x = this.state.x;
+    frameSlot.y = this.state.y;
+    frameSlot.z = this.state.z;
+    frameSlot.vx = this.state.vx;
+    frameSlot.vy = this.state.vy;
+    frameSlot.vz = this.state.vz;
+    frameSlot.qx = this.state.qx;
+    frameSlot.qy = this.state.qy;
+    frameSlot.qz = this.state.qz;
+    frameSlot.qw = this.state.qw;
+    frameSlot.yaw = this.yaw;
+    frameSlot.yawRate = this.yawRate;
+    commitFrame();
   }
 
   /** 从刚体姿态取出车身三轴。 */
@@ -243,6 +273,7 @@ export class Vehicle {
   /** 算一个轮子的悬挂力与轮胎力并施加,返回它对整车的侧向贡献。 */
   private driveWheel(
     wheel: Wheel,
+    index: number,
     input: InputFrame,
     dt: number,
   ): { lateral: number; saturation: number } {
@@ -273,6 +304,24 @@ export class Vehicle {
       wheel.slipAngle = 0;
       // 离地的轮子没有地面力矩,只有制动能改变它的转速。
       this.integrateSpin(wheel, input, 0, dt);
+      wheelSlot.grounded = false;
+      wheelSlot.length = maxLength;
+      wheelSlot.compression = 0;
+      wheelSlot.load = 0;
+      wheelSlot.slipRatio = 0;
+      wheelSlot.slipAngle = 0;
+      wheelSlot.fx = 0;
+      wheelSlot.fy = 0;
+      wheelSlot.px = 0;
+      wheelSlot.py = 0;
+      wheelSlot.pz = 0;
+      wheelSlot.wfX = 0;
+      wheelSlot.wfY = 0;
+      wheelSlot.wfZ = 0;
+      wheelSlot.wlX = 0;
+      wheelSlot.wlY = 0;
+      wheelSlot.wlZ = 0;
+      commitWheel(index);
       return { lateral: 0, saturation: 0 };
     }
 
@@ -303,6 +352,24 @@ export class Vehicle {
       wheel.slipRatio = 0;
       wheel.slipAngle = 0;
       this.integrateSpin(wheel, input, 0, dt);
+      wheelSlot.grounded = true;
+      wheelSlot.length = wheel.length;
+      wheelSlot.compression = compression;
+      wheelSlot.load = load;
+      wheelSlot.slipRatio = 0;
+      wheelSlot.slipAngle = 0;
+      wheelSlot.fx = 0;
+      wheelSlot.fy = 0;
+      wheelSlot.px = contact.x;
+      wheelSlot.py = contact.y;
+      wheelSlot.pz = contact.z;
+      wheelSlot.wfX = 0;
+      wheelSlot.wfY = 0;
+      wheelSlot.wfZ = 0;
+      wheelSlot.wlX = 0;
+      wheelSlot.wlY = 0;
+      wheelSlot.wlZ = 0;
+      commitWheel(index);
       return { lateral: 0, saturation: 0 };
     }
 
@@ -312,6 +379,13 @@ export class Vehicle {
       normal.x * load, normal.y * load, normal.z * load,
       contact.x, contact.y, contact.z,
     );
+    // 记录该轮施加的悬挂法向力与其作用点(先存槽,轮胎力算完再合进一条合力)。
+    appliedSlot.px = contact.x;
+    appliedSlot.py = contact.y;
+    appliedSlot.pz = contact.z;
+    appliedSlot.fx = normal.x * load;
+    appliedSlot.fy = normal.y * load;
+    appliedSlot.fz = normal.z * load;
 
     // 轮子指向:前轮跟着方向盘绕车身 up 轴转。
     wheelForward.copy(chassisForward);
@@ -354,13 +428,38 @@ export class Vehicle {
 
     const fx = tireOut.longitudinal;
     const fy = tireOut.lateral;
+    const tireFx = wheelForward.x * fx + wheelLeft.x * fy;
+    const tireFy = wheelForward.y * fx + wheelLeft.y * fy;
+    const tireFz = wheelForward.z * fx + wheelLeft.z * fy;
     this.physics.addForceAtPoint(
       this.body,
-      wheelForward.x * fx + wheelLeft.x * fy,
-      wheelForward.y * fx + wheelLeft.y * fy,
-      wheelForward.z * fx + wheelLeft.z * fy,
+      tireFx, tireFy, tireFz,
       contact.x, contact.y, contact.z,
     );
+
+    wheelSlot.grounded = true;
+    wheelSlot.length = wheel.length;
+    wheelSlot.compression = compression;
+    wheelSlot.load = load;
+    wheelSlot.slipRatio = wheel.slipRatio;
+    wheelSlot.slipAngle = wheel.slipAngle;
+    wheelSlot.fx = fx;
+    wheelSlot.fy = fy;
+    wheelSlot.px = contact.x;
+    wheelSlot.py = contact.y;
+    wheelSlot.pz = contact.z;
+    wheelSlot.wfX = wheelForward.x;
+    wheelSlot.wfY = wheelForward.y;
+    wheelSlot.wfZ = wheelForward.z;
+    wheelSlot.wlX = wheelLeft.x;
+    wheelSlot.wlY = wheelLeft.y;
+    wheelSlot.wlZ = wheelLeft.z;
+    commitWheel(index);
+    // 把轮胎力叠进刚才记的悬挂法向力,得到该轮施加到车身的完整世界系合力。
+    appliedSlot.fx = normal.x * load + tireFx;
+    appliedSlot.fy = normal.y * load + tireFy;
+    appliedSlot.fz = normal.z * load + tireFz;
+    commitApplied(index);
 
     this.integrateSpin(wheel, input, fx, dt);
 
