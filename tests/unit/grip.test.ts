@@ -101,8 +101,8 @@ describe('四轮:摩擦圆必须封得住', () => {
   });
 });
 
-describe('四轮:打转 / 过弯代价(等 spin bug 修复后启用)', () => {
-  it.fails('全油门不减速冲弯会滑向墙 —— 过弯必须付出速度代价', () => {
+describe('四轮:打转 / 过弯代价', () => {
+  it('全油门不减速冲弯会滑向墙 —— 过弯必须付出速度代价', () => {
     // 「过弯要有速度代价,不做怎么开都能拽回去的街机手感」。
     const { vehicle, pilot } = makeCourse(1);
     const input = createInputFrame();
@@ -125,7 +125,7 @@ describe('四轮:打转 / 过弯代价(等 spin bug 修复后启用)', () => {
     expect(hitWall).toBe(true);
   });
 
-  it.fails('持续过弯的峰值侧向抓地应落在 1.3~1.6 g,且不应原地打转', () => {
+  it('持续过弯的峰值侧向抓地应落在 1.3~1.6 g,且不应原地打转', () => {
     // HANDOFF 目标:峰值侧向加速度 1.3 ~ 1.6 g(悬浮版 3.80 g 是没重做前的值)。
     // 测法:先在直道上推起速度,再满舵过弯一段时间,盯峰值侧向抓地。
     const { vehicle, pilot } = makeCourse(1);
@@ -152,7 +152,7 @@ describe('四轮:打转 / 过弯代价(等 spin bug 修复后启用)', () => {
     expect(Math.abs(peakYawRate)).toBeLessThan(2.0);
   });
 
-  it.fails('侧滑之后车头会被拉回行进方向(有回正力矩)', () => {
+  it('侧滑之后车头会被拉回行进方向(有回正力矩)', () => {
     // 真车靠后轮侧向力自回正;spin bug 正是因为没有后轮侧向抓地而回不来。
     const { vehicle, pilot } = makeCourse(3);
     const input = createInputFrame();

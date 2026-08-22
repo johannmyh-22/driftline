@@ -84,9 +84,9 @@ beforeAll(async () => {
   await initPhysics();
 });
 
-describe('M2 验收:10 个 seed 都能跑完(等 spin bug 修复后启用)', () => {
+describe('M2 验收:10 个 seed 都能跑完', () => {
   for (let seed = 1; seed <= 10; seed++) {
-    it.fails(`seed ${seed} 能在 240 秒内跑完一圈且不出界`, () => {
+    it(`seed ${seed} 能在 240 秒内跑完一圈且不出界`, () => {
       const rig = makeRig(seed);
       autodrive(rig, 240);
 
@@ -167,8 +167,8 @@ describe('Race 出界重置', () => {
   });
 });
 
-describe('Race 整圈驱动(等 spin bug 修复后启用)', () => {
-  it.fails('跑完一圈才计一圈,并记录圈时与最快圈', () => {
+describe('Race 整圈驱动', () => {
+  it('跑完一圈才计一圈,并记录圈时与最快圈', () => {
     const rig = makeRig(4);
     expect(rig.race.laps).toBe(0);
     expect(rig.race.bestLapTime).toBe(0);
@@ -181,7 +181,7 @@ describe('Race 整圈驱动(等 spin bug 修复后启用)', () => {
     expect(rig.race.bestLapTime).toBeLessThanOrEqual(rig.race.lastLapTime + 1e-9);
   });
 
-  it.fails('进度按已过检查点算,单调推进到 1', () => {
+  it('进度按已过检查点算,单调推进到 1', () => {
     const rig = makeRig(5);
     expect(rig.race.progress).toBe(0);
     autodrive(rig, 240);

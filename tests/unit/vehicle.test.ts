@@ -165,8 +165,8 @@ describe('Vehicle 四轮:纵向加速', () => {
     expect(Number.isFinite(v.yawRate)).toBe(true);
   });
 
-  it.fails(
-    '满油门直线行驶不应原地打转 —— 回正力矩要能把车尾拉直(等 spin bug 修复后启用)',
+  it(
+    '满油门直线行驶不应原地打转 —— 回正力矩要能把车尾拉直',
     { timeout: 30_000 },
     () => {
       // 平地长期满油门是测这套「打转」最干净的场景:没有赛道出生点那一点
@@ -224,8 +224,8 @@ describe('Vehicle 四轮:转向', () => {
     expect(right.yaw).toBeCloseTo(-left.yaw, 0);
   });
 
-  it.fails(
-    '高速满舵不应原地打转、持续过弯侧滑角不应失控(等 spin bug 修复后启用)',
+  it(
+    '高速满舵不应原地打转、持续过弯侧滑角不应失控',
     { timeout: 30_000 },
     () => {
       const v = makeVehicle();

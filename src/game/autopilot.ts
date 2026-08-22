@@ -30,7 +30,7 @@ export class Autopilot {
     const here = Math.floor(vehicle.arc / spacing) % count;
 
     // 前视距离随速度增长:低速时贴着线走,高速时提前切入,不然过弯必冲出去。
-    const lookAhead = 26 + vehicle.groundSpeed * 0.75;
+    const lookAhead = 20 + vehicle.groundSpeed * 0.60;
     const aheadIndex = (here + Math.round(lookAhead / spacing)) % count;
     const target = samples[aheadIndex];
     if (target === undefined) {
@@ -51,16 +51,24 @@ export class Autopilot {
     }
 
     // yaw 增大是左转,而 steer 为正是右转,所以取负。
-    out.steer = clamp(-error * 2.2, -1, 1);
+    out.steer = clamp(-error * 2.5, -1, 1);
 
     // 前方越弯,油门收得越多。看得比转向更远,给减速留出距离。
-    const scanIndex = (here + Math.round((lookAhead * 1.8) / spacing)) % count;
-    const bend = Math.abs(samples[scanIndex]?.bank ?? 0);
-    const speed01 = normalize01(vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED);
-    const wantsSlowing = bend > 0.12 && speed01 > 0.45;
+    const scanIndex = (here + Math.round((lookAhead * 2.0) / spacing)) % count;
+    const currSample = samples[here] ?? samples[0]!;
+    const aheadSample = samples[scanIndex] ?? currSample;
+    const bend = Math.abs(aheadSample.bank ?? 0);
+    const dTangent = Math.hypot(
+      aheadSample.tangentX - currSample.tangentX,
+      aheadSample.tangentZ - currSample.tangentZ,
+    );
+    const isCurve = bend > 0.05 || dTangent > 0.10;
 
-    out.throttle = wantsSlowing ? 0.2 : 1;
+    const speed01 = normalize01(vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED);
+    const wantsSlowing = isCurve && speed01 > 0.28;
+
+    out.throttle = wantsSlowing ? 0 : 1;
     out.reverse = 0;
-    out.airBrake = wantsSlowing && speed01 > 0.7 ? 1 : 0;
+    out.airBrake = wantsSlowing && speed01 > 0.32 ? 1 : 0;
   }
 }

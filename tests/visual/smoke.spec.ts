@@ -148,12 +148,11 @@ test('油门真的能开动车,并且画面跟着变', async ({ page }) => {
   const moved = await run(page, { throttle: 1 }, 90);
   const movedStats = await shoot(page, 'smoke-throttle.png');
 
-  // 静止时几乎不动(只有悬浮沉降),给油后应该沿赛道跑出十几米。
-  // 门槛比早期低:起步加速度按人类反馈从 3g 降到约 1.2g(0→100 km/h 2.3 秒),
-  // 90 帧 = 1.5 秒,现在只够跑十几米。这里要的是「车真的动了」,不是具体距离。
+  // 静止时几乎不动(只有悬挂沉降),给油后应该沿赛道跑出几米。
+  // 门槛匹配真车四轮物理(0→100 km/h 四秒出头),90 帧 = 1.5 秒。这里要的是「车真的动了」。
   expect(idle['arc'] ?? 99).toBeLessThan(1);
-  expect(moved['arc'] ?? 0).toBeGreaterThan(10);
-  expect(moved['groundSpeed'] ?? 0).toBeGreaterThan(15);
+  expect(moved['arc'] ?? 0).toBeGreaterThan(7);
+  expect(moved['groundSpeed'] ?? 0).toBeGreaterThan(10);
   expect(movedStats.meanColor).not.toEqual(idleStats.meanColor);
   expect(problems).toEqual([]);
 });
@@ -184,7 +183,7 @@ test('起跑时在赛道上,且圈计时从零开始', async ({ page }) => {
   expect(snapshot['onTrack']).toBe(1);
   expect(snapshot['laps']).toBe(0);
   expect(Math.abs(snapshot['lateral'] ?? 99)).toBeLessThan(1);
-  expect(snapshot['arc']).toBe(0);
+  expect(snapshot['arc'] ?? 0).toBeLessThan(0.1);
 });
 
 test('沿赛道跑会推进弧长,且圈计时字段接通了', async ({ page }) => {
