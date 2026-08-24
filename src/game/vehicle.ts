@@ -503,7 +503,10 @@ export class Vehicle {
       // 侧之后纵向力开始掉,摩擦圆被纵向吃光,侧向力让位,这就是油门甩尾。
       // 原来这里钉死在 1.05 倍峰值,等于装了个永远关不掉的牵引力控制。
       const excess = Math.abs(rearDriveTotal) / peak_torque - 1;
-      const slipScale = Math.min(TIRE.overdriveSlipMax, 1 + TIRE.overdriveSlipGain * excess);
+      // 低速时放大量淡入,见 TIRE.overdriveSlipSpeed 的注释。
+      const gain =
+        TIRE.overdriveSlipGain * Math.min(1, this.groundSpeed / TIRE.overdriveSlipSpeed);
+      const slipScale = Math.min(TIRE.overdriveSlipMax, 1 + gain * excess);
       const targetSlip = TIRE.peakSlipRatio * slipScale * Math.sign(rearDriveTotal);
       const w_target = (vLong_avg + targetSlip * ref_rear) / R;
       const K_rear = (peak_rear * R * R) / (TIRE.peakSlipRatio * ref_rear);

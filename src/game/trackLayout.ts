@@ -91,8 +91,11 @@ export function generateTrack(rng: Rng): TrackLayout {
  * 都没动**,「物理查询的面 == 渲染出来的面」那条不变量不受影响;起跑线的贴图、
  * 检查点、出界重置全都跟着 0 号点走,自动对齐。
  *
- * 选法是**最小干预**:原来的 0 号点只要不逆光就原样留着,确实逆光了才沿赛道
- * 方向往后找第一个合格的。所以大多数 seed 的画面和之前完全一样。
+ * 选法是**最小干预**:原来的 0 号点只要合格就原样留着,不合格才沿赛道方向往后
+ * 找第一个合格的。
+ *
+ * 合格有两条:不逆光,而且**要在平地上**。斜坡起步的话人还没动车就顺着重力
+ * 往下溜了 —— 滚动阻力只吃得住 1.5% 以下的缓坡,再陡就留不住。
  */
 export function alignStartAwayFromSun(
   layout: TrackLayout,
@@ -104,6 +107,21 @@ export function alignStartAwayFromSun(
     return layout;
   }
   return { ...layout, samples: rotateStart(layout.samples, startIndex, layout.spacing) };
+}
+
+/** 采样点处沿赛道方向的坡度(高度差 / 水平距离),取前后两点的中心差分。 */
+function gradeAt(samples: readonly TrackSample[], index: number): number {
+  const count = samples.length;
+  const prev = samples[(index - 1 + count) % count];
+  const next = samples[(index + 1) % count];
+  if (prev === undefined || next === undefined) {
+    return 0;
+  }
+  const run = Math.hypot(next.x - prev.x, next.z - prev.z);
+  if (run < 1e-6) {
+    return 0;
+  }
+  return Math.abs(next.y - prev.y) / run;
 }
 
 function chooseStartIndex(
@@ -130,7 +148,7 @@ function chooseStartIndex(
     }
     // 切线是单位向量,所以点积直接就是夹角余弦:1 = 车头正对太阳。
     const dot = sample.tangentX * towardSunX + sample.tangentZ * towardSunZ;
-    if (dot <= limit) {
+    if (dot <= limit && gradeAt(samples, i) <= TRACK.startMaxGrade) {
       return i;
     }
     if (dot < fallbackDot) {

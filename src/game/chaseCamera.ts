@@ -10,6 +10,8 @@ const forward = new Vector3();
 const shownPosition = new Vector3();
 const shownLook = new Vector3();
 const upAxis = new Vector3(0, 1, 0);
+/** 注视点处的地面查询结果。每帧路径上,复用。 */
+const lookHit = createGroundHit();
 const AXIS_Z = new Vector3(0, 0, 1);
 const rollQuat = new Quaternion();
 
@@ -135,5 +137,19 @@ export class ChaseCamera {
       .copy(vehicle.position)
       .addScaledVector(forward, CAMERA.lookAhead)
       .addScaledVector(upAxis, CAMERA.lookUp);
+
+    /*
+     * 注视点跟着**前方地面**走,而不是钉在车身的水平前方。
+     *
+     * 钉死的话上坡时路面从下方抬起来糊住画面,看不到前面的路;下坡时又只剩天。
+     * 这里取车前方 `lookAhead` 处的地面高度,把注视点抬到它上面 `lookUp`,
+     * 相机自然就有了俯仰。落差用 `slopeLookLimit` 夹住:跳台边缘那种断崖会让
+     * 采样点比车低十几米,不夹的话镜头会突然甩向地面。
+     */
+    this.field.sample(lookTarget.x, lookTarget.z, lookHit);
+    const groundLook = lookHit.height + CAMERA.lookUp;
+    const flatLook = vehicle.position.y + CAMERA.lookUp;
+    lookTarget.y =
+      flatLook + clamp(groundLook - flatLook, -CAMERA.slopeLookLimit, CAMERA.slopeLookLimit);
   }
 }

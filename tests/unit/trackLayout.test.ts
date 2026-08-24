@@ -189,8 +189,21 @@ describe('alignStartAwayFromSun', () => {
     }
   });
 
-  it('原来的起点不逆光时原样返回', () => {
-    const base = generateTrack(new Rng(5));
+  it('原来的起点已经合格时原样返回', () => {
+    // 合格有两条:不逆光、而且在平地上。太阳可以摆到车尾后面把第一条满足掉,
+    // 但坡度是赛道自己的形状,只能挑一个 0 号点本来就够平的 seed。
+    let base = generateTrack(new Rng(5));
+    for (let seed = 1; seed <= 40; seed++) {
+      const candidate = generateTrack(new Rng(seed));
+      const prev = candidate.samples[candidate.samples.length - 1]!;
+      const next = candidate.samples[1]!;
+      const run = Math.hypot(next.x - prev.x, next.z - prev.z);
+      if (run > 1e-6 && Math.abs(next.y - prev.y) / run <= TRACK.startMaxGrade) {
+        base = candidate;
+        break;
+      }
+    }
+
     const start = base.samples[0];
     if (start === undefined) {
       throw new Error('赛道没有采样点');
