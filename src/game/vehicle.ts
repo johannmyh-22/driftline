@@ -595,7 +595,13 @@ export class Vehicle {
       tireState.friction = ctx.friction;
       tireForce(tireState, tireOut);
 
-      const fx = tireOut.longitudinal;
+      // 滚动阻力:轮胎变形的迟滞损失,和滑移率无关,只跟载荷与滚动方向有关。
+      // 缺了它,车在任意非零坡度上都会无休止加速 —— 真车在 1.5% 以下的缓坡
+      // 空挡也停得住,因为下滑分量吃不动这份阻力。tanh 让它在零速附近平滑
+      // 收敛到 0,不会在静止时抖着换向。
+      const rolling =
+        -TIRE.rollingResistance * ctx.load * Math.tanh(ctx.vLong / TIRE.rollingResistanceSpeed);
+      const fx = tireOut.longitudinal + rolling;
       const fy = tireOut.lateral;
       const tireFx = ctx.wfX * fx + ctx.wlX * fy;
       const tireFy = ctx.wfY * fx + ctx.wlY * fy;

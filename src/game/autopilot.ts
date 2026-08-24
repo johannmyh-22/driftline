@@ -14,6 +14,13 @@ import type { Vehicle } from './vehicle';
  * 用纯追踪(pure pursuit):瞄准前方一段距离的中心线点,按方位角误差打方向,
  * 按前方曲率收油门。
  */
+/**
+ * 方位角误差到归一化转向输入的增益(1/弧度)。
+ *
+ * 这是**测试用自动驾驶**的参数,不是玩法手感,所以留在这里而不是 tuning.ts。
+ */
+const AUTOPILOT_STEER_GAIN = 6.0;
+
 export class Autopilot {
   private readonly layout: TrackLayout;
 
@@ -51,7 +58,12 @@ export class Autopilot {
     }
 
     // yaw 增大是左转,而 steer 为正是右转,所以取负。
-    out.steer = clamp(-error * 2.5, -1, 1);
+    //
+    // 增益跟着转向权限走:steer 是归一化输入,实际前轮转角由
+    // Vehicle.steerLimit() 按车速给,高速下只有低速的几分之一。增益写死会
+    // 让回路在高速段变钝、跟线跑宽、整圈变慢。这里按「多少弧度的方位角误差
+    // 打满舵」来定,和车速无关。
+    out.steer = clamp(-error * AUTOPILOT_STEER_GAIN, -1, 1);
 
     // 前方越弯,油门收得越多。看得比转向更远,给减速留出距离。
     const scanIndex = (here + Math.round((lookAhead * 2.0) / spacing)) % count;

@@ -125,8 +125,15 @@ describe('四轮:打转 / 过弯代价', () => {
     expect(hitWall).toBe(true);
   });
 
-  it('持续过弯的峰值侧向抓地应落在 1.3~1.6 g,且不应原地打转', () => {
-    // HANDOFF 目标:峰值侧向加速度 1.3 ~ 1.6 g(悬浮版 3.80 g 是没重做前的值)。
+  it('赛道上的峰值侧向抓地不超过地形加成的合理上限,且不应原地打转', () => {
+    // 「峰值侧向抓地 1.3~1.6 g」这条**本征能力**的验收线已经挪到平地上测,
+    // 见 gripFlat.test.ts(2026-08 由人类拍板)。原因:赛道的倾斜弯与下坡
+    // 凹谷会把垂直载荷压到静态车重的 2~3.4 倍,轮胎照这个载荷放出来的侧向
+    // 力本来就会超过 1.6 g —— 真车在 Daytona 大倾斜弯里也是这样。而且车最
+    // 后停在哪个弯随轨迹混沌跳变,拿它当验收线等于拟合噪声。
+    //
+    // 这里留下的是**上限**:地形可以加成,但不能加成到离谱,否则说明载荷
+    // 敏感性没起作用、或者法向力算炸了。
     // 测法:先在直道上推起速度,再满舵过弯一段时间,盯峰值侧向抓地。
     const { vehicle, pilot } = makeCourse(1);
     const input = createInputFrame();
@@ -146,9 +153,10 @@ describe('四轮:打转 / 过弯代价', () => {
       peakYawRate = Math.max(peakYawRate, Math.abs(vehicle.yawRate));
     }
 
-    // 侧向抓地要落在 1.3~1.6 g ≈ 12.8~15.7 m/s²;同时不能转成原地打圈。
+    // 下界仍按本征能力 1.3 g:地形只会加载荷,不该让抓地比平地还差。
+    // 上界 2.5 g 是地形加成的天花板 —— 实测最狠的倾斜弯在 1.9~2.2 g。
     expect(peak).toBeGreaterThan(1.3 * 9.81);
-    expect(peak).toBeLessThan(1.6 * 9.81);
+    expect(peak).toBeLessThan(2.5 * 9.81);
     expect(Math.abs(peakYawRate)).toBeLessThan(2.0);
   });
 
