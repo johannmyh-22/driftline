@@ -82,3 +82,10 @@ body {
   letter-spacing: 0.05em;
   opacity: 0.8;
 }
+
+.readout-build {
+  margin: 0.35rem 0 0;
+  font-size: 0.7rem;
+  opacity: 0.45;
+  letter-spacing: 0.03em;
+}

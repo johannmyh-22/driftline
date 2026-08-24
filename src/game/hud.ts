@@ -32,7 +32,12 @@ export class Readout {
     this.timing = document.createElement('p');
     this.timing.className = 'readout-timing';
 
-    this.root.append(this.timing, value, help);
+    // 试玩反馈要能对上具体哪一版,不然手感改动分辨不出新旧。
+    const build = document.createElement('p');
+    build.className = 'readout-build';
+    build.textContent = __BUILD_ID__;
+
+    this.root.append(this.timing, value, help, build);
     parent.append(this.root);
   }
 

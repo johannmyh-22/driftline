@@ -19,7 +19,7 @@ import type { Vehicle } from './vehicle';
  *
  * 这是**测试用自动驾驶**的参数,不是玩法手感,所以留在这里而不是 tuning.ts。
  */
-const AUTOPILOT_STEER_GAIN = 6.0;
+const AUTOPILOT_STEER_GAIN = 8.0;
 
 export class Autopilot {
   private readonly layout: TrackLayout;
@@ -79,8 +79,12 @@ export class Autopilot {
     const speed01 = normalize01(vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED);
     const wantsSlowing = isCurve && speed01 > 0.28;
 
-    out.throttle = wantsSlowing ? 0 : 1;
+    // 后轮一旦空转,纵向力吃掉摩擦圆,车尾会出去 —— 对玩家是甩尾,对这个
+    // 跟线回路只是丢时间。所以给它一份最朴素的牵引力控制:方向打得越多,
+    // 油门给得越少。人类玩家自己决定要不要甩,这里只负责把圈跑完。
+    const traction = 1 - 0.5 * Math.abs(out.steer);
+    out.throttle = wantsSlowing ? 0 : traction;
     out.reverse = 0;
-    out.airBrake = wantsSlowing && speed01 > 0.32 ? 1 : 0;
+    out.airBrake = wantsSlowing && speed01 > 0.45 ? 1 : 0;
   }
 }

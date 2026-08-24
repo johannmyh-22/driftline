@@ -499,7 +499,12 @@ export class Vehicle {
       const K_rear = (peak_rear * R * R) / (TIRE.peakSlipRatio * ref_rear);
       w_avg = (2 * CI * ((w2_old + w3_old) / 2) + K_rear * w_target) / (2 * CI + K_rear);
     } else if (load_rear > 0) {
-      const targetSlip = TIRE.peakSlipRatio * 1.05 * Math.sign(rearDriveTotal);
+      // 力矩超过抓地预算就该空转,超得越多滑得越远 —— 后轮滑移率跑到峰值另一
+      // 侧之后纵向力开始掉,摩擦圆被纵向吃光,侧向力让位,这就是油门甩尾。
+      // 原来这里钉死在 1.05 倍峰值,等于装了个永远关不掉的牵引力控制。
+      const excess = Math.abs(rearDriveTotal) / peak_torque - 1;
+      const slipScale = Math.min(TIRE.overdriveSlipMax, 1 + TIRE.overdriveSlipGain * excess);
+      const targetSlip = TIRE.peakSlipRatio * slipScale * Math.sign(rearDriveTotal);
       const w_target = (vLong_avg + targetSlip * ref_rear) / R;
       const K_rear = (peak_rear * R * R) / (TIRE.peakSlipRatio * ref_rear);
       w_avg = (2 * CI * ((w2_old + w3_old) / 2) + K_rear * w_target) / (2 * CI + K_rear);

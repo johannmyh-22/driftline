@@ -178,8 +178,11 @@ test('按右转就往右跑,并且会侧滑', async ({ page }) => {
   const straightLateral = straight['lateral'] ?? 0;
   expect(right['lateral'] ?? 0).toBeGreaterThan(straightLateral);
   expect(left['lateral'] ?? 0).toBeLessThan(straightLateral);
-  // 右转时速度方向落后于车头,相对车身在向左滑,所以「向右的侧向速度」为负。
-  expect(right['lateralSpeed'] ?? 0).toBeLessThan(-0.5);
+  // 只断言**滑动量**,不断言滑动方向。原来这里钉死「向右的侧向速度为负」,
+  // 那个符号是按推头推导的(速度方向落后于车头)。现在后轮能被油门推到空转,
+  // 同样的操作可能变成甩尾,车尾出去、滑动方向就翻边 —— 两种都是对的。
+  // 「转向写反」那种 bug 由上面两条 lateral 断言守着,不需要这条重复守。
+  expect(Math.abs(right['lateralSpeed'] ?? 0)).toBeGreaterThan(0.5);
 });
 
 test('起跑时在赛道上,且圈计时从零开始', async ({ page }) => {

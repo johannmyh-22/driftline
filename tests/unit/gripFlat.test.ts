@@ -50,9 +50,13 @@ function peakLateralAccel(targetKmh: number): number {
     frames++;
   }
 
+  // 定速过弯,不是收油滑行:滑行会一路掉速,量到的是「速度越来越低时的抓地」,
+  // 而下压力随 v² 变,读数就没了意义。也不能全油门 —— 那会把后轮推到空转,
+  // 纵向力吃掉摩擦圆,量到的变成联合工况。这里用最小的油门把速度稳住。
   let peak = 0;
   input.steer = 1;
   for (let i = 0; i < 60 * 3; i++) {
+    input.throttle = vehicle.groundSpeed * 3.6 < targetKmh ? 0.25 : 0;
     vehicle.update(input, FIXED_DT);
     peak = Math.max(peak, vehicle.lateralGripAccel);
   }

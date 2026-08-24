@@ -220,8 +220,14 @@ describe('Vehicle 四轮:转向', () => {
     // 镜像 —— 只要量级一致、方向相反(precision 0 = ±0.5),就能抓住
     // 「转向方向写反」那种整片反号的 bug,又不会被地形不对称误报。
     expect(right.position.x).toBeCloseTo(-left.position.x, 0);
-    expect(right.position.z).toBeCloseTo(left.position.z, 0);
     expect(right.yaw).toBeCloseTo(-left.yaw, 0);
+    // 前进距离用**相对**容差:±0.5 m 的绝对容差是按老转向标定的,那时满舵角
+    // 大、一秒内跑不远。现在转向上限按轮胎峰值侧偏角来定,同样一秒跑出 52 m,
+    // 左右各压到不同起伏,1% 的差是地形而不是 bug。5% 仍然远小于「转向写反」
+    // 会造成的整片反号。
+    expect(Math.abs(right.position.z - left.position.z)).toBeLessThan(
+      0.05 * Math.abs(left.position.z),
+    );
   });
 
   it(
