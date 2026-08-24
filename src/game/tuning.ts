@@ -628,7 +628,7 @@ export const CAR = {
    * 比低速弯更稳。**它和轮胎的载荷敏感性是一对** —— 下压力增加载荷,
    * 而载荷敏感性让 μ 随载荷下降,两者相抵之后净收益才是真实的量级。
    */
-  downforce: 4.3,
+  downforce: 5.5,
 
   /** 车身半宽(米),撞墙判定用。 */
   halfWidth: 0.9,
@@ -687,7 +687,7 @@ export const TIRE = {
    */
   overdriveSlipGain: 15.0,
   /** 空转滑移率相对峰值的上限。防止数值发散,不是手感参数。 */
-  overdriveSlipMax: 12.0,
+  overdriveSlipMax: 2.4,
   /**
    * 空转放大量淡入到满值的车速(米/秒)。
    *

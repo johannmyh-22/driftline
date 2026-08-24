@@ -578,6 +578,22 @@ export class Vehicle {
       wheel.spin = Number.isFinite(w) ? w : 0;
     }
 
+    /*
+     * 后轴左右的纵向力必须按**差速器**的约束来配,不能各按各的载荷算。
+     *
+     * 差速器给两个半轴的扭矩是相等的(开式)或差额有上限(限滑),所以左右
+     * 载荷不等只体现为**转速**不等,不体现为**力**不等。而这里每个轮子的
+     * 纵向力是拿自己的载荷算出来的,载荷差 20% 力就差 20%,乘上半轮距的力臂
+     * 直接凑出净偏航力矩 —— 这正是 docs/tasks/spin-diagnosis.md 里那个「一给油
+     * 就原地打转」的根因。放开空转钳位之后它在低速段又回来了:全油门直线、
+     * 方向盘不动,实测偏航角速度冲到 1.7 rad/s。
+     *
+     * 修法是把后轴两轮的纵向力按轴平均载荷归一。两轮滑移率相同时(LSD 已经
+     * 把转速拉到一起),归一后两边的力相等,净偏航力矩归零;而轴上的合力
+     * 一分不少 —— 力正比于载荷时 fx_i·(avg/load_i) 求和恒等于原来的合力。
+     */
+    const rearLoadAvg = (ctx2.load + ctx3.load) / 2;
+
     // 阶段 3: 施加轮胎力并收集遥测与整车合力
     let totalLateralForce = 0;
     let groundedCount = 0;
@@ -609,8 +625,19 @@ export class Vehicle {
       // 收敛到 0,不会在静止时抖着换向。
       const rolling =
         -TIRE.rollingResistance * ctx.load * Math.tanh(ctx.vLong / TIRE.rollingResistanceSpeed);
-      const fx = tireOut.longitudinal + rolling;
       const fy = tireOut.lateral;
+
+      // 后轮按差速器约束归一,见上面 rearLoadAvg 处的注释。归一会把力从重载轮
+      // 匀给轻载轮,所以必须按**轻载轮自己的**摩擦预算封顶 —— 匀过去也吃不下的
+      // 那部分传不出去,真车表现为那一侧空转得更凶。不封的话摩擦圆会被捅破。
+      let drive = tireOut.longitudinal;
+      if (i >= 2 && ctx.load > 0) {
+        const budget = ctx.load * TIRE.mu0 * ctx.friction;
+        const room = Math.sqrt(Math.max(0, budget * budget - fy * fy));
+        const shared = (tireOut.longitudinal * rearLoadAvg) / ctx.load;
+        drive = clamp(shared, -room, room);
+      }
+      const fx = drive + rolling;
       const tireFx = ctx.wfX * fx + ctx.wlX * fy;
       const tireFy = ctx.wfY * fx + ctx.wlY * fy;
       const tireFz = ctx.wfZ * fx + ctx.wlZ * fy;
