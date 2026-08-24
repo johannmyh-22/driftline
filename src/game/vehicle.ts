@@ -1,6 +1,6 @@
 import { Matrix4, Quaternion, Vector3 } from 'three';
 import type { InputFrame } from '../core/input';
-import { clamp, damp, normalize01 } from '../core/mathx';
+import { clamp, damp } from '../core/mathx';
 import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
 import { type BodyState, type Physics, createBodyState } from './physics';
 import { type TireForce, type TireState, tireForce } from './tire';
@@ -717,12 +717,26 @@ export class Vehicle {
   }
 
   private updateSteering(input: InputFrame, dt: number): void {
-    const speed01 = normalize01(this.groundSpeed, 0, REFERENCE_TOP_SPEED);
-    // 高速打满舵在物理上就是失控,真车靠转向比和驾驶员自己限制。
-    const authority = 1 - (1 - CAR.steerAtTopSpeed) * speed01;
     // steer 正值是右转,而 yaw/局部 +X 正方向是左,所以这里取负。
-    const target = -input.steer * CAR.steerMax * authority;
-    this.steerAngle = damp(this.steerAngle, target, CAR.steerRate, dt);
+    const target = -input.steer * this.steerLimit();
+    // 回中比打舵快:真车松手是主销回正力矩在弹,不是驾驶员在推。
+    const rate = Math.abs(target) < Math.abs(this.steerAngle) ? CAR.steerReturnRate : CAR.steerRate;
+    this.steerAngle = damp(this.steerAngle, target, rate, dt);
+  }
+
+  /**
+   * 当前车速下的转向上限。
+   *
+   * 上限由「前轮侧偏角不越过峰值太多」反推,而不是按车速线性缩放:抓地极限
+   * 侧向加速度 a = μ·g 对应的稳态偏航角速度是 a/v,换成前轮转角就是
+   * `wheelBase·a/v² + peakSlipAngle`。低速时这个值很大,由 `CAR.steerMax`
+   * 兜住。打得比它多只会把前轮推过峰值、掉抓地,方向盘越打越不转弯。
+   */
+  private steerLimit(): number {
+    const speed = Math.max(this.groundSpeed, 1);
+    const gripAccel = TIRE.mu0 * VEHICLE.gravity;
+    const kinematic = (CAR.wheelBase * gripAccel) / (speed * speed);
+    return Math.min(CAR.steerMax, kinematic + TIRE.peakSlipAngle * CAR.steerPastPeak);
   }
 
   /** 空气阻力与下压力。 */
