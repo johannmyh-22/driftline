@@ -298,6 +298,26 @@ function measurePeakLateralFlat(targetKmh: number): number {
   return peak;
 }
 
+/** 平地极速(km/h)。加功率限制会动它,必须一起盯着。 */
+function measureTopSpeedFlat(): number {
+  const vehicle = new Vehicle(flatGround, new Physics());
+  vehicle.reset(0, 0, 0);
+  const input = createInputFrame();
+  input.throttle = 1;
+  let last = 0;
+  for (let i = 0; i < 60 * 240; i++) {
+    vehicle.update(input, FIXED_DT);
+    if (i % 60 === 0) {
+      const now = vehicle.groundSpeed;
+      if (i > 600 && now - last < 0.01) {
+        break;
+      }
+      last = now;
+    }
+  }
+  return vehicle.groundSpeed * 3.6;
+}
+
 /** 平地 0-100,确定性版本(赛道版随轨迹混沌跳变,不能拿来调参)。 */
 function measureZeroTo100Flat(): number {
   const vehicle = new Vehicle(flatGround, new Physics());
@@ -380,7 +400,10 @@ async function main(): Promise<void> {
       `driveTorque=${fmt(CAR.driveTorque, 0)} mu0=${fmt(TIRE.mu0, 3)}`,
   );
 
-  console.log(`\n0-100(平地,确定性): ${fmt(measureZeroTo100Flat(), 2)} s`);
+  console.log(
+    `\n0-100(平地,确定性): ${fmt(measureZeroTo100Flat(), 2)} s;` +
+      ` 极速: ${fmt(measureTopSpeedFlat(), 0)} km/h`,
+  );
   const peak100 = measurePeakLateralFlat(100);
   const peak80 = measurePeakLateralFlat(80);
   console.log(
