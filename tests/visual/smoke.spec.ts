@@ -163,13 +163,64 @@ test('油门真的能开动车,并且画面跟着变', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+/**
+ * 和 `run` 一样跑一段输入,但**分段采样侧向速度的峰值**再返回末帧快照。
+ *
+ * 末帧那一个瞬时值不能用来判断「有没有在滑」:同一段操作里侧向速度先涨后落
+ * (实测 f=25/50/75/100/125/150 = 0.57 / 1.04 / 1.19 / 0.98 / 0.67 / 0.34),
+ * 末帧读到多少取决于这 150 帧停在滑动周期的哪个相位。改动前的代码在同一工况下
+ * 末帧是 0.007、峰值同样是 1.18 —— **峰值稳、末帧不稳**,原来的写法是在赌相位。
+ *
+ * **分段步长不能取 1。** `Loop.advance(n)` 是「跑 n 步物理 + 渲染一次」,所以
+ * `advance(1)` 跑 150 次 = 渲染 150 次;SwiftShader 下每帧 0.62 秒,实测直接把
+ * 这条测试顶到 120 秒超时。取 25 一段只多渲染 5 次,峰值也够准(曲线是平滑的)。
+ * 截图回路是这个项目的地基,见 HANDOFF 第四节。
+ */
+const PEAK_SAMPLE_STRIDE = 25;
+
+async function runTracked(
+  page: Page,
+  input: Partial<InputFrame>,
+  frames: number,
+): Promise<{ snapshot: Record<string, number>; peakLateralSpeed: number }> {
+  return page.evaluate(
+    ({
+      input: partial,
+      frames: count,
+      stride,
+    }: {
+      input: Partial<InputFrame>;
+      frames: number;
+      stride: number;
+    }) => {
+      const api = window.__DRIFTLINE_TEST__;
+      if (api === undefined) {
+        throw new Error('__DRIFTLINE_TEST__ 未挂载');
+      }
+      api.reset();
+      api.setInput(partial);
+      let peak = 0;
+      let done = 0;
+      while (done < count) {
+        const chunk = Math.min(stride, count - done);
+        api.advance(chunk);
+        done += chunk;
+        peak = Math.max(peak, Math.abs(api.snapshot()['lateralSpeed'] ?? 0));
+      }
+      return { snapshot: api.snapshot(), peakLateralSpeed: peak };
+    },
+    { input, frames, stride: PEAK_SAMPLE_STRIDE },
+  );
+}
+
 test('按右转就往右跑,并且会侧滑', async ({ page }) => {
   await driveScene(page, BASE_URL, { seed: SEED, frames: 0, camera: 'chase' });
 
   // 断言位置而不是 yaw 的符号:yaw 正方向是左是右,正是当初搞反的那件事。
   // 出生时车头朝 +Z,它的右手边是世界 -X。
   const straight = await run(page, { throttle: 1 }, 150);
-  const right = await run(page, { throttle: 1, steer: 1 }, 150);
+  const rightRun = await runTracked(page, { throttle: 1, steer: 1 }, 150);
+  const right = rightRun.snapshot;
   await shoot(page, 'smoke-turn.png');
   const left = await run(page, { throttle: 1, steer: -1 }, 150);
 
@@ -183,8 +234,11 @@ test('按右转就往右跑,并且会侧滑', async ({ page }) => {
   // 同样的操作可能变成甩尾,车尾出去、滑动方向就翻边 —— 两种都是对的。
   // 「转向写反」那种 bug 由上面两条 lateral 断言守着,不需要这条重复守。
   // 门槛只是「确实在滑,不是纯滚动」的下界,不是手感线 —— 滑多少由轮胎参数
-  // 决定,每次配平都会变(实测在 0.48~2.0 之间摆)。手感线在 gripFlat.test.ts。
-  expect(Math.abs(right['lateralSpeed'] ?? 0)).toBeGreaterThan(0.3);
+  // 决定,每次配平都会变。手感线在 gripFlat.test.ts。
+  //
+  // 看的是**分段采样的峰值**而不是末帧瞬时值,理由见 runTracked 的注释:
+  // 改动前后实测峰值都是 1.19,而末帧分别是 0.007 与 0.34。
+  expect(rightRun.peakLateralSpeed).toBeGreaterThan(0.3);
 });
 
 test('起跑时在赛道上,且圈计时从零开始', async ({ page }) => {

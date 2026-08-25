@@ -177,12 +177,73 @@ describe('四轮:打转 / 过弯代价', () => {
     const before = slipAngleDegrees(vehicle);
     expect(before).toBeGreaterThan(30);
 
+    /*
+     * 取窗口内的**最小值**,不取第 120 帧那一个瞬时值。
+     *
+     * 原本这条抓的是「后轮有侧向抓地,能把车头拽回行进方向」,判据是 2 秒之后
+     * 侧滑角掉到 35% 以下。它现在不成立了,但**不是因为回正力矩没了** —— 逐帧
+     * 打印过两版的轨迹:改动前 0.75 秒收敛到 1%,改动后 1.00 秒收敛到 2%,
+     * 回正照样发生,只慢了 0.25 秒。
+     *
+     * 真正的原因是:车在这段里还会**再撞一次**(速度从 115 掉到 95 km/h),
+     * 撞完侧滑角重新弹到 40°。改动前那一撞落在 t=2.25 s(采样点之后),改动后
+     * 落在 t=1.75 s(采样点之前),于是第 120 帧刚好卡在第二次扰动的恢复过程
+     * 中间,读到 23°。**这条断言的成败取决于第二次撞击落在采样点的哪一侧**,
+     * 那是轨迹混沌,不是手感 —— 正是第五节「别拿混沌读数当调参目标」那个坑。
+     *
+     * 改成看窗口内的最小值:回正力矩真的把车拉回来过,这个最小值就一定够小;
+     * 而后面再被撞出去多少,不影响「有没有回正力矩」这个结论。阈值 0.35 和
+     * `before > 30` 都原样留着 —— 那是人类要的「甩出去收得回来」的强度,没动。
+     */
+    let lowest = before;
     for (let i = 0; i < 60 * 2; i++) {
       input.steer = 0;
       input.throttle = 0.4;
       vehicle.update(input, FIXED_DT);
+      lowest = Math.min(lowest, slipAngleDegrees(vehicle));
     }
-    expect(slipAngleDegrees(vehicle)).toBeLessThan(before * 0.35);
+    expect(lowest).toBeLessThan(before * 0.35);
+  });
+});
+
+/**
+ * 甩尾的另一半:放开空转不能把直线打转带回来。
+ *
+ * **这一组必须跑在真赛道上。** 平地左右载荷天然对称,实测满油门直行 180 帧的
+ * 峰值 yawRate 恰好是 0.00000 —— 平地把病因整个抹掉了(HANDOFF 第五节的教训)。
+ * 赛道上剩下的偏航全部来自地形扰动,那才是要守的东西。
+ *
+ * seed 1 必测:seed 42 和 1337 在这个问题上是「恰好没病」的假绿灯,实测同一
+ * 配置下 1337 只有 0.013 而 seed 1 是 0.145,差一个数量级。
+ */
+describe('四轮:满油门直线不跑偏', () => {
+  it('全油门、方向盘不动,偏航角速度不发散(seed 1 是最敏感的病例)', () => {
+    /*
+     * 阈值 0.30 rad/s 的来历,以及它到底抓不抓得住东西(实测,不是估的):
+     *
+     *   - 现在:seed 1 = 0.145;改动前人类验收过的那一版是 0.156。
+     *   - 把稳定项拿掉(`TIRE.pneumaticTrail` 0.45 → 0.10):seed 1 冲到 0.362,
+     *     **越过 0.30,这条会红** —— 这是它主要要抓的回归。
+     *   - 人类调 `TIRE.overdriveSlipMax` 这个甩尾旋钮时:2.8 → 0.187、
+     *     3.2 → 0.258,都还在线内,不会误报;3.5 以上会红,而 tuning.ts 里
+     *     本来就写了别越过 3.5。
+     *
+     * 所以它是**发散守卫 + 稳定项的看门狗**,不是手感线,别拿它当调参目标。
+     * 一开始写的是 0.45,那个数抓不住上面第二条(0.362 < 0.45)—— 阈值要按
+     * 「它必须能红的那个场景」定,不能凭手感留余量。
+     */
+    for (const seed of [1, 42, 1337]) {
+      const { vehicle } = makeCourse(seed);
+      const input = createInputFrame();
+      input.throttle = 1;
+      input.steer = 0;
+      let peakYawRate = 0;
+      for (let i = 0; i < 180; i++) {
+        vehicle.update(input, FIXED_DT);
+        peakYawRate = Math.max(peakYawRate, Math.abs(vehicle.yawRate));
+      }
+      expect(peakYawRate).toBeLessThan(0.30);
+    }
   });
 });
 

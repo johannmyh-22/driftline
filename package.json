@@ -17,7 +17,8 @@
     "test:visual": "playwright test",
     "shoot": "tsx scripts/shoot.ts",
     "perf": "tsx scripts/perf.ts",
-    "spin-probe": "tsx scripts/spin-probe.ts"
+    "spin-probe": "tsx scripts/spin-probe.ts",
+    "drift-probe": "tsx scripts/drift-probe.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",

@@ -101,3 +101,81 @@ describe('平地基准:轮胎本征抓地', () => {
     expect(slow).toBeLessThan(1.6 * 9.81);
   });
 });
+
+/**
+ * 甩尾必须成立,而且要收得回来。
+ *
+ * 人类连着三轮反馈「甩尾不明显」,而每一轮把它调回来都被「直线打转」顶回去。
+ * 这一组把结论钉住,免得后面谁再顺手把它压没了 —— 上一轮就是为了压打转加的
+ * 后轴钳位,顺带把油门甩尾一起掐死,而当时没有任何一条测试会因此变红。
+ *
+ * 跑在**绝对平地**上:甩尾幅度是轮胎本征能力,赛道的倾斜弯和坡会让它随车停在
+ * 哪个弯混沌跳变(见 HANDOFF 第五节)。直线打转那一侧必须反过来跑在真赛道上,
+ * 守卫在 grip.test.ts。
+ */
+describe('平地基准:油门甩尾', () => {
+  /** 车头方向与速度方向的夹角(度)。 */
+  function betaDegrees(vehicle: Vehicle): number {
+    const speed = Math.hypot(vehicle.velocity.x, vehicle.velocity.z);
+    if (speed < 1) {
+      return 0;
+    }
+    return Math.abs(Math.atan2(vehicle.lateralSpeed, speed)) * (180 / Math.PI);
+  }
+
+  /** 加速到 `entryKmh`,再满油门满舵 3 秒,返回稳态(最后 1 秒)与松手后的侧滑角。 */
+  function driftAt(entryKmh: number): { steady: number; recovered: number } {
+    const vehicle = new Vehicle(flatGround, new Physics());
+    vehicle.reset(0, 0, 0);
+    const input = createInputFrame();
+    input.throttle = 1;
+    let frames = 0;
+    while (vehicle.groundSpeed * 3.6 < entryKmh && frames < 60 * 40) {
+      vehicle.update(input, FIXED_DT);
+      frames++;
+    }
+
+    input.steer = 1;
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i < 180; i++) {
+      vehicle.update(input, FIXED_DT);
+      if (i >= 120) {
+        sum += betaDegrees(vehicle);
+        count++;
+      }
+    }
+
+    input.throttle = 0;
+    input.steer = 0;
+    for (let i = 0; i < 90; i++) {
+      vehicle.update(input, FIXED_DT);
+    }
+    return { steady: sum / Math.max(1, count), recovered: betaDegrees(vehicle) };
+  }
+
+  it('满油门满舵能持续甩尾 —— 稳态侧滑角不是入弯瞬态', () => {
+    /*
+     * 下界 6° 卡的是「持续」这件事:改动之前 90 km/h 的稳态侧滑角只有 2.0°
+     * (入弯瞬间能到 4~7°,之后就回去了),人类三轮反馈的正是这个。现在实测
+     * 60 km/h 是 9.3°、90 km/h 是 11.7°。
+     *
+     * 上界 30° 是**发散守卫**,不是手感线:超过这个数就不是甩尾而是打转了,
+     * 实测 `TIRE.overdriveSlipMax` 调到 7.0 时 60 km/h 会到 32.6°、且松手收不
+     * 干净。手感线由人类试玩定,别拿这两个数当调参目标。
+     */
+    for (const kmh of [60, 90]) {
+      const { steady } = driftAt(kmh);
+      expect(steady).toBeGreaterThan(6);
+      expect(steady).toBeLessThan(30);
+    }
+  });
+
+  it('松开油门与方向之后甩尾收得回来', () => {
+    // 「甩得出去还收得回来」是人类的原话。1.5 秒零输入之后应该基本回正。
+    for (const kmh of [60, 90]) {
+      const { recovered } = driftAt(kmh);
+      expect(recovered).toBeLessThan(2);
+    }
+  });
+});

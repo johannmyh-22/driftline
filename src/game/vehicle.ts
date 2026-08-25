@@ -679,11 +679,23 @@ export class Vehicle {
       appliedSlot.fz = ctx.normalZ * ctx.load + tireFz;
       commitApplied(i);
 
-      // 轮胎级自回正力矩 (Self-Aligning Torque, SAT):
-      // 总拖距 = 机械拖距(恒定) + 气胎拖距(随滑移角增大衰减)
+      /*
+       * 轮胎级自回正力矩 (SAT)。总拖距 = 机械拖距 + 气胎拖距,**但机械拖距
+       * 只有转向轮才有**。
+       *
+       * 机械拖距是**主销(转向轴)几何**的产物:接地点落在主销延长线交点后方
+       * 多远。它产生的是绕主销的力矩,由转向拉杆撑住、再经转向机壳传回车身,
+       * 所以转向轮把它算进车身偏航力矩是对的。**后轮没有主销**,它的回正力矩
+       * 只有气胎拖距那一项(接地印痕的侧向压力中心偏后)。
+       *
+       * 原来四个轮子一律加 casterTrail,等于给后轴装了一根「一滑就把车摆正」
+       * 的杠杆 —— 实测这正是甩尾出不来的主因:90 km/h 满油满舵稳态,后轴侧偏
+       * 角被摁在 2.81°,而去掉后轴这一项之后是 13.6°。同时它还掩盖了前后轴
+       * 侧向力的失衡(前轴 10566 N / 后轴 6292 N,差额几乎全部等于这份 SAT)。
+       */
       const u = Math.abs(wheel.slipAngle) / TIRE.peakSlipAngle;
       const pneumatic = (TIRE.pneumaticTrail * Math.max(0, 1 - u)) / (1 + u * u);
-      const trail = TIRE.casterTrail + pneumatic;
+      const trail = (wheel.steered ? TIRE.casterTrail : 0) + pneumatic;
       const sat = -trail * fy;
       // 接地印痕偏航阻尼 (随载荷缩放)
       const yawDamp =
