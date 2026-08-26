@@ -1620,3 +1620,62 @@ gain 降下来之后起步空转跟着少了,而**起步是抓地限制**的 —
   12.5°,会红,这正是它要抓的回归
 
 **四道门:208 unit / 14 visual 全绿。构建号 `#58`。**
+
+---
+
+## 第二十一节:修复 Course.sample 弧长环回缺陷 (fix/arc-loopback, 2026-08)
+
+工作分支 `fix/arc-loopback`, 切自 `claude/deepseek-task-allocation-oxuiuo` 提交 `0877193`。
+本轮彻底修复了 `Course.sample` 在闭环赛道起跑线后方微小区间 $[-\epsilon, 0]$ 的弧长环回 (loopback) 缺陷, 改写了单元测试快照并补齐起跑线防刷圈与多 seed 验证, 四道质量门禁全部通过。
+
+### 一、缺陷根因与现象
+
+闭环赛道首尾线段在起跑线 (0 号采样点 `samples[0]`) 相连。当采样点落在起跑线正后方极小负向区间 $[-\epsilon, 0]$ 时:
+- 空间索引投影将其匹配到最后一条线段 (segment $N-1$), 计算出的参数 $t \approx 1 - \frac{\epsilon}{\text{spacing}}$。
+- 导致计算出的弧长 $arc = (N - 1 + t) \cdot \text{spacing} \approx \text{totalLength} - \epsilon \approx 2736\text{m}$, 而非 0 附近。
+- 实测车辆在起跑线因悬挂自然沉降或坡道微小后溜 $0.00002\text{m}$ (20 微米) 即可触发, 造成 2736m 的弧长剧烈突变。
+
+### 二、修法与设计抉择
+
+在 `src/game/course.ts` 的 `Course.sample` 中:
+- 当匹配段落在最后一段 (`bestRow === this.rows - 1`) 且距离终点/起点在保护窗口内 ($(1 - bestT) \cdot \text{spacing} \le 0.5 \cdot \text{spacing}$) 时, 将 `arc` 严格 clamp 为 `0`。
+
+**【为何选择 clamp 到 0 而非允许小负值】**:
+1. **数据结构与物理契约**: 赛道弧长定义域为非负实数 $[0, \text{totalLength}]$, clamp 到 0 保证了 $arc \ge 0$ 的非负不变量。
+2. **防范下游负索引越界**: 下游模块 (如 `Race.trackCheckpoints` 与 `Autopilot.drive`) 广泛使用 `Math.floor(vehicle.arc / spacing) % count`。在 JavaScript 中负数取模仍为负数 (例如 $-1 \% 24 === -1$), 允许负 arc 会导致 `samples[-1]` 读取为 `undefined` 造成潜在运行时缺陷; clamp 到 0 彻底杜绝了负下标越界隐患。
+3. **起跑线状态连续平稳**: 车辆在起跑线上静止沉降或微小后溜时, `arc` 稳定保持为 0, 前后过渡完全连续 ($\lim_{s \to 0^-} arc = 0 = \lim_{s \to 0^+} arc$), 不会产生圈数误判、漏圈或多圈。
+
+### 三、测试改写与新增守卫
+
+1. **`tests/unit/course.test.ts`**:
+   - 将原先锁定旧缺陷的现状快照测试 `describe('Course 弧长边界与环回 (已知缺陷现状快照)')` 改写为 `describe('Course 弧长边界与起跑线环回保护')`。
+   - 源码详细注释原快照捕获内容、失效原因及新断言守卫目标。
+   - 跨敏感 seed (1 / 42 / 1337 / 7) 逐一测试多级后溜位移 ($0.00002\text{m}, 0.01\text{m}, 0.1\text{m}, 0.5\text{m}$), 严格断言 `hit.onTrack === true` 且 `hit.arc === 0`。
+   - 新增起跑线前后连续过渡测试 ($-0.05\text{m} \to 0 \to +0.05\text{m}$), 验证单调与连续性。
+2. **`tests/unit/race.test.ts`**:
+   - 新增测试用例 `车在起跑线前后微小抖动,laps 不许增加`: 模拟车辆在起跑线前后 $\pm 0.1\text{m}$ 连续抖动 180 帧 (3 秒), 严格断言 `race.laps === 0` 且 `race.nextCheckpoint === 1`。
+
+### 四、四道质量门禁实测结果
+
+| 门禁 | 命令 | 结果 | 关键说明 |
+|---|---|---|---|
+| 1. 类型检查 | `npm run typecheck` | ✅ **0 error** | `tsc --noEmit` 严格模式通过, 零 any, 零 `@ts-ignore` |
+| 2. 单元测试 | `npm run test -- --run` | ✅ **213 passed** | 18 个测试套件 213/213 全绿 (基线 208 passed, 新增 5 条单测全部通过) |
+| 3. 生产构建 | `npm run build` | ✅ **成功构建** | `vite build` 正常生成产物 |
+| 4. 视觉测试 | `npm run test:visual` | ✅ **14 passed** | Playwright 冒烟与视觉回归测试 100% 通过 |
+
+### 五、实测数据对照
+
+| 测试工况 | 修复前 `hit.arc` | 修复后 `hit.arc` | `hit.onTrack` | 状态 |
+|---|---|---|---|---|
+| **起跑线正后方 0.00002m** (Seed 1 / 42 / 1337 / 7) | 2736.77 m (环回末端) | **0.0000 m** | `true` | ✅ 消除跳变 |
+| **起跑线正后方 0.01m** (Seed 1 / 42 / 1337 / 7) | 2736.76 m (环回末端) | **0.0000 m** | `true` | ✅ 连续归零 |
+| **起跑线正后方 0.50m** (Seed 1 / 42 / 1337 / 7) | 2736.27 m (环回末端) | **0.0000 m** | `true` | ✅ 零边界保护 |
+| **起跑线正前方 +0.05m** (Seed 1) | 0.0500 m | **0.0500 m** | `true` | ✅ 单调递增 |
+| **赛道全长单调推进** (0 到 N-1 采样点) | 严格递增至 totalLength - spacing | 严格递增至 totalLength - spacing | `true` | ✅ 单调性保持 |
+| **起跑线前后抖动 180 帧** (Seed 1 / 42 / 1337) | — | `laps = 0, nextCp = 1` | `true` | ✅ 防刷圈有效 |
+
+### 六、我不确定的地方 / 遗留
+
+- **大距离反向倒车行为**: 当前保护窗口为 $0.5 \cdot \text{spacing} = 3.0\text{m}$。若玩家从起点主动大距离倒车超过 3 米进入更早的末段区间, `arc` 会呈现末段正向递减 (例如 2730m)。由于 `Race` 依赖严格单调递增的检查点序列 ($0 \to 1 \to \dots \to 23 \to 0$), 即使倒车也不会触发圈数增加, 但如果未来需要支持「倒车跑整圈」的特殊玩法, 需要在更高层引入整圈有向位移追踪。
+

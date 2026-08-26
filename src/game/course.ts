@@ -152,7 +152,21 @@ export class Course implements GroundQuery {
     const rightZ = a.tangentX;
     const lateral = (x - a.x) * rightX + (z - a.z) * rightZ;
 
-    const arc = a.arc + bestT * this.layout.spacing;
+    let arc = a.arc + bestT * this.layout.spacing;
+    // 闭环赛道首尾相连:在最后一段 (rows - 1) 且靠近起跑线 (samples[0]) 的微小区间内,
+    // 将 arc clamp 到 0,消除起跑线后方微小负向位移时环回至 ≈ totalLength (2736m) 的缺陷。
+    // 选 clamp 到 0 而非允许小负值的理由:
+    // 1. 保证 arc 严格落在 [0, totalLength] 闭区间内,符合赛道非负弧长物理定义。
+    // 2. 避免下游模块 (如 Race.trackCheckpoints 与 Autopilot) 中 Math.floor(arc / spacing)
+    //    计算出负数下标 (JS 中负数取模仍为负,例如 -1 % 24 === -1,会导致 samples[-1] 越界)。
+    // 3. 在起跑线附近提供连续零边界:在起跑线上前后微小抖动时 arc 连续为 0,不跳变、不漏圈、不多圈。
+    if (
+      bestRow === this.rows - 1 &&
+      (1 - bestT) * this.layout.spacing <= this.layout.spacing * 0.5
+    ) {
+      arc = 0;
+    }
+
     const applyTrackFields = (): void => {
       out.lateral = lateral;
       out.segment = bestRow;
