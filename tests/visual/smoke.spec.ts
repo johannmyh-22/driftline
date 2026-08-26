@@ -455,3 +455,19 @@ test('不带 test=1 时自行跑主循环,且不暴露测试接口', async ({ pa
   expect(readout).toContain('km/h');
   expect(problems).toEqual([]);
 });
+
+for (const s of [1, 42, 1337]) {
+  test(`实时模式下 seed ${s} 正常渲染 HUD 与小地图`, async ({ page }) => {
+    const problems = watchForProblems(page);
+    await page.goto(`${BASE_URL}?seed=${s}`, { waitUntil: 'load' });
+    await page.waitForSelector('#app canvas');
+    await page.waitForFunction(() => document.documentElement.dataset['painted'] === '1');
+
+    const stats = await shoot(page, `smoke-realtime-seed${s}.png`);
+    const readout = await page.textContent('#readout');
+
+    expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+    expect(readout).toContain('km/h');
+    expect(problems).toEqual([]);
+  });
+}

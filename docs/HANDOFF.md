@@ -1620,3 +1620,56 @@ gain 降下来之后起步空转跟着少了,而**起步是抓地限制**的 —
   12.5°,会红,这正是它要抓的回归
 
 **四道门:208 unit / 14 visual 全绿。构建号 `#58`。**
+
+---
+
+## 二十一、M4 计时与 HUD 重做 (圈速/最佳持久化、分段计时与 Delta、DOM HUD、程序化小地图)
+
+> 交付分支: `feat/m4-timing-hud` (基于 `0877193`)
+> 范围严格限定在 M4 计时与 HUD 模块,未扩展到幽灵回放或开始/暂停菜单。
+
+### 1. 改动概述
+
+1. **圈速与最佳成绩持久化 (`src/game/records.ts`)**:
+   - 本地 `localStorage` 存储,按 seed 分离 key (`driftline:record:<seed>`),避免不同赛道记录冲突。
+   - 存储结构包含单圈总用时 `bestLapTime` 与各检查点累计分段 `bestSectorTimes`。
+   - 显式支持测试隔离 (`setStorageEnabled(false)`),在 `?test=1` 测试模式与无存储环境下自动旁路,彻底杜绝截图测试相互污染。
+
+2. **分段计时与 Delta 比较 (`src/game/race.ts`)**:
+   - `Race` 类扩展 `currentSectorTimes` 与 `bestSectorTimes` 数组(长度为 `checkpointCount = 24`)。
+   - 载具按序经过每个检查点时记录分段时间;如果存在历史最佳圈分段,计算 `delta = currentLapTime - bestSectorTime`,并触发 `deltaTimer` 高亮提示。
+   - 领先为负值(绿色 `-0.35s`),落后为正值(红色 `+0.24s`)。
+   - 跑完一整圈回过 0 号检查点时,若刷新记录则更新 `bestLapTime` 与 `bestSectorTimes` 并自动存入 `localStorage`。
+
+3. **DOM Overlay HUD 重做与程序化小地图 (`src/game/hud.ts` & `src/style.css`)**:
+   - 移除老版临时 72 行 `Readout`,重写为完整的 DOM Overlay `Hud` 类(WebGL canvas 不排文字)。
+   - **顶部计时卡片 (Top-Left)**: 显示当前圈数 (`LAP 1`)、当前圈用时 (`00:12.34`)、分段 Delta 徽标 (`▼ -0.35s` / `▲ +0.21s`)、历史最佳 (`BEST 01:23.45` 金色高亮) 及上一圈用时 (`LAST 01:24.10`)。
+   - **程序化 SVG 小地图 (Top-Right)**: 基于 `TrackLayout.samples` 坐标极值与比例自动缩放生成闭合 SVG 路径,带发光底衬、起跑线金点标记及玩家实时坐标与车头朝向光标。在 `flat` 平地场景下自动隐藏。
+   - **大字时速表 (Bottom-Right)**: 醒目数字仪表 (`184 km/h`),发光排版。
+   - **左下角信息区 (Bottom-Left)**: 包含操作键位提示与**构建号 `__BUILD_ID__`**(严格保留在左下角,便于人类对齐版本)。
+   - **性能与零 GC 约束**: 采用整型 centiseconds 与状态脏检查比对,DOM 节点无变化绝不触碰;帧循环内零对象分配与内存抖动。
+
+4. **HUD 参数独立文件 (`src/game/hudTuning.ts`)**:
+   - 【待合并说明】: 因 `src/game/tuning.ts` 当前正在由其他任务并发修改,本轮 HUD 与小地图的配色、线宽、保持时间等数值集中在 `src/game/hudTuning.ts`,便于后续合并进 `tuning.ts`。
+
+5. **硬约束恪守**:
+   - 严格未触碰受保护的 4 个文件: `src/gfx/craft.ts`、`src/game/vehicle.ts`、`src/game/world.ts`、`src/game/tuning.ts`。
+   - `src/main.ts` 仅按规格修改第 97 行 (`new Hud(...)`) 与第 111 行 (`hud?.update(...)`) 接线。
+   - 零二进制资产(小地图由 SVG 运行时程序化生成,字体使用系统等宽字体)。
+   - 无 `Math.random()`,严格 TypeScript 类型(0 any, 0 @ts-ignore)。
+
+### 2. 测试与实测数据
+
+- **单元测试 (`npm run test -- --run`)**:
+  - 新增 `tests/unit/records.test.ts` (5 用例:持久化、多 seed 隔离、测试模式旁路、数据容错)。
+  - 新增 `tests/unit/raceTiming.test.ts` (3 用例:分段计时、Delta 计算、新纪录更新与 seed 重置)。
+  - 新增 `tests/unit/hud.test.ts` (5 用例:DOM 生成、格式化、更新逻辑、SVG 小地图、平地隐藏)。
+  - **总用例: 223 passed (21 test files 全部绿灯)**。
+- **类型检查 (`npm run typecheck`)**: 0 错误通过。
+- **构建测试 (`npm run build`)**: Vite 构建正常,产物无异常。
+- **视觉测试 (`npm run test:visual`)**: 17 条用例全过(含实时模式下 seed 1 / 42 / 1337 截图测试)。
+- **人眼画面核验**:
+  - `smoke-realtime-seed1.png`: 赛道 1 小地图与起点朝向吻合,HUD 布局无遮挡。
+  - `smoke-realtime-seed42.png`: 赛道 42 特征轮廓清晰,速度与计时表盘显示准确。
+  - `smoke-realtime-seed1337.png`: 赛道 1337 正常渲染,左下角构建号 `#58 0877193` 准确可见。
+
