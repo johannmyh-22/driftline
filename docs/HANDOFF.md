@@ -1992,3 +1992,18 @@ seed 1 数值有波动(跑偏变大,峰值 β 变小),但两个方向都有,不�
 
 这轮没有单独维护构建号的逻辑 —— `__BUILD_ID__` 由 `vite.config.ts` 里
 `git rev-list --count HEAD` 自动算,提交越多号越大,不需要手动改。
+
+### 八、追加:清掉 shadowBlob.ts(提交 2468338,构建号 #67)
+
+上面路宽的活人类看图确认「好像没问题」之后,顺手把第二十一节待办第 3 条查了:
+`src/gfx/shadowBlob.ts` 是悬浮时代的贴地阴影,现在有真实阴影(定向光 + 阴影贴图)
+了。全仓库(`src/`/`tests/`/`scripts/`)搜索 `shadowBlob`/`ShadowBlob` 零引用,
+确认是纯死代码,删掉。
+
+实测:`typecheck` ✅ / `test -- --run` ✅ 227 passed(21 files,比删除前少 1 条 ——
+`noMathRandom.test.ts` 是按 `src/` 文件数生成用例的扫描器,少一个源文件少一条
+用例,不是回归)/ `build` ✅ / `test:visual` ✅ 17 passed。截图核对过 seed 1,
+车身贴地阴影(真实阴影)渲染正常,证实删除前这个文件确实没在渲染路径里。
+
+这是这一轮最后一个提交。截至这里:分支 `claude/deepseek-task-allocation-oxuiuo`,
+构建号 **#67**,commit `2468338`,没有开 PR,四道门全绿。
