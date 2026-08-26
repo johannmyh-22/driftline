@@ -42,6 +42,24 @@ const SLIP_SPEED_FLOOR = 2.5;
 /** 车身翻过头时,「沿车身 up 轴向下找地面」这件事本身就没意义了。 */
 const MIN_UP_COMPONENT = 0.15;
 
+/**
+ * 车轮的**视觉**状态,给渲染层摆轮子用。
+ *
+ * 单列一个只读接口而不是把 `Wheel` 整个暴露出去:渲染层不该看到 `load` /
+ * `slipRatio` 这些物理量,更不该改它们。
+ */
+export interface WheelView {
+  /** 车身局部坐标:+X 是驾驶员左侧,+Z 是车头。安装点恒在 y = 0。 */
+  readonly localX: number;
+  readonly localZ: number;
+  /** 是否是转向轮(前轮)。 */
+  readonly steered: boolean;
+  /** 悬挂当前长度(米):安装点到**接地点**的距离,不是到轮心。 */
+  readonly length: number;
+  /** 累计滚转角(弧度)。 */
+  readonly rollAngle: number;
+}
+
 /** 一个车轮。位置在车身局部系:**+X 是驾驶员左侧,+Z 是车头**。 */
 interface Wheel {
   readonly localX: number;
@@ -51,6 +69,13 @@ interface Wheel {
   readonly brakeShare: number;
   /** 车轮角速度(弧度/秒),正 = 往前滚。 */
   spin: number;
+  /**
+   * 累计滚转角(弧度),**只给渲染用,不参与物理**。
+   *
+   * `spin` 是角速度,画轮子要的是角度。放在这里而不是渲染层自己积分,是因为
+   * 渲染帧率和物理步长不是一回事(定步长 + 插值),渲染层积分会随帧率漂。
+   */
+  rollAngle: number;
   /** 悬挂当前长度(米),从安装点到接地点。 */
   length: number;
   grounded: boolean;
@@ -213,6 +238,11 @@ export class Vehicle {
 
   get yaw(): number {
     return this._yaw;
+  }
+
+  /** 四个车轮的视觉状态。顺序与内部一致:前右、前左、后右、后左。 */
+  get wheelViews(): readonly WheelView[] {
+    return this.wheels;
   }
 
   set yaw(value: number) {
@@ -579,6 +609,16 @@ export class Vehicle {
     }
 
     /*
+     * 滚转角只在这里积分:四个轮子的 `spin` 到这一步才全部定下来。
+     * 对 2π 取模是为了别让浮点数在长时间跑图后累积到丢精度。
+     */
+    for (let i = 0; i < this.wheels.length; i++) {
+      const wheel = this.wheels[i]!;
+      const next = wheel.rollAngle + wheel.spin * dt;
+      wheel.rollAngle = Number.isFinite(next) ? next % (Math.PI * 2) : 0;
+    }
+
+    /*
      * 后轴左右的纵向力必须按**差速器**的约束来配,不能各按各的载荷算。
      *
      * 差速器给两个半轴的扭矩是相等的(开式)或差额有上限(限滑),所以左右
@@ -922,6 +962,7 @@ function makeWheel(
   brakeShare: number,
 ): Wheel {
   return {
+    rollAngle: 0,
     localX,
     localZ,
     steered,

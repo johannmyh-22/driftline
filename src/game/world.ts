@@ -174,6 +174,25 @@ export class World {
       this.input.throttle * CRAFT.thrustThrottleWeight +
         normalize01(this.vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
     );
+    /*
+     * 摆四个轮子。**用当前帧的值,不做插值** —— 悬挂行程和转向角的变化幅度
+     * 是厘米/几度的量级,插不插值看不出来;而为了插值再存一份上一帧的四轮状态,
+     * 是每帧四次拷贝换一个看不见的差别。
+     */
+    const wheels = this.vehicle.wheelViews;
+    for (let i = 0; i < wheels.length; i++) {
+      const wheel = wheels[i];
+      if (wheel === undefined) {
+        continue;
+      }
+      this.craft.setWheel(
+        i,
+        wheel.length,
+        wheel.steered ? this.vehicle.steerAngle : 0,
+        wheel.rollAngle,
+      );
+    }
+
     // 阴影相机只罩住车周围一小块,必须跟着车走。
     this.atmosphere.followShadow(shownPosition.x, shownPosition.y, shownPosition.z);
 
