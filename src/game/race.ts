@@ -1,4 +1,4 @@
-import { HUD_TUNING } from './hudTuning';
+import { HUD_TUNING } from './tuning';
 import { loadRecord, saveRecord } from './records';
 import type { TrackLayout } from './trackLayout';
 import { TRACK } from './tuning';

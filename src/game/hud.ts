@@ -1,4 +1,4 @@
-import { MINIMAP_TUNING } from './hudTuning';
+import { MINIMAP_TUNING } from './tuning';
 import type { Race } from './race';
 import type { TrackLayout, TrackSample } from './trackLayout';
 
