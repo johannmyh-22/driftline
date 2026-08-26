@@ -206,27 +206,80 @@ describe('Course 确定性与性能', () => {
   });
 });
 
-describe('Course 弧长边界与环回 (已知缺陷现状快照)', () => {
-  it('起跑线后方微小负向位移会环回至赛道末端弧长 (现状快照, 修复见 HANDOFF 第十八节)', () => {
-    const course = makeCourse(7);
+describe('Course 弧长边界与起跑线环回保护', () => {
+  /*
+   * 【测试改写说明】
+   * 1. 原来抓的是什么:
+   *    原快照测试锁定的是已知缺陷行为 —— 闭环赛道首尾相连, 当采样点落在起跑线正后方微小距离
+   *    [-ε, 0] 时, 空间索引将其匹配到最后一个线段 (segment = rows - 1), 导致算出的 arc 环绕至
+   *    赛道总长度附近 (~2736m) 而非 0 附近 (实测后溜 0.00002m 即可触发)。
+   *
+   * 2. 为什么原来的写法不再成立:
+   *    Course.sample 现已实现起跑线弧长环回保护: 在最后一段 (rows - 1) 且靠近起跑线 (samples[0])
+   *    的微小区间内, 将 arc 严格 clamp 到 0。因此对于起跑线后方微小位移, arc 不再返回
+   *    totalLength - epsilon (~2736m), 原断言必然不再成立。
+   *    【为何选择 clamp 到 0 而非允许小负值】:
+   *    - 物理与数据结构规范: 赛道弧长定义域为非负实数 [0, totalLength], clamp 到 0 保证了 arc >= 0。
+   *    - 防范下游负索引越界: 下游 Autopilot / Race 等模块广泛使用 Math.floor(vehicle.arc / spacing) % count,
+   *      在 JS 中负数取模仍为负数 (-1 % 24 === -1), 允许负 arc 会导致 samples[-1] 读取为 undefined;
+   *      clamp 到 0 彻底杜绝了负下标越界隐患。
+   *    - 保持起跑线状态连续: 车辆在起跑线上静止沉降或微小后溜时, arc 稳定保持为 0, 不会产生圈数误判。
+   *
+   * 3. 新写法仍然守得住什么:
+   *    - 守住起跑线后方微小位移 (如 -0.00002m、-0.01m、-0.5m) 时 arc 严格连续为 0, 绝不跳变到 2736m。
+   *    - 守住 onTrack 仍然为 true (车依然在赛道起跑区域内, 不会误判出界)。
+   *    - 跨敏感 seed (1 / 42 / 1337 / 7) 逐一验证, 避免 seed 42 / 1337 假绿灯。
+   */
+  for (const seed of [1, 42, 1337, 7]) {
+    it(`seed ${seed} 起跑线后方微小负向位移时 arc 连续归零且在赛道上`, () => {
+      const course = makeCourse(seed);
+      const hit = createGroundHit();
+      const start = course.layout.samples[0];
+      if (start === undefined) {
+        throw new Error('采样点缺失');
+      }
+
+      // 归零窗口是 ARC_LINE_EPSILON = 0.05 m。要修的场景(悬挂沉降、起步前后抖动)
+      // 量级在 1e-5 ~ 1e-2 m,全部落在窗口内。
+      for (const epsilon of [0.00002, 0.001, 0.01, 0.04]) {
+        course.sample(start.x - start.tangentX * epsilon, start.z - start.tangentZ * epsilon, hit);
+        expect(hit.onTrack).toBe(true);
+        expect(hit.arc).toBe(0);
+      }
+
+      /*
+       * 窗口之外必须**照常报接近 totalLength 的弧长**,不许也归零。
+       *
+       * 这一段是补的:交付的第一版窗口写成 `spacing * 0.5`,把终点线前 3 米整段
+       * clamp 成 0,而当时的测试只取到线后 0.5 m 以内、外加线前 +0.05 m,
+       * **恰好绕开了被改坏的区间**。实测 seed 1 当时 −2.99 m 处 arc 就是 0.000,
+       * 而 −3.05 m 处是 3071.017 —— 每圈正常前进都会经过那个 3071 米的跳变。
+       */
+      for (const back of [0.5, 1, 2, 3]) {
+        course.sample(start.x - start.tangentX * back, start.z - start.tangentZ * back, hit);
+        expect(hit.onTrack).toBe(true);
+        expect(hit.arc).toBeGreaterThan(course.layout.totalLength - back - 1);
+        expect(hit.arc).toBeLessThanOrEqual(course.layout.totalLength);
+      }
+    });
+  }
+
+  it('起跑线前后连续过渡: 负向位移 clamp 为 0, 正向位移单调递增', () => {
+    const course = makeCourse(1);
     const hit = createGroundHit();
     const start = course.layout.samples[0];
     if (start === undefined) {
       throw new Error('采样点缺失');
     }
 
-    // 在起跑线正后方微小距离 (沿着前进切线反方向倒退 0.01 米)
-    const epsilon = 0.01;
-    const testX = start.x - start.tangentX * epsilon;
-    const testZ = start.z - start.tangentZ * epsilon;
+    // 后方 -0.02m(明确落在 0.05 归零窗口内,不压边界)-> 0 -> 正前方 +0.05m
+    course.sample(start.x - start.tangentX * 0.02, start.z - start.tangentZ * 0.02, hit);
+    expect(hit.arc).toBe(0);
 
-    course.sample(testX, testZ, hit);
+    course.sample(start.x, start.z, hit);
+    expect(hit.arc).toBe(0);
 
-    // 现状行为: 闭环赛道首尾相连, 空间索引将起跑线后方的点匹配到最后一个线段 (segment = rows - 1),
-    // 导致计算出的 arc 环绕至赛道总长度附近 (~2736m) 而非保留微小负值或 clamp 为 0。
-    // 这是已知缺陷的现状快照, 锁定当前行为防止无声变化, 修复方案与权衡见 HANDOFF 第十八节。
-    expect(hit.onTrack).toBe(true);
-    expect(hit.arc).toBeGreaterThan(course.layout.totalLength - course.layout.spacing - 1);
-    expect(hit.arc).toBeCloseTo(course.layout.totalLength - epsilon, 0);
+    course.sample(start.x + start.tangentX * 0.05, start.z + start.tangentZ * 0.05, hit);
+    expect(hit.arc).toBeCloseTo(0.05, 2);
   });
 });

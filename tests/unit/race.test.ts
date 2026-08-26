@@ -116,6 +116,32 @@ describe('Race 检查点按顺序,抄近道不算', () => {
     expect(race.nextCheckpoint).toBe(1);
     expect(race.laps).toBe(0);
   });
+
+  it('车在起跑线前后微小抖动,laps 不许增加', () => {
+    for (const seed of [1, 42, 1337]) {
+      const rig = makeRig(seed);
+      const { race, vehicle, layout } = rig;
+      const start = layout.samples[0];
+      if (start === undefined) {
+        throw new Error('采样点缺失');
+      }
+
+      const yaw = Math.atan2(start.tangentX, start.tangentZ);
+      const offsets = [-0.1, -0.01, -0.00002, 0, 0.00002, 0.01, 0.1, -0.05, 0.05];
+
+      // 模拟车辆在起跑线附近前后反复微小晃动 / 悬挂沉降 180 帧 (3 秒)
+      for (let i = 0; i < 180; i++) {
+        const offset = offsets[i % offsets.length] ?? 0;
+        const posX = start.x + start.tangentX * offset;
+        const posZ = start.z + start.tangentZ * offset;
+        vehicle.reset(posX, posZ, yaw);
+        race.update(vehicle, FIXED_DT);
+
+        expect(race.laps).toBe(0);
+        expect(race.nextCheckpoint).toBe(1);
+      }
+    }
+  });
 });
 
 describe('Race 出界重置', () => {

@@ -23,6 +23,21 @@ const INDEX_CELL = 24;
  * 赛道外的地形是噪声函数 + 有限差分法线,**没有做到面级精确**。那里是出界区,
  * 踩上去会被重置回检查点,不值得为它多维护一张网格。
  */
+/**
+ * 起跑线归零窗口(米)。**单位是米,不是段长的比例 —— 这一条是修出来的。**
+ *
+ * 交付的第一版写的是 `(1 - bestT) * spacing <= spacing * 0.5`,化简就是
+ * `bestT >= 0.5`,也就是把**最后一整段的后半段(约 3 米)**全部 clamp 成 0。
+ * 那不是「紧贴起跑线」,而是把终点线前 3 米的赛道和起跑线变得不可区分。
+ * 实测 seed 1(spacing 6.004 m):−3.05 m 处 arc = 3071.017,−2.99 m 处 arc = 0.000
+ * —— **终点线前 3 米有一个 3071 米的跳变,每一圈正常前进都会经过。**
+ *
+ * 原缺陷只在车退到起跑线后方时才触发(罕见),那一版等于把罕见 bug 换成了
+ * 必然 bug。取 0.05 m:比要修的场景(悬挂沉降、起步前后抖动,量级 1e-5 ~ 1e-2 m)
+ * 大一个数量级,又远小于段长,正常行驶永远碰不到。
+ */
+const ARC_LINE_EPSILON = 0.05;
+
 export class Course implements GroundQuery {
   readonly layout: TrackLayout;
   readonly halfWidth: number;
@@ -152,7 +167,19 @@ export class Course implements GroundQuery {
     const rightZ = a.tangentX;
     const lateral = (x - a.x) * rightX + (z - a.z) * rightZ;
 
-    const arc = a.arc + bestT * this.layout.spacing;
+    let arc = a.arc + bestT * this.layout.spacing;
+    // 闭环赛道首尾相连:在最后一段 (rows - 1) 且**紧贴**起跑线 (samples[0]) 的
+    // ARC_LINE_EPSILON 米内,将 arc clamp 到 0,消除起跑线后方微小负向位移时
+    // 环回至 ≈ totalLength 的缺陷。
+    // 选 clamp 到 0 而非允许小负值的理由:
+    // 1. 保证 arc 严格落在 [0, totalLength] 闭区间内,符合赛道非负弧长物理定义。
+    // 2. 避免下游模块 (如 Race.trackCheckpoints 与 Autopilot) 中 Math.floor(arc / spacing)
+    //    计算出负数下标 (JS 中负数取模仍为负,例如 -1 % 24 === -1,会导致 samples[-1] 越界)。
+    // 3. 在起跑线附近提供连续零边界:在起跑线上前后微小抖动时 arc 连续为 0,不跳变、不漏圈、不多圈。
+    if (bestRow === this.rows - 1 && (1 - bestT) * this.layout.spacing <= ARC_LINE_EPSILON) {
+      arc = 0;
+    }
+
     const applyTrackFields = (): void => {
       out.lateral = lateral;
       out.segment = bestRow;
