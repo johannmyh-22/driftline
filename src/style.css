@@ -12,7 +12,7 @@ body {
   height: 100%;
   overflow: hidden;
   background: #05060a;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 #app {
@@ -39,48 +39,198 @@ body {
   white-space: pre-wrap;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * HUD 全屏 DOM 覆盖层
+ * ══════════════════════════════════════════════════════════════════════════ */
 #readout {
   position: fixed;
-  left: 1.25rem;
-  bottom: 1.1rem;
-  margin: 0;
-  color: #e8ecff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+  inset: 0;
   pointer-events: none;
   user-select: none;
+  z-index: 10;
+  color: #e8ecff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
 
-.readout-speed {
+.hud-card {
+  background: rgba(5, 8, 18, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* 顶部左侧:计时面板 */
+.hud-timing-card {
+  position: absolute;
+  top: 1.25rem;
+  left: 1.25rem;
+  padding: 0.65rem 0.95rem;
+  min-width: 180px;
+}
+
+.hud-timing-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.hud-lap-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #38bdf8;
+  letter-spacing: 0.08em;
+}
+
+.hud-delta-badge {
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 0.12rem 0.45rem;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.hud-delta-idle {
+  color: #64748b;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.hud-delta-ahead {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.18);
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.25);
+}
+
+.hud-delta-behind {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.18);
+  box-shadow: 0 0 10px rgba(248, 113, 113, 0.25);
+}
+
+.hud-delta-equal {
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.hud-current-time {
+  font-size: 1.95rem;
+  font-weight: 700;
+  color: #f8fafc;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  margin: 0.2rem 0 0.35rem 0;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9);
+}
+
+.hud-timing-footer {
+  display: flex;
+  gap: 0.85rem;
+  font-size: 0.72rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 0.35rem;
+}
+
+.hud-record-row {
+  display: flex;
+  gap: 0.3rem;
+  align-items: baseline;
+}
+
+.hud-record-label {
+  font-size: 0.65rem;
+  color: #64748b;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.hud-record-val {
+  font-weight: 600;
+  color: #cbd5e1;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-best-val {
+  color: #fbbf24;
+}
+
+/* 顶部右侧:SVG 程序化小地图 */
+.hud-minimap-card {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.25rem;
+  width: 170px;
+  height: 170px;
+  padding: 0.35rem;
+  border-radius: 12px;
+}
+
+.hud-minimap-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.hud-map-path-bg {
+  filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.35));
+}
+
+.hud-map-start-node {
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.6));
+}
+
+.hud-map-player {
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.8));
+}
+
+/* 底部右侧:大字时速表 */
+.hud-speed-card {
+  position: absolute;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  padding: 0.5rem 1rem;
+  text-align: right;
+  min-width: 140px;
+}
+
+.hud-speed-display {
   margin: 0;
   font-size: 0.95rem;
   letter-spacing: 0.04em;
-  opacity: 0.85;
+  opacity: 0.95;
 }
 
-.readout-speed span {
-  font-size: 2.1rem;
+.hud-speed-num {
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: #ffffff;
+  text-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+}
+
+.hud-speed-unit {
+  font-size: 0.82rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  color: #94a3b8;
+  letter-spacing: 0.06em;
+}
+
+/* 底部左侧:操作说明与构建标识 */
+.hud-info-card {
+  position: absolute;
+  bottom: 1.1rem;
+  left: 1.25rem;
+  margin: 0;
 }
 
 .readout-help {
-  margin: 0.35rem 0 0;
+  margin: 0;
   font-size: 0.72rem;
   letter-spacing: 0.03em;
-  opacity: 0.55;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .readout-speed span {
-    transition: none;
-  }
-}
-
-.readout-timing {
-  margin: 0 0 0.15rem;
-  font-size: 0.82rem;
-  letter-spacing: 0.05em;
-  opacity: 0.8;
+  opacity: 0.65;
+  color: #e8ecff;
 }
 
 .readout-build {
@@ -88,4 +238,13 @@ body {
   font-size: 0.7rem;
   opacity: 0.45;
   letter-spacing: 0.03em;
+  color: #94a3b8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-speed-num,
+  .hud-delta-badge,
+  .hud-map-player {
+    transition: none;
+  }
 }

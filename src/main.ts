@@ -1,4 +1,5 @@
 import { ACESFilmicToneMapping, PCFSoftShadowMap, WebGLRenderer } from 'three';
+import { setStorageEnabled } from './game/records';
 import {
   type InputFrame,
   KeyboardInput,
@@ -14,7 +15,7 @@ import {
   setTelemetryEnabled,
 } from './game/diagnostics';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
-import { Readout } from './game/hud';
+import { Hud } from './game/hud';
 import { initPhysics } from './game/physics';
 import { type CourseKind, World } from './game/world';
 import './style.css';
@@ -23,6 +24,17 @@ const DEFAULT_SEED = 1337;
 
 const params = new URLSearchParams(window.location.search);
 const testMode = params.get('test') === '1';
+
+/*
+ * 测试模式必须**显式**关掉本地成绩持久化。
+ *
+ * 隔离本来是「成立」的,但靠的是一条没人守的隐式链:testMode → 不建 Hud →
+ * 没人调 race.setSeed() → race.seed 保持 null → loadRecord 不执行、saveRecord
+ * 被 seed !== null 挡住。链上任何一环被重构掉(比如把 setSeed 挪进 world.ts ——
+ * seed 本来就是世界状态而不是表现状态),截图测试就会开始互相污染,**而且不会
+ * 有任何测试变红**。这个项目最贵的几个 bug 都是这个形状:测试因为错误的原因而绿。
+ */
+setStorageEnabled(!testMode);
 const seed = parseSeed(params.get('seed'), DEFAULT_SEED);
 // ?course=flat 切回 M1 那块带跳台的平地。调手感时没有赛道干扰更干净。
 const courseKind: CourseKind = params.get('course') === 'flat' ? 'flat' : 'race';
@@ -94,7 +106,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
   const keyboard = testMode ? null : new KeyboardInput();
   const source = keyboard ?? scripted;
   const frame: InputFrame = createInputFrame();
-  const readout = testMode ? null : new Readout(container);
+  const readout = testMode ? null : new Hud(container, seed, world.track, world.race);
 
   // 首帧画完才在 DOM 上打标记。SwiftShader 上一帧要一秒以上,「canvas 元素出现」
   // 远早于「画面上有东西」—— 冒烟测试拿前者当后者用,后处理一接上就开始拍到空白。
@@ -108,7 +120,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
     },
     render: (alpha) => {
       world.present(alpha);
-      readout?.update(world.vehicle.groundSpeed, world.race);
+      readout?.update(world.vehicle.groundSpeed, world.race, world.vehicle.position, world.vehicle.yaw);
       post.render(world.camera);
       if (!painted) {
         painted = true;
