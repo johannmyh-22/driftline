@@ -108,8 +108,9 @@ describe('Race 分段计时与 Delta 计算', () => {
     const rig = makeRig(42);
     rig.race.setSeed(42);
 
-    // 跑完第 1 圈
-    driveSteps(rig, 60 * 120, 1);
+    // 跑完第 1 圈。220s 预算(原 120s)——载具按 Alpine A110 真实极速/加速度
+    // 校准后自动驾驶圈时变长了,见 tuning.ts 的 REFERENCE_TOP_SPEED 注释。
+    driveSteps(rig, 60 * 220, 1);
     expect(rig.race.laps).toBe(1);
     expect(rig.race.bestLapTime).toBeGreaterThan(0);
     expect(rig.race.bestSectorTimes[1]).toBeGreaterThan(0);
@@ -136,8 +137,9 @@ describe('Race 分段计时与 Delta 计算', () => {
     const rig = makeRig(1337);
     rig.race.setSeed(1337);
 
-    // 跑完第 1 圈
-    driveSteps(rig, 60 * 120, 1);
+    // 跑完第 1 圈。220s 预算(原 120s)——载具按 Alpine A110 真实极速/加速度
+    // 校准后自动驾驶圈时变长了,见 tuning.ts 的 REFERENCE_TOP_SPEED 注释。
+    driveSteps(rig, 60 * 220, 1);
     expect(rig.race.laps).toBe(1);
     const best = rig.race.bestLapTime;
     expect(best).toBeGreaterThan(0);
