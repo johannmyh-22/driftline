@@ -1,5 +1,5 @@
 import { ACESFilmicToneMapping, PCFSoftShadowMap, WebGLRenderer } from 'three';
-import { setStorageEnabled } from './game/records';
+import { decodeGhostInput, loadRecord, setStorageEnabled } from './game/records';
 import {
   type InputFrame,
   KeyboardInput,
@@ -16,6 +16,7 @@ import {
 } from './game/diagnostics';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
 import { Hud } from './game/hud';
+import { Menu } from './game/menu';
 import { initPhysics } from './game/physics';
 import { type CourseKind, World } from './game/world';
 import './style.css';
@@ -99,6 +100,22 @@ async function boot(container: HTMLDivElement): Promise<void> {
   world.scene.environment = world.atmosphere.buildEnvironment(renderer);
   world.scene.environmentIntensity = SKY.environmentIntensity;
 
+  /*
+   * 幽灵回放:装载这个 seed 上次留下的最佳圈录制(如果有)。
+   *
+   * `loadRecord` 内部already respects `setStorageEnabled(!testMode)`(上面
+   * 已经显式调过),测试模式下这里必然拿到 null —— 不需要再判一次 testMode,
+   * 存储层的开关本身就是那道闸。
+   */
+  if (world.ghost !== null) {
+    const record = loadRecord(seed);
+    const bytes = record?.ghostInput === undefined ? null : decodeGhostInput(record.ghostInput);
+    if (bytes !== null) {
+      world.ghost.loadRecording(bytes);
+      world.ghost.restartLap();
+    }
+  }
+
   const post = new Postprocess(renderer, world.scene, world.camera, stages);
   post.setBloomStrength(bloomStrength);
 
@@ -141,6 +158,50 @@ async function boot(container: HTMLDivElement): Promise<void> {
 
   document.documentElement.dataset['seed'] = String(seed);
 
+  /*
+   * 暂停/换 seed 菜单。测试模式跳过(和 Hud 一样)——测试接口自己驱动
+   * advance(),不该有真实按键能让主循环停下来。
+   *
+   * 换 seed 靠整页跳转:World 只在 boot() 里造一次(赛道+地形+护墙网格要
+   * 2 秒多,见 docs/HANDOFF.md 第四节性能一节),没有必要为了换 seed 去写
+   * 一套原地重建 World 的逻辑,跳转本来就是现在这条「URL 参数决定 seed」
+   * 路径的自然延伸。
+   */
+  let menu: Menu | null = null;
+  if (!testMode) {
+    menu = new Menu(container, seed, {
+      onResume: () => {
+        menu?.hide();
+        loop.start();
+      },
+      onRestart: () => {
+        world.spawnAtStart();
+        world.chase.snapTo(world.vehicle);
+        menu?.hide();
+        loop.start();
+      },
+      onChangeSeed: (newSeed) => {
+        const url = new URL(window.location.href);
+        url.searchParams.set('seed', String(newSeed));
+        window.location.href = url.toString();
+      },
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code !== 'Escape') {
+        return;
+      }
+      event.preventDefault();
+      if (menu?.isOpen) {
+        menu.hide();
+        loop.start();
+      } else {
+        menu?.show();
+        loop.stop();
+      }
+    });
+  }
+
   if (testMode) {
     // 测试模式下**绝不**注册 rAF:帧全部由 __DRIFTLINE_TEST__.advance() 推进。
     let resolveReady: () => void = () => {};
@@ -171,6 +232,16 @@ async function boot(container: HTMLDivElement): Promise<void> {
         setTelemetryEnabled(flag);
       },
       readVehicleTelemetry: () => readVehicleTelemetry(),
+      setGhostInput: (base64) => {
+        if (world.ghost === null) {
+          return;
+        }
+        const bytes = base64 === null ? null : decodeGhostInput(base64);
+        world.ghost.loadRecording(bytes);
+        if (bytes !== null) {
+          world.ghost.restartLap();
+        }
+      },
       snapshot: () => ({
         frame: loop.frame,
         elapsed: loop.elapsed,

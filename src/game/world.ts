@@ -4,7 +4,7 @@ import {
   Scene,
   Vector3,
 } from 'three';
-import { type InputFrame, createInputFrame } from '../core/input';
+import { type InputFrame, InputRecorder, createInputFrame } from '../core/input';
 import type { Rng } from '../core/rng';
 import { type Craft, createCraft } from '../gfx/craft';
 import { createGround } from '../gfx/ground';
@@ -15,10 +15,12 @@ import { createTrackMesh } from '../gfx/trackMesh';
 import { normalize01 } from '../core/mathx';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
+import { Ghost } from './ghost';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
 import { Physics } from './physics';
 import { Race } from './race';
+import { encodeGhostInput, saveRecord } from './records';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
 import { CRAFT, REFERENCE_TOP_SPEED } from './tuning';
 import { Vehicle } from './vehicle';
@@ -61,6 +63,8 @@ export class World {
   readonly race: Race | null;
   /** 物理世界。**造 World 之前必须 await `initPhysics()`**,否则这里会抛。 */
   readonly physics: Physics;
+  /** 幽灵回放。`flat` 场地(没有 `Race`)下是 null。 */
+  readonly ghost: Ghost | null;
 
   private readonly craft: Craft;
   private readonly prevPosition = new Vector3();
@@ -68,6 +72,11 @@ export class World {
   private preset = 'chase';
   private readonly fixedCamera: PerspectiveCamera;
   private readonly input: InputFrame = createInputFrame();
+  /**
+   * 玩家本圈的输入录制。**只在跨过起跑线时清空**(`spawnAtStart` /
+   * 圈完成),出界重置不清 —— 幽灵要重放出那次出界和被拽回来的过程。
+   */
+  private readonly recorder = new InputRecorder();
 
   constructor(rng: Rng, kind: CourseKind = 'race') {
     const palette = createPalette(rng.fork());
@@ -106,6 +115,10 @@ export class World {
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft.group);
 
+    this.ghost = this.track === null ? null : new Ghost(this.field, this.track, rng.fork(), palette);
+    if (this.ghost !== null) {
+      this.scene.add(this.ghost.craft.group);
+    }
 
     // 背光面不再靠半球光去补,改由 IBL 提供 —— 环境反射来自真实的大气散射,
     // 明暗过渡和天空是一致的,而不是人为塞一个补光。
@@ -118,6 +131,8 @@ export class World {
   /** 把载具放到起跑线,车头朝赛道前进方向。平地场景就是原点朝 +Z。 */
   spawnAtStart(): void {
     this.race?.reset();
+    this.recorder.clear();
+    this.ghost?.restartLap();
     const start = this.track?.samples[0];
     if (start === undefined) {
       this.vehicle.reset();
@@ -157,8 +172,40 @@ export class World {
     this.input.steer = input.steer;
     this.input.airBrake = input.airBrake;
 
+    if (this.race !== null) {
+      // 就地把 this.input 量化成回放精度 —— 物理这一帧吃到的和录下来的必须是
+      // 同一串数字,否则幽灵会慢慢和玩家原本跑的线漂开(见 InputRecorder 类注释)。
+      this.recorder.record(this.input);
+    }
+
     this.vehicle.update(this.input, dt);
+
+    const lapsBefore = this.race?.laps ?? 0;
     this.race?.update(this.vehicle, dt);
+
+    if (this.race !== null && this.race.laps > lapsBefore) {
+      if (this.race.isNewBestLap) {
+        const seed = this.race.getSeed();
+        if (seed !== null) {
+          /*
+           * Race.update() 内部(trackCheckpoints)已经为新纪录写过一次不带
+           * 幽灵数据的记录。Race 不认识 InputRecorder——层次上不该让它认识——
+           * 所以这里带着 ghostInput 再写一次覆盖它。多写一次的代价可以接受,
+           * 新纪录本来就不常发生。
+           */
+          saveRecord(seed, {
+            bestLapTime: this.race.bestLapTime,
+            bestSectorTimes: [...this.race.bestSectorTimes],
+            ghostInput: encodeGhostInput(this.recorder.toRecording()),
+          });
+          this.ghost?.loadRecording(this.recorder.toRecording());
+        }
+      }
+      this.recorder.clear();
+      this.ghost?.restartLap();
+    }
+
+    this.ghost?.update(dt);
     this.chase.update(this.vehicle, dt);
   }
 
@@ -192,6 +239,8 @@ export class World {
         wheel.rollAngle,
       );
     }
+
+    this.ghost?.present(alpha);
 
     // 阴影相机只罩住车周围一小块,必须跟着车走。
     this.atmosphere.followShadow(shownPosition.x, shownPosition.y, shownPosition.z);

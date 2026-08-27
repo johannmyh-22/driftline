@@ -248,3 +248,99 @@ body {
     transition: none;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 暂停/换 seed 菜单
+ * ══════════════════════════════════════════════════════════════════════════ */
+.menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-content: center;
+  background: rgba(5, 6, 10, 0.55);
+}
+
+.menu-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-width: 280px;
+  padding: 1.75rem 2rem;
+  background: rgba(5, 8, 18, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  color: #e8ecff;
+}
+
+.menu-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #38bdf8;
+}
+
+.menu-button {
+  padding: 0.6rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #e8ecff;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.menu-button-primary {
+  background: rgba(56, 189, 248, 0.22);
+  border-color: rgba(56, 189, 248, 0.5);
+}
+
+.menu-button-primary:hover {
+  background: rgba(56, 189, 248, 0.32);
+}
+
+.menu-seed-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.menu-seed-label {
+  font-size: 0.7rem;
+  color: #94a3b8;
+  letter-spacing: 0.06em;
+}
+
+.menu-seed-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+  color: #e8ecff;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+}
+
+.menu-button-small {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.82rem;
+}
+
+.menu-help {
+  margin: 0;
+  font-size: 0.7rem;
+  opacity: 0.65;
+  letter-spacing: 0.02em;
+}

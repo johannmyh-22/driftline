@@ -2007,3 +2007,142 @@ seed 1 数值有波动(跑偏变大,峰值 β 变小),但两个方向都有,不�
 
 这是这一轮最后一个提交。截至这里:分支 `claude/deepseek-task-allocation-oxuiuo`,
 构建号 **#67**,commit `2468338`,没有开 PR,四道门全绿。
+
+---
+
+## 第二十六节:M4 收尾 —— 幽灵回放 + 暂停/换 seed 菜单(2026-08)
+
+接手时状态:分支 `claude/deepseek-task-allocation-oxuiuo` 在 `b123bbd`(构建号
+#68),四道门全绿,没有开 PR。人类选了「M4 剩余」作为这一轮方向 —— `docs/PLAN.md`
+的 M4 里,圈速/最佳持久化、分段计时+Delta、DOM HUD、小地图已经在第二十四节做完,
+没做的是**幽灵回放**和**开始菜单/暂停/重开/seed 输入框**。这一轮把这两块补上,
+M4 计划里列的条目至此全部完成。
+
+### 一、幽灵回放:不存轨迹,只存输入
+
+设计沿用 `core/input.ts` 里 `InputRecorder`/`RecordedInput` 那句已经写好的类注释——
+「M4 的幽灵回放直接复用这份数据:幽灵不存轨迹,只存输入,靠同一个 seed 和同一套
+物理重新算出来」。这一轮把它接上:
+
+- `src/game/ghost.ts`(新):`Ghost` 类包一辆独立的 `Vehicle` + 一个只用来做
+  出界重置的内部 `Race`(从不 `setSeed()`,不碰 localStorage)+ 一份复用玩家
+  `craft.ts` 材质、改成半透明的 `Craft`。`restartLap()` 把它放回起跑线并
+  `rewind()` 录制;`update(dt)` 采样 `RecordedInput` 喂给 `vehicle.update`;
+  `present(alpha)` 和 `World.present()` 里摆玩家车的逻辑基本对称(位置/姿态
+  插值、尾灯亮度、四轮)。
+- `World`:新增私有 `recorder: InputRecorder`,在 `update()` 里对玩家当前帧输入
+  就地量化录制(`this.race !== null` 时才录,`flat` 场地不需要幽灵)。玩家每次
+  跨过检查点 0(圈完成)时:如果是新纪录,把这一圈的录制连同 `bestLapTime` /
+  `bestSectorTimes` 一起存盘,并立刻喂给 `this.ghost` 让下一圈就能追自己刚跑出
+  的这一圈;不管是不是新纪录,`recorder.clear()` + `ghost.restartLap()` 都会
+  执行 —— 幽灵每圈都和玩家同时从起跑线出发,而不是自己按录制长度无限循环。
+  出界重置(`Race.respawn()`)**不清空录制**:那次出界和被拽回来的过程要被
+  幽灵原样重放出来。
+- `src/game/records.ts`:`LapRecord` 加一个可选字段 `ghostInput`(`InputRecorder`
+  输出的 base64 编码),新增 `encodeGhostInput`/`decodeGhostInput`。选 base64
+  而不是 `JSON.stringify` 数字数组,是因为一圈几分钟的录制体积差得出来(base64
+  是字节的 4/3,数字数组通常是字节数的 3 倍以上)。旧记录没有这个字段时按
+  「没有幽灵」处理,不是错误 —— `loadRecord` 对它的校验只有 `typeof === 'string'`。
+
+**踩到的一个坑,写下来免得下一个人重踩:`Vehicle.update()` 内部会调用一次
+`physics.step()`(vehicle.ts:780)。** 第一版想当然地让 `Ghost` 复用
+`World.physics`(和玩家共用一个 Rapier `World`),结果变成「一帧里玩家、幽灵
+各调一次 `vehicle.update()`,同一个物理世界被推进了两步」—— 玩家自己的车会
+跟着遭殃,速度位移全部翻倍。两套车身本来就没挂碰撞体(见 `physics.ts` 类注释,
+接地靠 `Course.sample()` 不是引擎碰撞体),所以修法是让 `Ghost` 拥有**自己独立
+的 `Physics` 实例**,互不干扰。这个坑是在写 `tests/unit/ghost.test.ts` 的确定性
+断言时发现的 —— 手动模拟「玩家跑一段、幽灵重放同一段」时数值对不上,查下去才
+发现是双重步进,不是重放逻辑本身的问题。**教训:任何往 `World` 里加第二个
+`Vehicle` 的地方,都要先确认它有没有共用 `Physics`。**
+
+`src/core/testApi.ts` 新增 `setGhostInput(base64: string | null)`:测试模式下
+`setStorageEnabled(false)`,幽灵没法走 localStorage 那条路,这是唯一能在无头
+截图里把幽灵摆出来验证画面的接口。`main.ts` 里 world 造好之后立刻
+`loadRecord(seed)` 装载上次跑出的最佳圈(真实模式,靠 `setStorageEnabled(!testMode)`
+本身已经守住了 test 模式不读盘,不需要再判一次 `testMode`)。
+
+### 二、暂停/重开/换 seed 菜单 —— 一个需要人类确认的产品判断
+
+`docs/PLAN.md` 原文是「开始菜单 / 暂停 / 重开 / seed 输入框」四件事列在一起。
+**这一轮没有做成「开局必须先点掉的启动画面」**,理由是这么做会直接改掉两类
+已经跑通、而且被人类看过确认的东西:
+
+1. `tests/visual/smoke.spec.ts` 里「不带 test=1 时自行跑主循环」和「实时模式下
+   seed 1/42/1337 正常渲染 HUD 与小地图」这几条,在页面 `painted` 之后**零交互**
+   立刻断言 `#readout` 能读到 `km/h`。挡一块必须点掉的启动画面会让这几条失败,
+   或者需要另外教会它们先点掉菜单 —— 而这几条测试本身就是在守「Pages 上线后
+   真实用户看到的那条路径」。
+2. 第二十四节里人类已经看过的 `smoke-realtime-seed{1,42,1337}.png` 这几张截图,
+   拍的是「一进页面就能看到的画面」;加一块挡板会让同名截图从「赛道」变成
+   「菜单」,截图基准和它原本要守的东西对不上了。
+
+所以这一轮把「开始/暂停/重开/换 seed」四件事合成**一个 Esc 触发的菜单**:游戏
+照旧一进页面就能开,Esc 打开菜单(同时 `loop.stop()` 真正暂停物理,不是只盖一层
+UI),提供继续、重开本圈、换 seed 三个操作;换 seed 走整页跳转
+(`?seed=` 参数 + `location.href` 赋值)—— `World` 只在 `boot()` 里构造一次
+(赛道+地形+护墙网格要 2 秒多,见第四节性能数据),没必要为了换 seed 单独写一套
+原地重建 `World` 的逻辑,跳转是现有「URL 参数决定 seed」路径的自然延伸。
+
+**这是一个需要人类确认的产品判断,不是「做不到」而是「选了风险最小的一种读法」**——
+把它写清楚留给人类拍板:如果确实想要开局必须先点掉的传统启动画面,需要同步
+更新上面两类测试的断言方式(比如先发一次点击/按键再断言)和对应的截图基准,
+这是下一轮可以单独做的小工作,不困难,只是这一轮判断没必要在没问清楚之前
+顺手把已经验收过的东西改掉。
+
+新增 `src/game/menu.ts`(`Menu` 类,DOM overlay,和 `Hud` 一样不在 canvas 里
+排文字)。`Hud` 的操作提示文案加了 `· Esc 暂停`。`style.css` 补了
+`.menu-*` 一套深色半透明卡片样式,和 HUD 现有配色统一(见新增的
+`tuning.ts` 里 `MENU_TUNING.colors`,和 `HUD_TUNING.colors` 一样是给 CSS
+配色的参考值,不是运行时读取的)。
+
+### 三、四道质量门禁实测结果
+
+- `npm run typecheck`:0 错误。
+- `npm run test -- --run`:23 个文件,**241 passed**(基线 227,新增
+  `ghost.test.ts` 3 条、`menu.test.ts` 6 条、`records.test.ts` 补 3 条幽灵编解码
+  用例,另外 `noMathRandom.test.ts` 按源文件数生成用例,新增 `ghost.ts`/`menu.ts`
+  两个源文件各带一条扫描用例)。
+- `npm run build`:通过。
+- `npm run test:visual`:**19 passed**(基线 17,新增「幽灵回放:装载一段录制后,
+  半透明幽灵车出现在画面里」「实时模式下 Esc 打开/关闭暂停菜单」两条)。
+
+`tests/unit/ghost.test.ts` 里最关键的一条:手动驱动一辆车跑 240 帧(含一段
+打舵),把同一串录制喂给独立的 `Ghost`(独立 `Physics`、同一个 seed 生成的
+同一条赛道),两边落点用 `toBeCloseTo(..., 3)`(1 毫米量级)比对 —— 通过,
+证明「不存轨迹,只存输入,靠同一个 seed 和同一套物理重新算出来」这句设计
+说明不是只停在注释里。
+
+`spin-probe`(seed 1,90 帧,满油门直行)复核过:峰值 `|yawRate|` 0.022 rad/s,
+峰值侧向速度 0.111 m/s,车走得很正,录制逻辑没有引入新的不对称/打转。没有跑
+`drift-probe`,因为它直接用 `Vehicle`/`Course`,完全绕开 `World`,这一轮改动
+只碰了 `World.update()` 那一层,`drift-probe` 的代码路径没有交集。
+
+### 四、人眼截图核验
+
+- `smoke-ghost.png`:幽灵录制里带一段转向、玩家全程直行,两车在横向上分得开——
+  实心的是玩家,半透明、能看见地面从车身透出来的那辆是幽灵,材质/位置都符合
+  预期(第一版截图两车几乎重叠在一起,看不出透明效果,补了转向分支之后才看
+  清楚,过程记在这一节留个心得:**验证半透明覆盖物,画面构图要让两个对象
+  能分得开,不能想当然「反正是半透明总能看出来」**)。
+- `smoke-pause-menu.png`:Esc 打开的菜单浮在场景上方,HUD(圈数/计时/小地图/
+  速度表/构建号)照常显示在菜单后面,菜单卡片本身(标题「已暂停」、继续/重开
+  按钮、seed 输入框预填当前 seed、操作提示)排版正常,没有遮住整个画面。
+- `review-seed1.png` / `review-seed1337.png` + `zoom-seed1337.png`:普通截图
+  流程(没有幽灵录制、没有打开菜单)画面和之前完全一致,车身材质放大看正常,
+  确认这一轮的改动没有影响默认路径的画面。
+
+### 五、给人类的确认点
+
+1. **「暂停菜单兼任开始菜单」这个读法可以接受吗?** 如果想要传统的、开局必须
+   先点掉的启动画面,需要同步动 `smoke.spec.ts` 里那几条零交互断言和对应截图
+   基准,是可以做但没必要顺手做的下一轮工作,见上面第二节的详细说明。
+2. **幽灵默认开着,没有开关。** 只要某个 seed 存过一次圈,下次同 seed 进来就会
+   看到自己最佳圈的半透明重播。如果想要「先问一下要不要开幽灵」或者一个可以
+   关掉它的选项,这是新的一小块 UI,没有做在这一轮里。
+3. `GHOST.opacity`(`tuning.ts`)控制幽灵不透明度,现在是 0.35,人类看图觉得
+   太淡或太浓都可以直接改这一个数,不用改代码逻辑。
+
+### 六、构建号
+
+`__BUILD_ID__` 由提交数自动算,这一轮几个提交会让它从 #68 往上涨,具体数字
+以 `git rev-list --count HEAD` 实测为准,不在这里手动维护。

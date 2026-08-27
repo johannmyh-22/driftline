@@ -904,6 +904,26 @@ export const HUD_TUNING = {
   },
 } as const;
 
+/**
+ * 幽灵回放(M4)。幽灵不是新造型,是玩家自己最佳圈的半透明重播 —— 材质在
+ * `game/ghost.ts` 里对player同款 craft 的现成材质做透明化,这里只放透明度。
+ */
+export const GHOST = {
+  /** 幽灵车身的不透明度。低到能一眼认出是幽灵,高到还能看清姿态。 */
+  opacity: 0.35,
+} as const;
+
+/** 开始/暂停菜单(M4)的配色,和 `HUD_TUNING.colors` 同一套但单独放,菜单不依赖 HUD 存不存在。 */
+export const MENU_TUNING = {
+  colors: {
+    textPrimary: '#e8ecff',
+    textSecondary: '#94a3b8',
+    accent: '#38bdf8',
+    backgroundPanel: 'rgba(5, 8, 18, 0.86)',
+    borderPanel: 'rgba(255, 255, 255, 0.12)',
+  },
+} as const;
+
 export const MINIMAP_TUNING = {
   /** 小地图 SVG 视口宽高。 */
   viewBoxSize: 200,

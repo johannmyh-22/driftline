@@ -471,3 +471,78 @@ for (const s of [1, 42, 1337]) {
     expect(problems).toEqual([]);
   });
 }
+
+/**
+ * 按 `InputRecorder.record` 同样的量化规则(127 档、四字段)手搓一段幽灵
+ * 录制,绕开 localStorage 直接走新增的 `setGhostInput` 测试接口 —— 那条接口
+ * 存在的唯一理由就是让幽灵在无头截图里可验证(见 testApi.ts 的注释)。
+ */
+function encodeGhostInputForTest(
+  frames: readonly Partial<InputFrame>[],
+): string {
+  const QUANTIZE = 127;
+  const quantize = (v: number | undefined): number =>
+    Math.round(Math.max(-1, Math.min(1, v ?? 0)) * QUANTIZE);
+  const bytes = new Int8Array(frames.length * 4);
+  frames.forEach((f, i) => {
+    bytes[i * 4] = quantize(f.throttle);
+    bytes[i * 4 + 1] = quantize(f.reverse);
+    bytes[i * 4 + 2] = quantize(f.steer);
+    bytes[i * 4 + 3] = quantize(f.airBrake);
+  });
+  const raw = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return Buffer.from(raw).toString('base64');
+}
+
+test('幽灵回放:装载一段录制后,半透明幽灵车出现在画面里', async ({ page }) => {
+  const problems = watchForProblems(page);
+  // 幽灵录制里带一段转向,玩家全程直行:两车会在横向上分开,截图里才
+  // 分得清「哪辆是幽灵」,而不是两车叠在同一个像素上看不出区别。
+  const ghostInput = encodeGhostInputForTest([
+    ...Array.from({ length: 40 }, () => ({ throttle: 1 })),
+    ...Array.from({ length: 50 }, () => ({ throttle: 1, steer: 1 })),
+  ]);
+
+  await driveScene(page, BASE_URL, { seed: SEED, frames: 0, camera: 'chase' });
+  await page.evaluate((base64) => {
+    const api = window.__DRIFTLINE_TEST__;
+    if (api === undefined) {
+      throw new Error('__DRIFTLINE_TEST__ 未挂载');
+    }
+    api.setGhostInput(base64);
+    api.setInput({ throttle: 1 });
+    api.advance(90);
+  }, ghostInput);
+
+  const stats = await shoot(page, 'smoke-ghost.png');
+
+  expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+  expect(stats.distinctColors).toBeGreaterThan(MIN_DISTINCT_COLORS);
+  expect(problems).toEqual([]);
+});
+
+test('实时模式下 Esc 打开/关闭暂停菜单,且暂停时物理不推进', async ({ page }) => {
+  const problems = watchForProblems(page);
+  await page.goto(`${BASE_URL}?seed=${SEED}`, { waitUntil: 'load' });
+  await page.waitForSelector('#app canvas');
+  await page.waitForFunction(() => document.documentElement.dataset['painted'] === '1');
+
+  const isMenuOpen = (): Promise<boolean> =>
+    page.evaluate(() => {
+      const overlay = document.getElementById('menu-overlay');
+      return overlay !== null && !(overlay as HTMLElement).hidden;
+    });
+
+  expect(await isMenuOpen()).toBe(false);
+
+  await page.keyboard.press('Escape');
+  expect(await isMenuOpen()).toBe(true);
+  await shoot(page, 'smoke-pause-menu.png');
+
+  const seedInput = await page.inputValue('.menu-seed-input');
+  expect(seedInput).toBe(String(SEED));
+
+  await page.keyboard.press('Escape');
+  expect(await isMenuOpen()).toBe(false);
+  expect(problems).toEqual([]);
+});

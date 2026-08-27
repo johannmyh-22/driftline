@@ -160,7 +160,7 @@ export class Hud {
 
     const help = document.createElement('p');
     help.className = 'readout-help';
-    help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹';
+    help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹 · Esc 暂停';
 
     // 试玩反馈靠构建号识别版本,必须保留在左下角
     const build = document.createElement('p');

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   clearAllRecords,
   clearRecord,
+  decodeGhostInput,
+  encodeGhostInput,
   getStorageEnabled,
   isStorageAvailable,
   loadRecord,
@@ -96,6 +98,33 @@ describe('Records 存储与持久化', () => {
 
     store.set('driftline:record:42', JSON.stringify({ bestLapTime: -10, bestSectorTimes: 'not array' }));
     expect(loadRecord(42)).toBeNull();
+  });
+
+  it('encodeGhostInput/decodeGhostInput 互为逆运算,含负数字节', () => {
+    const data = Int8Array.from([0, 1, -1, 127, -127, 63, -63, 0]);
+    const encoded = encodeGhostInput(data);
+    expect(typeof encoded).toBe('string');
+    const decoded = decodeGhostInput(encoded);
+    expect(decoded).not.toBeNull();
+    expect(Array.from(decoded ?? [])).toEqual(Array.from(data));
+  });
+
+  it('decodeGhostInput 对损坏/非法输入返回 null,不抛异常', () => {
+    expect(decodeGhostInput('不是合法的 base64 ! ! !')).toBeNull();
+    // 长度不是 4 的倍数:btoa('abc') 编出 3 字节,不是合法的一帧记录。
+    expect(decodeGhostInput(btoa('abc'))).toBeNull();
+  });
+
+  it('saveRecord/loadRecord 原样透传 ghostInput,旧记录没有这个字段也能读', () => {
+    const encoded = encodeGhostInput(Int8Array.from([127, 0, -127, 0]));
+    saveRecord(1, { bestLapTime: 30, bestSectorTimes: [0, 15], ghostInput: encoded });
+    expect(loadRecord(1)?.ghostInput).toBe(encoded);
+
+    // 没有 ghostInput 字段的旧记录(M4 之前存的)按「没有幽灵」处理,不是错误。
+    store.set('driftline:record:2', JSON.stringify({ bestLapTime: 20, bestSectorTimes: [0, 10] }));
+    const legacy = loadRecord(2);
+    expect(legacy).not.toBeNull();
+    expect(legacy?.ghostInput).toBeUndefined();
   });
 
   it('clearRecord 与 clearAllRecords 能正确清理', () => {

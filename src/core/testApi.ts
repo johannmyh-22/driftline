@@ -33,6 +33,12 @@ export interface DriftlineTestApi {
   setTelemetryEnabled(flag: boolean): void;
   /** 读走上一帧的轮子级遥测(在 advance/reset 之后调用)。 */
   readVehicleTelemetry(): FrameTelemetry;
+  /**
+   * M4 新增:直接装载一段幽灵录制(`InputRecorder.toRecording()` 的 base64
+   * 编码),绕开 localStorage —— 测试模式下持久化被显式关掉(见 main.ts),
+   * 这是唯一能在无头截图里把幽灵摆出来验证画面的路径。传 `null` 清空。
+   */
+  setGhostInput(base64: string | null): void;
 }
 
 declare global {

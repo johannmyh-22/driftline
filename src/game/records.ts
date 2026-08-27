@@ -12,6 +12,47 @@ export interface LapRecord {
   bestSectorTimes: number[];
   /** 记录产生的时间戳(毫秒)。 */
   updatedAt?: number | undefined;
+  /**
+   * 幽灵回放的输入序列(`InputRecorder.toRecording()` 的 base64 编码)。
+   *
+   * 不存轨迹,只存输入 —— 幽灵靠同一个 seed 和同一套物理重新算出这一圈,
+   * 见 `src/core/input.ts` 的 `InputRecorder` 类注释。可选:M4 之前存的记录
+   * 没有这个字段,读取时按「没有幽灵」处理,不是错误。
+   */
+  ghostInput?: string | undefined;
+}
+
+/**
+ * `InputRecorder.toRecording()` 的输出(`Int8Array`)编码成 base64 字符串。
+ *
+ * 比 `JSON.stringify` 一个数字数组紧凑得多(base64 是字节的 4/3,数字数组是
+ * 逗号分隔的十进制文本,通常是字节数的 3 倍以上)—— 一圈几分钟的录制在
+ * localStorage 里差得出来。
+ */
+export function encodeGhostInput(data: Int8Array): string {
+  let binary = '';
+  const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i] ?? 0);
+  }
+  return btoa(binary);
+}
+
+/** `encodeGhostInput` 的逆操作。解析失败(数据损坏/版本不对)返回 null,不抛错。 */
+export function decodeGhostInput(base64: string): Int8Array | null {
+  try {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    if (bytes.length % 4 !== 0) {
+      return null;
+    }
+    return new Int8Array(bytes.buffer);
+  } catch {
+    return null;
+  }
 }
 
 const STORAGE_PREFIX = 'driftline:record:';
@@ -91,6 +132,7 @@ export function loadRecord(seed: number): LapRecord | null {
         bestLapTime: parsed.bestLapTime,
         bestSectorTimes: parsed.bestSectorTimes.map((t) => (typeof t === 'number' && t >= 0 ? t : 0)),
         updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : undefined,
+        ghostInput: typeof parsed.ghostInput === 'string' ? parsed.ghostInput : undefined,
       };
     }
     return null;
@@ -113,6 +155,7 @@ export function saveRecord(seed: number, record: LapRecord): boolean {
       bestLapTime: record.bestLapTime,
       bestSectorTimes: record.bestSectorTimes,
       updatedAt: Date.now(),
+      ghostInput: record.ghostInput,
     };
     storage.setItem(`${STORAGE_PREFIX}${seed}`, JSON.stringify(payload));
     return true;
