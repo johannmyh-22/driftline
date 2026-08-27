@@ -527,10 +527,22 @@ test('实时模式下 Esc 打开/关闭暂停菜单,且暂停时物理不推进'
   await page.waitForSelector('#app canvas');
   await page.waitForFunction(() => document.documentElement.dataset['painted'] === '1');
 
+  /*
+   * 判定「菜单开没开」看的是**实际渲染出来的 display**,不是 `hidden` 这个
+   * DOM 属性本身——两者曾经对不上:`.menu-overlay { display: grid }` 那条
+   * 规则的选择器特异度和 UA 样式表的 `[hidden] { display: none }` 打平,
+   * 源码顺序在后的赢,`hidden` 属性被设成 true 也压不住 `display: grid`,
+   * 菜单从第一帧就盖在整个游戏上面。只断言 `.hidden` 这个属性的老版本测试
+   * 完全测不出这个问题(属性确实是 true),这是又一次「测试因为错误的原因
+   * 而绿」。见 `style.css` 里 `.menu-overlay[hidden]` 那条规则的注释。
+   */
   const isMenuOpen = (): Promise<boolean> =>
     page.evaluate(() => {
       const overlay = document.getElementById('menu-overlay');
-      return overlay !== null && !(overlay as HTMLElement).hidden;
+      if (overlay === null) {
+        return false;
+      }
+      return getComputedStyle(overlay).display !== 'none';
     });
 
   expect(await isMenuOpen()).toBe(false);

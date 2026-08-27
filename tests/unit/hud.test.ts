@@ -195,6 +195,26 @@ describe('HUD 与小地图 UI 逻辑', () => {
     hud.dispose();
   });
 
+  it('传入精选赛道数据时渲染 TARGET 行,没传时不渲染', () => {
+    const rng = new Rng(42);
+    const layout = generateTrack(rng.fork());
+    const race = new Race(layout);
+
+    const hudWithout = new Hud(container, 42, layout, race);
+    expect(container.querySelector('.hud-target-val')).toBeNull();
+    hudWithout.dispose();
+
+    const hudWith = new Hud(container, 135, layout, race, {
+      seed: 135,
+      name: '荒漠 #135',
+      theme: '荒漠',
+      targetLapTime: 67.06,
+    });
+    const targetVal = container.querySelector('.hud-target-val');
+    expect(targetVal?.textContent).toBe(formatTime(67.06));
+    hudWith.dispose();
+  });
+
   it('平地场景(track 为 null)下小地图安全隐藏且不报错', () => {
     const hud = new Hud(container, 1, null, null);
     const minimapCard = container.querySelector<HTMLDivElement>('.hud-minimap-card');

@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { CURATED_TRACKS } from '../../src/game/curatedTracks';
 import { Menu } from '../../src/game/menu';
 
 /**
@@ -85,6 +86,18 @@ function querySelectorImpl(root: MockNode, selector: string): MockNode | null {
     }
   }
   return null;
+}
+
+/** 收集子树里所有匹配的节点(深度优先),`querySelector` 只返回第一个,测多个按钮时不够用。 */
+function collectAll(root: MockNode, selector: string): MockNode[] {
+  const result: MockNode[] = [];
+  for (const child of root.children) {
+    if (matchesSelector(child, selector)) {
+      result.push(child);
+    }
+    result.push(...collectAll(child, selector));
+  }
+  return result;
 }
 
 function matchesSelector(node: MockNode, selector: string): boolean {
@@ -212,6 +225,26 @@ describe('Menu 暂停/换 seed 菜单', () => {
     container.querySelector('.menu-seed-row')?.dispatch('submit');
 
     expect(called).toBe(false);
+  });
+
+  it('精选赛道每条渲染一个按钮,点击触发 onChangeSeed(该 seed)', () => {
+    let received: number | null = null;
+    const menu = new Menu(container as unknown as HTMLElement, 1, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
+      onChangeSeed: (seed) => { received = seed; },
+    });
+    void menu;
+
+    const buttons = collectAll(container, '.menu-curated-button');
+    expect(buttons.length).toBe(CURATED_TRACKS.length);
+
+    const first = CURATED_TRACKS[0];
+    if (first === undefined) {
+      throw new Error('CURATED_TRACKS 不该是空的');
+    }
+    expect(buttons[0]?.textContent).toBe(first.name);
+    buttons[0]?.dispatch('click');
+    expect(received).toBe(first.seed);
   });
 
   it('音量滑块预填当前音量,拖动触发 onVolumeChange', () => {

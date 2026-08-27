@@ -155,6 +155,10 @@ body {
   color: #fbbf24;
 }
 
+.hud-target-val {
+  color: #38bdf8;
+}
+
 /* 顶部右侧:SVG 程序化小地图 */
 .hud-minimap-card {
   position: absolute;
@@ -252,6 +256,22 @@ body {
 /* ══════════════════════════════════════════════════════════════════════════
  * 暂停/换 seed 菜单
  * ══════════════════════════════════════════════════════════════════════════ */
+/*
+ * `.menu-overlay[hidden]` 必须显式盖掉下面 `display: grid`。
+ *
+ * `hidden` 属性靠浏览器 UA 样式表的 `[hidden] { display: none }` 生效,
+ * 而那条规则的选择器特异度只有 (0,1,0);下面 `.menu-overlay` 的 `display: grid`
+ * 特异度同样是 (0,1,0),但源码顺序在后,会赢。结果是 `menu.hide()` 设了
+ * `root.hidden = true`,菜单在像素上却纹丝不动——**这个坑真实发生过**:
+ * `Menu` 默认应该隐藏,起初漏了这条规则,导致暂停菜单从第一帧就盖在整个
+ * 游戏上面,而现有的实时冒烟测试只断言 `#readout` 的文本内容和亮度方差,
+ * 两条都不会因为多了一层不透明的菜单叠在上面而变红——又是「测试因为错误的
+ * 原因而绿」的一个新样本。这条规则的特异度 (0,2,0) 才压得过下面的 grid。
+ */
+.menu-overlay[hidden] {
+  display: none;
+}
+
 .menu-overlay {
   position: fixed;
   inset: 0;
@@ -336,6 +356,25 @@ body {
 .menu-button-small {
   padding: 0.4rem 0.7rem;
   font-size: 0.82rem;
+}
+
+.menu-curated-label {
+  margin: 0.5rem 0 0;
+  font-size: 0.65rem;
+  color: #64748b;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.menu-curated-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.menu-curated-button {
+  flex: 1 1 auto;
+  white-space: nowrap;
 }
 
 .menu-volume-row {

@@ -8,6 +8,7 @@ import {
 } from './core/input';
 import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
+import { getCuratedTrack } from './game/curatedTracks';
 import { AUDIO, POST, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
 import {
@@ -125,7 +126,9 @@ async function boot(container: HTMLDivElement): Promise<void> {
   const keyboard = testMode ? null : new KeyboardInput();
   const source = keyboard ?? scripted;
   const frame: InputFrame = createInputFrame();
-  const readout = testMode ? null : new Hud(container, seed, world.track, world.race);
+  const readout = testMode
+    ? null
+    : new Hud(container, seed, world.track, world.race, getCuratedTrack(seed));
   /*
    * 程序化音频。测试模式不构造:`?test=1` 下没有真实用户手势,
    * `AudioContext` 起不来,建了也是空跑。`rng.fork()` 排在 World 已经

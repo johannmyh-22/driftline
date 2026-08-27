@@ -10,6 +10,8 @@
  * 玩家主动要暂停或换 seed 时才出现。**这是一个需要和人类核对的产品判断**,
  * 写在 docs/HANDOFF.md 里留给人类确认。
  */
+import { CURATED_TRACKS } from './curatedTracks';
+
 export interface MenuAudioState {
   volume: number;
   muted: boolean;
@@ -89,6 +91,17 @@ export class Menu {
 
     seedRow.append(seedLabel, this.seedInput, seedButton);
 
+    const curatedRow = document.createElement('div');
+    curatedRow.className = 'menu-curated-row';
+    for (const track of CURATED_TRACKS) {
+      const trackButton = document.createElement('button');
+      trackButton.type = 'button';
+      trackButton.className = 'menu-button menu-button-small menu-curated-button';
+      trackButton.textContent = track.name;
+      trackButton.addEventListener('click', () => callbacks.onChangeSeed(track.seed));
+      curatedRow.append(trackButton);
+    }
+
     const volumeRow = document.createElement('div');
     volumeRow.className = 'menu-volume-row';
 
@@ -124,7 +137,11 @@ export class Menu {
     help.className = 'menu-help';
     help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹 · Esc 暂停';
 
-    card.append(title, resumeButton, restartButton, seedRow, volumeRow, help);
+    const curatedLabel = document.createElement('p');
+    curatedLabel.className = 'menu-curated-label';
+    curatedLabel.textContent = '精选赛道';
+
+    card.append(title, resumeButton, restartButton, seedRow, curatedLabel, curatedRow, volumeRow, help);
     this.root.append(card);
     parent.append(this.root);
   }

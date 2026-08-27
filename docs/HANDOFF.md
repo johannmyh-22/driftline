@@ -2243,3 +2243,120 @@ PLAN.md 原句是「主音量与静音,尊重 `prefers-reduced-motion`」。**�
 
 这一轮几个提交会让构建号从 #70 往上涨,以 `git rev-list --count HEAD` 实测
 为准。
+
+---
+
+## 第二十八节:精选赛道 + 一个已经上线的严重 bug(2026-08)
+
+紧接第二十七节,同一轮会话里继续做 M5 的「精选赛道+主题+目标时间」,过程中
+**发现并修了一个已经合并进 `main`、正在 Pages 上线跑的严重 bug** —— 优先级
+比继续加新功能高,记在最前面。
+
+### 一、严重 bug:暂停菜单从第一帧就盖住整个游戏
+
+**现象**:第二十六节加的 Esc 暂停菜单,`Menu` 构造时 `root.hidden = true`,
+逻辑上应该默认不可见。但 `style.css` 里 `.menu-overlay { display: grid; ... }`
+没有对 `[hidden]` 开后门,而 `.menu-overlay` 和浏览器 UA 样式表的
+`[hidden] { display: none }` 选择器特异度打平(都是 (0,1,0)),**源码顺序
+在后的赢** —— 也就是自己写的 `display: grid` 压过了 `hidden` 属性,菜单
+**从第一帧就盖在整个游戏上面**,而不是等玩家按 Esc 才出现。
+
+这条从 PR #9(第二十六节)合并进 `main` 起就在线上,`npm run dev` 或 Pages
+打开就能看到:标题「已暂停」的卡片糊在画面正中央,canvas 在它后面继续跑但
+被完全挡住 —— 这不是「暂停功能」,是「整个游戏被一直锁着」。
+
+**为什么两轮四道门都没测出来**:
+
+1. `npm run shoot`(以及本节之前所有靠它产出的截图)默认走 `?test=1`,
+   而 `Menu` 在测试模式下**根本不构造**(和 `Hud` 同一条约定)——这条路径
+   永远看不到这个 bug,不管截多少张图。
+2. **唯一会构造 `Menu` 的路径**是 `test:visual` 套件里「实时模式下 seed
+   1/42/1337 正常渲染 HUD 与小地图」那三条,但它们只断言 `#readout`(HUD
+   的根节点,和 `#menu-overlay`是两个不同的 DOM 节点)的文本内容和亮度方差,
+   从没检查过页面上还叠着别的东西。
+3. 第二十六节自己写的 Esc 菜单测试,判定「菜单开没开」用的是
+   `document.getElementById('menu-overlay').hidden` 这个 **DOM 属性**——
+   `hidden` 属性确实被设成了 `true`(JS 逻辑是对的),只是 CSS 没听它的。
+   断言和 bug 完全不在同一层,必然测不出来。
+4. **我自己也没有实际去看一眼「实时模式、没按 Esc」时的截图**——第二十六节
+   验证时只看了 `smoke-pause-menu.png`(那张图本来就该显示菜单)和
+   `npm run shoot` 产出的图(测试模式,menu 不存在),唯一能照见这个 bug 的
+   `smoke-realtime-seed1.png` 就在硬盘上,我却没有在合并前打开看过。
+
+这是这个项目反复吃过的同一类亏(见 HANDOFF 第五节标题:「只有看图才能发现」),
+这次的教训更具体一层:**「有截图产出」不等于「看过能照出这个 bug 的那张」**,
+自动化流程里默认走的测试模式恰好是这个 bug 的盲区。
+
+**是怎么发现的**:给刚做完的 M5「精选赛道」功能拍一张实时截图核对 TARGET
+行时,顺手打开的那张图里菜单赫然在目——不是靠专门去找,是做别的验证时
+撞见的。
+
+**修法**(`style.css`):加一条 `.menu-overlay[hidden] { display: none; }`,
+特异度 (0,2,0) 才压得过下面的 `.menu-overlay { display: grid }`。同时把
+`tests/visual/smoke.spec.ts` 里 Esc 菜单测试判定「开没开」的方式从读
+`.hidden` 属性改成读 `getComputedStyle(overlay).display`——**这条新断言
+实测验证过真的能拦住这个 bug**:临时把 CSS 修复 `git stash` 掉、只保留新
+断言,测试确实红了(`Expected: false, Received: true`),复原修复后再跑
+就绿,证明不是碰巧。
+
+### 二、精选赛道 + 主题 + 目标时间
+
+M5 剩下三块里的第二块。`generateTrack()` 保证任何 seed 都能生成出合格赛道,
+但合格不等于有代表性——退化成近似正圆的赛道也合格,这份精选列表就是从一批
+候选里挑出更有代表性的几条。
+
+**新增 `scripts/curate-tracks.ts`**(纯测量脚本,不改任何生成器/物理参数):
+扫一批候选 seed,筛 `layout.attempts === 1`(第一次就通过校验,弯道形状没被
+「收紧幅度」这个兜底机制修剪过)且总长落在 2.6~3.8 km,按三套环境主题
+(`gfx/palette.ts` 的 `THEMES`)分组各挑几条,再用 `Autopilot`(M2 的验收
+循迹器,保守、不甩尾)实际跑一圈量出基线圈速,目标时间 = 基线 × 0.82。
+`npm run curate-tracks -- --range=500 --perTheme=2` 跑出候选,人工从输出里
+挑 5 条誊进代码。
+
+**新增 `src/game/curatedTracks.ts`**:`CURATED_TRACKS` 常量,5 条(荒漠×2、
+高原岩地×2、火山×1),每条 `{ seed, name, theme, targetLapTime }`。
+
+**接线**:
+
+- `Hud` 新增可选的第 5 个构造参数 `curated: CuratedTrack | null`,有数据时
+  在 BEST/LAST 上方多渲染一行 TARGET(`main.ts` 里用 `getCuratedTrack(seed)`
+  查)。
+- `Menu` 新增「精选赛道」一行按钮(每条精选赛道一个,点击复用已有的
+  `onChangeSeed` 回调,和手填 SEED 走同一条整页跳转路径)。
+
+### 三、四道质量门禁实测结果
+
+- `npm run typecheck`:0 错误。
+- `npm run test -- --run`:25 个文件,**268 passed**(基线 261,新增
+  `curatedTracks.test.ts` 4 条 —— 数量在 3~5 条之间、三套主题都覆盖到、
+  目标时间落在合理量级、`getCuratedTrack` 查找正确;`hud.test.ts` 补 1 条
+  TARGET 行渲染;`menu.test.ts` 补 1 条精选赛道按钮点击)。
+- `npm run build`:通过。
+- `npm run test:visual`:**19 passed**(和上一轮持平,但「Esc 菜单」那条的
+  判定方式换成了实际渲染可见性,见上面第一节)。
+
+### 四、人眼截图核验
+
+- `smoke-realtime-seed1.png`(重新截):暂停菜单不再盖在画面上,车、HUD、
+  小地图正常显示——这就是本节要修的那个 bug 的「修复前/修复后」对照。
+- 手动跑了一次非 test 模式的 seed=135(精选赛道之一)截图,确认左上角
+  HUD 多出的 TARGET 行显示 `01:07.06`,和 `curatedTracks.ts` 里的数据对得上。
+- `smoke-pause-menu.png`(重新截):Esc 打开的菜单里「精选赛道」一行五个
+  按钮(`荒漠 #135` / `荒漠 #325` / `高原岩地 #107` / `高原岩地 #110` /
+  `火山 #154`)排版正常。
+
+### 五、给人类的确认点
+
+1. **目标时间(`curatedTracks.ts` 的 `targetLapTime`)完全没有人类实际开过
+   验证过**,只是「保守自动驾驶基线 × 0.82」这个数据支撑的量级,不是精确
+   预测。人类试玩这几条精选赛道后,如果目标时间明显太松或太紧,直接改这个
+   文件里的数字。
+2. **精选赛道的挑选标准是「代表性」(不是近似圆、长度落在验收量级、主题
+   覆盖全)**,没有人类看过这 5 条赛道本身好不好开、好不好看,需要试玩确认。
+3. 建议**先看一遍这个 bug 修复本身**(seed=1 实时模式截图),这比精选赛道
+   功能更该优先确认。
+
+### 六、构建号
+
+这一轮几个提交会让构建号从 #71 往上涨,以 `git rev-list --count HEAD` 实测
+为准。
