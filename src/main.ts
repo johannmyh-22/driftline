@@ -1,4 +1,5 @@
 import { ACESFilmicToneMapping, PCFSoftShadowMap, WebGLRenderer } from 'three';
+import { decodeGhostInput, loadRecord, setStorageEnabled } from './game/records';
 import {
   type InputFrame,
   KeyboardInput,
@@ -7,10 +8,16 @@ import {
 } from './core/input';
 import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
-import { SKY } from './game/tuning';
+import { POST, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
+import {
+  readTelemetry as readVehicleTelemetry,
+  setTelemetryEnabled,
+} from './game/diagnostics';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
-import { Readout } from './game/hud';
+import { Hud } from './game/hud';
+import { Menu } from './game/menu';
+import { initPhysics } from './game/physics';
 import { type CourseKind, World } from './game/world';
 import './style.css';
 
@@ -18,6 +25,17 @@ const DEFAULT_SEED = 1337;
 
 const params = new URLSearchParams(window.location.search);
 const testMode = params.get('test') === '1';
+
+/*
+ * 测试模式必须**显式**关掉本地成绩持久化。
+ *
+ * 隔离本来是「成立」的,但靠的是一条没人守的隐式链:testMode → 不建 Hud →
+ * 没人调 race.setSeed() → race.seed 保持 null → loadRecord 不执行、saveRecord
+ * 被 seed !== null 挡住。链上任何一环被重构掉(比如把 setSeed 挪进 world.ts ——
+ * seed 本来就是世界状态而不是表现状态),截图测试就会开始互相污染,**而且不会
+ * 有任何测试变红**。这个项目最贵的几个 bug 都是这个形状:测试因为错误的原因而绿。
+ */
+setStorageEnabled(!testMode);
 const seed = parseSeed(params.get('seed'), DEFAULT_SEED);
 // ?course=flat 切回 M1 那块带跳台的平地。调手感时没有赛道干扰更干净。
 const courseKind: CourseKind = params.get('course') === 'flat' ? 'flat' : 'race';
@@ -32,19 +50,32 @@ const stages: readonly PostStage[] =
         (ALL_STAGES as readonly string[]).includes(name),
       );
 
+/*
+ * ?exposure=0.42&bloom=0.12 覆盖 tuning 里的两个逆光相关数值。
+ *
+ * 和 ?post= / ?course= 是同一类东西:把一个变量单独拎出来,才能判断画面问题
+ * 出在哪一层。逆光强度已经被人类打回来三次,而每次「再收一档」原本都要
+ * 重新 build 才能跟上一版对比 —— 有了这两个开关,一次构建就能拍完两档。
+ *
+ * **定稿的值仍然只住在 `tuning.ts` 里**,URL 参数不参与部署,也不进任何基准。
+ */
+const exposure = parseKnob(params.get('exposure'), SKY.exposure);
+const bloomStrength = parseKnob(params.get('bloom'), POST.bloomStrength);
+
 const mount = document.querySelector<HTMLDivElement>('#app');
 if (mount === null) {
   throw new Error('缺少 #app 挂载点');
 }
 
-try {
-  boot(mount);
-} catch (error) {
+// 物理引擎的 wasm 要先加载完才能造世界。**这是整个启动路径上唯一的 await** ——
+// 它一失败就什么都别渲染了,直接把错误糊到屏幕上,比留一块黑屏好排查。
+boot(mount).catch((error: unknown) => {
   showFatal(error);
-  throw error;
-}
+});
 
-function boot(container: HTMLDivElement): void {
+async function boot(container: HTMLDivElement): Promise<void> {
+  await initPhysics();
+
   const renderer = new WebGLRenderer({
     // 后处理链接上之后,canvas 自己的 MSAA 就是纯浪费:画面渲进 composer 的
     // render target,最后只往 canvas 上贴一个全屏 quad,而 quad 没有内部边缘可抗。
@@ -58,7 +89,7 @@ function boot(container: HTMLDivElement): void {
   // 那是「电脑画的」最明显的特征之一。
   // 实际做这一步的是链末的 OutputPass,它从 renderer 上读这两个设置。
   renderer.toneMapping = ACESFilmicToneMapping;
-  renderer.toneMappingExposure = SKY.exposure;
+  renderer.toneMappingExposure = exposure;
   renderer.shadowMap.enabled = true;
   // PCF soft:硬阴影边缘在低仰角太阳下像贴纸,而 VSM 在 SwiftShader 上不稳。
   renderer.shadowMap.type = PCFSoftShadowMap;
@@ -69,13 +100,30 @@ function boot(container: HTMLDivElement): void {
   world.scene.environment = world.atmosphere.buildEnvironment(renderer);
   world.scene.environmentIntensity = SKY.environmentIntensity;
 
+  /*
+   * 幽灵回放:装载这个 seed 上次留下的最佳圈录制(如果有)。
+   *
+   * `loadRecord` 内部already respects `setStorageEnabled(!testMode)`(上面
+   * 已经显式调过),测试模式下这里必然拿到 null —— 不需要再判一次 testMode,
+   * 存储层的开关本身就是那道闸。
+   */
+  if (world.ghost !== null) {
+    const record = loadRecord(seed);
+    const bytes = record?.ghostInput === undefined ? null : decodeGhostInput(record.ghostInput);
+    if (bytes !== null) {
+      world.ghost.loadRecording(bytes);
+      world.ghost.restartLap();
+    }
+  }
+
   const post = new Postprocess(renderer, world.scene, world.camera, stages);
+  post.setBloomStrength(bloomStrength);
 
   const scripted = new ScriptedInput();
   const keyboard = testMode ? null : new KeyboardInput();
   const source = keyboard ?? scripted;
   const frame: InputFrame = createInputFrame();
-  const readout = testMode ? null : new Readout(container);
+  const readout = testMode ? null : new Hud(container, seed, world.track, world.race);
 
   // 首帧画完才在 DOM 上打标记。SwiftShader 上一帧要一秒以上,「canvas 元素出现」
   // 远早于「画面上有东西」—— 冒烟测试拿前者当后者用,后处理一接上就开始拍到空白。
@@ -89,7 +137,7 @@ function boot(container: HTMLDivElement): void {
     },
     render: (alpha) => {
       world.present(alpha);
-      readout?.update(world.vehicle.groundSpeed, world.race);
+      readout?.update(world.vehicle.groundSpeed, world.race, world.vehicle.position, world.vehicle.yaw);
       post.render(world.camera);
       if (!painted) {
         painted = true;
@@ -109,6 +157,50 @@ function boot(container: HTMLDivElement): void {
   window.addEventListener('resize', resize);
 
   document.documentElement.dataset['seed'] = String(seed);
+
+  /*
+   * 暂停/换 seed 菜单。测试模式跳过(和 Hud 一样)——测试接口自己驱动
+   * advance(),不该有真实按键能让主循环停下来。
+   *
+   * 换 seed 靠整页跳转:World 只在 boot() 里造一次(赛道+地形+护墙网格要
+   * 2 秒多,见 docs/HANDOFF.md 第四节性能一节),没有必要为了换 seed 去写
+   * 一套原地重建 World 的逻辑,跳转本来就是现在这条「URL 参数决定 seed」
+   * 路径的自然延伸。
+   */
+  let menu: Menu | null = null;
+  if (!testMode) {
+    menu = new Menu(container, seed, {
+      onResume: () => {
+        menu?.hide();
+        loop.start();
+      },
+      onRestart: () => {
+        world.spawnAtStart();
+        world.chase.snapTo(world.vehicle);
+        menu?.hide();
+        loop.start();
+      },
+      onChangeSeed: (newSeed) => {
+        const url = new URL(window.location.href);
+        url.searchParams.set('seed', String(newSeed));
+        window.location.href = url.toString();
+      },
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code !== 'Escape') {
+        return;
+      }
+      event.preventDefault();
+      if (menu?.isOpen) {
+        menu.hide();
+        loop.start();
+      } else {
+        menu?.show();
+        loop.stop();
+      }
+    });
+  }
 
   if (testMode) {
     // 测试模式下**绝不**注册 rAF:帧全部由 __DRIFTLINE_TEST__.advance() 推进。
@@ -136,6 +228,20 @@ function boot(container: HTMLDivElement): void {
         world.chase.snapTo(world.vehicle);
         world.present(1);
       },
+      setTelemetryEnabled: (flag) => {
+        setTelemetryEnabled(flag);
+      },
+      readVehicleTelemetry: () => readVehicleTelemetry(),
+      setGhostInput: (base64) => {
+        if (world.ghost === null) {
+          return;
+        }
+        const bytes = base64 === null ? null : decodeGhostInput(base64);
+        world.ghost.loadRecording(bytes);
+        if (bytes !== null) {
+          world.ghost.restartLap();
+        }
+      },
       snapshot: () => ({
         frame: loop.frame,
         elapsed: loop.elapsed,
@@ -158,6 +264,8 @@ function boot(container: HTMLDivElement): void {
         bestLapTime: world.race?.bestLapTime ?? 0,
         checkpoint: world.race?.lastCheckpoint ?? 0,
         resets: world.race?.resets ?? 0,
+        // 1 = 车头正对太阳(逆光),-1 = 太阳在背后。逆光路段靠它搜,不靠猜帧数。
+        sunAhead: world.sunAhead,
       }),
     });
 
@@ -167,6 +275,18 @@ function boot(container: HTMLDivElement): void {
     loop.advance(0);
     loop.start();
   }
+}
+
+/**
+ * 解析一个调试用的数值 URL 参数。**拿不准就退回 tuning 里的默认值** ——
+ * 打错一个字母不该让画面变成黑屏,那会把排查引到完全错误的方向上去。
+ */
+function parseKnob(raw: string | null, fallback: number): number {
+  if (raw === null) {
+    return fallback;
+  }
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function showFatal(error: unknown): void {

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
-import { generateTrack } from '../../src/game/trackLayout';
+import {
+  type TrackLayout,
+  alignStartAwayFromSun,
+  generateTrack,
+} from '../../src/game/trackLayout';
 import { TRACK } from '../../src/game/tuning';
 
 describe('generateTrack', () => {
@@ -148,5 +152,117 @@ describe('generateTrack', () => {
     const a = generateTrack(new Rng(42));
     const b = generateTrack(new Rng(43));
     expect(b.samples).not.toEqual(a.samples);
+  });
+});
+
+describe('alignStartAwayFromSun', () => {
+  /** 车头朝向和太阳方位角的夹角(度)。0 = 正对太阳。 */
+  const sunAngleAtStart = (layout: TrackLayout, sunX: number, sunZ: number): number => {
+    const start = layout.samples[0];
+    if (start === undefined) {
+      throw new Error('赛道没有采样点');
+    }
+    const horizontal = Math.hypot(sunX, sunZ);
+    const dot = (start.tangentX * sunX + start.tangentZ * sunZ) / horizontal;
+    return (Math.acos(Math.min(1, Math.max(-1, dot))) * 180) / Math.PI;
+  };
+
+  /*
+   * 断言的是**夹角**,不是「选中了第几号采样」。
+   *
+   * 第五节那条教训:断言内部约定(下标、符号)会和 bug 共用同一个错误前提。
+   * 「车头和太阳差多少度」是画面上真实看得见的量,选点策略怎么改都不该动它。
+   */
+  it('起点车头与太阳的夹角不小于避让半角', () => {
+    for (let seed = 1; seed <= 12; seed++) {
+      const base = generateTrack(new Rng(seed));
+      // 绕一圈扫方位角:总有几个角度会让原来的 0 号点变成逆光。
+      for (let azimuth = 0; azimuth < 360; azimuth += 30) {
+        const radians = (azimuth * Math.PI) / 180;
+        const sunX = Math.sin(radians);
+        const sunZ = Math.cos(radians);
+        const aligned = alignStartAwayFromSun(base, sunX, sunZ);
+        expect(sunAngleAtStart(aligned, sunX, sunZ)).toBeGreaterThanOrEqual(
+          TRACK.startSunAvoidance - 1e-6,
+        );
+      }
+    }
+  });
+
+  it('原来的起点已经合格时原样返回', () => {
+    // 合格有两条:不逆光、而且在平地上。太阳可以摆到车尾后面把第一条满足掉,
+    // 但坡度是赛道自己的形状,只能挑一个 0 号点本来就够平的 seed。
+    let base = generateTrack(new Rng(5));
+    for (let seed = 1; seed <= 40; seed++) {
+      const candidate = generateTrack(new Rng(seed));
+      const prev = candidate.samples[candidate.samples.length - 1]!;
+      const next = candidate.samples[1]!;
+      const run = Math.hypot(next.x - prev.x, next.z - prev.z);
+      if (run > 1e-6 && Math.abs(next.y - prev.y) / run <= TRACK.startMaxGrade) {
+        base = candidate;
+        break;
+      }
+    }
+
+    const start = base.samples[0];
+    if (start === undefined) {
+      throw new Error('赛道没有采样点');
+    }
+    // 太阳放在车尾正后方,怎么算都不可能逆光。
+    const aligned = alignStartAwayFromSun(base, -start.tangentX, -start.tangentZ);
+    expect(aligned).toBe(base);
+  });
+
+  it('换起点不改赛道几何,只换了标号', () => {
+    const base = generateTrack(new Rng(7));
+    const start = base.samples[0];
+    if (start === undefined) {
+      throw new Error('赛道没有采样点');
+    }
+    // 太阳正对车头,一定会触发换点。
+    const aligned = alignStartAwayFromSun(base, start.tangentX, start.tangentZ);
+    expect(aligned.samples).not.toEqual(base.samples);
+    expect(aligned.samples.length).toBe(base.samples.length);
+    expect(aligned.totalLength).toBe(base.totalLength);
+
+    // 同一条闭环:新数组是旧数组的一个循环移位,顶点一个没动、一个没多。
+    const key = (s: { x: number; y: number; z: number; bank: number }): string =>
+      `${s.x},${s.y},${s.z},${s.bank}`;
+    expect([...aligned.samples].map(key).sort()).toEqual(
+      [...base.samples].map(key).sort(),
+    );
+
+    const shift = base.samples.findIndex((s) => key(s) === key(aligned.samples[0]!));
+    expect(shift).toBeGreaterThan(0);
+    for (let i = 0; i < aligned.samples.length; i++) {
+      expect(key(aligned.samples[i]!)).toBe(
+        key(base.samples[(shift + i) % base.samples.length]!),
+      );
+    }
+  });
+
+  it('arc 从新起点重新编号,仍然等距递增', () => {
+    const base = generateTrack(new Rng(9));
+    const start = base.samples[0];
+    if (start === undefined) {
+      throw new Error('赛道没有采样点');
+    }
+    const aligned = alignStartAwayFromSun(base, start.tangentX, start.tangentZ);
+
+    // Race 按 arc 划检查点,arc 要是没重编,起跑线和 0 号检查点就对不上了。
+    aligned.samples.forEach((sample, i) => {
+      expect(sample.arc).toBe(i * aligned.spacing);
+    });
+  });
+
+  it('太阳接近正当头时不换点', () => {
+    const base = generateTrack(new Rng(11));
+    expect(alignStartAwayFromSun(base, 0, 0)).toBe(base);
+  });
+
+  it('同样的输入给同样的起点', () => {
+    const a = alignStartAwayFromSun(generateTrack(new Rng(13)), 0.6, -0.8);
+    const b = alignStartAwayFromSun(generateTrack(new Rng(13)), 0.6, -0.8);
+    expect(a).toEqual(b);
   });
 });

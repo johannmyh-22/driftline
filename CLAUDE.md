@@ -1,7 +1,11 @@
 # driftline
 
-反重力计时赛(anti-grav time trial)。Web / TypeScript / three.js。
-**零二进制资产** —— 所有几何体、贴图、音效都由代码生成。
+写实向计时赛。Web / TypeScript / three.js。
+**素材零二进制** —— 所有几何体、贴图、音效都由代码生成。
+
+> **载具方向已变(2026-08-21 由人类改定):反重力悬浮 → 真实车辆。**
+> 物理换成 Rapier 引擎 + 四轮 raycast(取舍分析与代价见 `docs/HANDOFF.md` 第十节)。
+> 悬浮相关的物理、数值、造型逐步作废;赛道生成、渲染管线、截图回路全部留用。
 
 ## 视觉方向:写实(2026-08 由人类改定)
 
@@ -25,6 +29,24 @@
 ## 最重要的三条
 
 1. **不要引入二进制资产**。没有 `.glb` / `.fbx` / `.png` 贴图 / `.mp3`。模型用 `BufferGeometry` 手写或程序化生成,贴图用 canvas / shader 生成到 `DataTexture`,音效用 Web Audio 合成。仓库里应该只有文本文件。
+
+   **唯一的破例:物理引擎运行时(Rapier 的 `.wasm`),2026-08-21 由人类拍板。**
+   破例的范围写死在这里,别拿它当口子:
+
+   - 破的是**依赖**这一格 —— 一个从 npm 装进 `node_modules`、由构建产出到
+     `dist/` 的编译产物。**仓库里仍然只有文本文件**,这条一个字没松。
+   - **不破的是素材那一格。** 几何体、贴图、音效、字体,一律仍然由代码生成,
+     一个素材文件都不许进。「反正已经有 wasm 了」不是理由 —— 破例的理由是
+     「物理求解器没法用 TypeScript 手写到可用质量」,而贴图和音效恰恰可以,
+     这个项目已经证明了。
+   - 代价是量过的:首屏传输 **202 KB → 1285 KB**(gzip)。体积留到 M6 处理。
+   - 用的是 **`@dimforge/rapier3d-compat`**(wasm 以 base64 内联在 JS 里),
+     不是独立 `.wasm` 的 `@dimforge/rapier3d`。**独立 wasm 版只要 997 KB,
+     小 288 KB,但它在 vitest(Node)里根本 import 不起来** —— 那个包是给
+     打包器用的,没有 `main`/`exports` 入口,加了 alias 之后 wasm-bindgen 的
+     堆表又会失配。而「browser 用一个包、测试用另一个包」是不能接受的:
+     这个项目的整套测试前提就是**单测能预测运行时行为**,两个不同的构建产物
+     会把这个前提悄悄挖空。**用 288 KB 换「测的和跑的是同一个二进制」。**
 2. **改完必须自己看画面**。跑 `npm run shoot` 生成截图,然后用 Read 工具读取 `tests/visual/__output__/*.png` 亲眼确认。不要只靠 `npm run build` 通过就宣称完成 —— 编译通过和画面正确是两件事。
 3. **一个里程碑一个 PR**。范围见 `docs/PLAN.md`。不要顺手做下一个里程碑的事,也不要"顺便重构"。
 
@@ -58,6 +80,24 @@ window.__DRIFTLINE_TEST__ = {
 
 主循环用 **fixed timestep**(累加器 + 固定 dt),渲染插值。这不是可选项 —— 后期再改会波及所有物理和回放代码。
 
+**「同 seed 逐帧复现」在引入引擎之后依然成立 —— 这是量出来的,不是假设。**
+
+引入引擎之前普遍担心的是「求解器是迭代的、对浮点累加顺序敏感,逐位复现会没」。
+**对 WASM 编译的引擎这条不成立**:WebAssembly 的浮点语义由规范强制
+(IEEE-754,不允许 FMA 合并、不允许重结合、没有扩展精度),所以同一份 wasm
+在任何符合规范的运行时上结果必然一致 —— 这恰恰是原生编译的物理引擎做不到的。
+
+实测:同一段接触密集的计算跑 600 步,**Node 和 Chromium 的 10 个状态字段
+逐位完全相同**。守卫在 `tests/unit/physics.test.ts`,里面还钉了一组基准值。
+
+两个推论:
+
+- 车辆物理单测继续留在 vitest(8 秒),不用搬进 Playwright(2 分钟)。
+- M4 的幽灵回放可以继续存**输入序列**重放,不必退化成存位置轨迹。
+
+**但基准值那条测试哪天红了,不要放宽它。** 它变红只有一个含义:求解器动过了
+(多半是升级了 Rapier),所有手感数值和回放基准都要重新核,并且需要人类确认。
+
 截图只做**粗粒度回归**(非黑屏、构图大致正确、无报错),不做像素级比对:SwiftShader 与真 GPU 输出有差异。
 
 ## 技术选型(已定,不要替换)
@@ -67,7 +107,7 @@ window.__DRIFTLINE_TEST__ = {
 | 构建 | Vite + TypeScript(strict) |
 | 渲染 | three.js,**裸用,不要 React / R3F** |
 | 材质 | PBR(`MeshStandardMaterial` / `MeshPhysicalMaterial`),贴图运行时程序化生成 |
-| 物理 | **不用物理引擎**。自写 raycast 悬浮 + 速度积分控制器 |
+| 物理 | **Rapier**(`@dimforge/rapier3d-compat`)+ **自写四轮 raycast 与轮胎模型** |
 | 后处理 | `EffectComposer`:bloom + SMAA + vignette |
 | 音频 | Web Audio API 程序化合成 |
 | UI/HUD | DOM overlay,不要在 canvas 里排文字 |

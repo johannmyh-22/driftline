@@ -1,53 +1,183 @@
 import { Matrix4, Quaternion, Vector3 } from 'three';
 import type { InputFrame } from '../core/input';
-import { clamp, damp, lerp, normalize01, smoothstep } from '../core/mathx';
+import { clamp, damp } from '../core/mathx';
 import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
-import { REFERENCE_TOP_SPEED, VEHICLE } from './tuning';
+import { type BodyState, type Physics, createBodyState } from './physics';
+import { type TireForce, type TireState, tireForce } from './tire';
+import {
+  appliedSlot,
+  beginTelemetryFrame,
+  commitApplied,
+  commitFrame,
+  commitWheel,
+  frameSlot,
+  wheelSlot,
+} from './diagnostics';
+import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
 
 // 每帧路径上的临时量,全部提到模块作用域复用。60Hz 下新建 Vector3 的 GC 抖动看得见。
-const forward = new Vector3();
-/** 驾驶员的右手边 = forward × up。侧滑与抓地用这个。 */
-const rightward = new Vector3();
-/** 车体模型的局部 +X 轴。模型朝 +Z 建,所以它指向驾驶员的**左**边。 */
-const bodyX = new Vector3();
-const up = new Vector3();
+const chassisUp = new Vector3();
+const chassisForward = new Vector3();
+const chassisLeft = new Vector3();
+const attach = new Vector3();
+const contact = new Vector3();
+const arm = new Vector3();
+const pointVelocity = new Vector3();
+const wheelForward = new Vector3();
+const wheelLeft = new Vector3();
+const normal = new Vector3();
 const scratch = new Vector3();
-const basis = new Matrix4();
-const bankQuat = new Quaternion();
-const pitchQuat = new Quaternion();
-const AXIS_X = new Vector3(1, 0, 0);
-const AXIS_Z = new Vector3(0, 0, 1);
-
-/** 撞进地面的兜底距离。正常情况下弹簧会先接住,这只是防止高速下的穿透。 */
-const HARD_FLOOR = 0.3;
+const spin = new Quaternion();
+const mat = new Matrix4();
 
 /**
- * 悬浮载具。自写速度积分 + 弹簧悬浮,不用物理引擎。
+ * 滑移率分母的下限(米/秒)。
+ *
+ * 滑移率的定义 `(ωR − v) / |v|` 在 v→0 时发散,而车每次起步都要经过 v=0。
+ * 不夹住的话起步第一帧滑移率就是几百,轮胎力直接饱和,车原地弹射。
+ * 取 2.5 是常见做法:低于这个速度时分母恒为 2.5,滑移率平滑地趋向有限值。
+ */
+const SLIP_SPEED_FLOOR = 2.5;
+
+/** 车身翻过头时,「沿车身 up 轴向下找地面」这件事本身就没意义了。 */
+const MIN_UP_COMPONENT = 0.15;
+
+/**
+ * 车轮的**视觉**状态,给渲染层摆轮子用。
+ *
+ * 单列一个只读接口而不是把 `Wheel` 整个暴露出去:渲染层不该看到 `load` /
+ * `slipRatio` 这些物理量,更不该改它们。
+ */
+export interface WheelView {
+  /** 车身局部坐标:+X 是驾驶员左侧,+Z 是车头。安装点恒在 y = 0。 */
+  readonly localX: number;
+  readonly localZ: number;
+  /** 是否是转向轮(前轮)。 */
+  readonly steered: boolean;
+  /** 悬挂当前长度(米):安装点到**接地点**的距离,不是到轮心。 */
+  readonly length: number;
+  /** 累计滚转角(弧度)。 */
+  readonly rollAngle: number;
+}
+
+/** 一个车轮。位置在车身局部系:**+X 是驾驶员左侧,+Z 是车头**。 */
+interface Wheel {
+  readonly localX: number;
+  readonly localZ: number;
+  readonly steered: boolean;
+  readonly driveShare: number;
+  readonly brakeShare: number;
+  /** 车轮角速度(弧度/秒),正 = 往前滚。 */
+  spin: number;
+  /**
+   * 累计滚转角(弧度),**只给渲染用,不参与物理**。
+   *
+   * `spin` 是角速度,画轮子要的是角度。放在这里而不是渲染层自己积分,是因为
+   * 渲染帧率和物理步长不是一回事(定步长 + 插值),渲染层积分会随帧率漂。
+   */
+  rollAngle: number;
+  /** 悬挂当前长度(米),从安装点到接地点。 */
+  length: number;
+  grounded: boolean;
+  /** 垂直载荷(牛)。载荷转移就体现在四个轮子这个值的此消彼长上。 */
+  load: number;
+  slipRatio: number;
+  slipAngle: number;
+}
+
+interface WheelContext {
+  grounded: boolean;
+  load: number;
+  distance: number;
+  compression: number;
+  vLong: number;
+  vLeft: number;
+  reference: number;
+  slipAngle: number;
+  friction: number;
+  contactX: number;
+  contactY: number;
+  contactZ: number;
+  normalX: number;
+  normalY: number;
+  normalZ: number;
+  wfX: number;
+  wfY: number;
+  wfZ: number;
+  wlX: number;
+  wlY: number;
+  wlZ: number;
+}
+
+function createWheelContext(): WheelContext {
+  return {
+    grounded: false,
+    load: 0,
+    distance: CAR.suspensionRest,
+    compression: 0,
+    vLong: 0,
+    vLeft: 0,
+    reference: SLIP_SPEED_FLOOR,
+    slipAngle: 0,
+    friction: 1,
+    contactX: 0,
+    contactY: 0,
+    contactZ: 0,
+    normalX: 0,
+    normalY: 1,
+    normalZ: 0,
+    wfX: 0,
+    wfY: 0,
+    wfZ: 1,
+    wlX: 1,
+    wlY: 0,
+    wlZ: 0,
+  };
+}
+
+const contexts: [WheelContext, WheelContext, WheelContext, WheelContext] = [
+  createWheelContext(),
+  createWheelContext(),
+  createWheelContext(),
+  createWheelContext(),
+];
+
+const tireState: TireState = { slipRatio: 0, slipAngle: 0, load: 0, friction: 1 };
+const tireOut: TireForce = { longitudinal: 0, lateral: 0 };
+
+/**
+ * 四轮 raycast 车辆。车身由 Rapier 做刚体积分,四个轮子各自查地面、各自出力。
  *
  * 车头朝向局部 +Z。偏航角 `yaw` 绕世界 Y 轴,`yaw = 0` 时车头指向 +Z。
+ * **yaw 增大 = 俯视逆时针 = 左转**(`forward = (sin yaw, 0, cos yaw)`)。
+ * 这条一开始写反过,而且单测只断言「yaw 与 steer 同号」—— 那正是搞反的那件事,
+ * 测试和 bug 共用了同一个前提,必然通过。转向测试现在断言车最后跑到哪边。
  *
- * **yaw 增大 = 俯视逆时针 = 左转。** 因为 `forward = (sin yaw, 0, cos yaw)`,
- * yaw 变大是把 +Z 扫向 +X,在右手系里俯视看就是逆时针。所以右转输入要取负号。
- * 这条一开始写反了,而且单测只断言「yaw 与 steer 同号」—— 那正是搞反的那件事,
- * 于是测试和 bug 用了同一个前提,必然通过。现在转向测试改成断言车最后跑到哪边。
+ * **和悬浮版相比,有两件事从「手写的补丁」变成了「物理的副产品」:**
  *
- * 所有手感数字都在 `tuning.ts`,这里只写「怎么算」,不写「算多少」。
+ * 1. 偏航角速度不再需要人为封顶。悬浮版必须用 `ω = a_lat / v` 去推一个上限,
+ *    否则一打方向就原地打转;现在偏航力矩由四条胎的侧向力产生,而侧向力本身
+ *    受摩擦圆限制,上限是自然出现的。
+ * 2. 静止时转向不再需要人为衰减。侧向力来自侧偏角,侧偏角来自速度 ——
+ *    车不动就没有力矩。
+ *
+ * **别把这两条再手写回来。** 它们在 `docs/HANDOFF.md` 第九节里被列为
+ * 「为悬浮而写但换成真车依然需要」,那个判断对悬浮式积分是对的,对现在这套不对。
+ *
+ * 所有数值都在 `tuning.ts` 的 `CAR` 段,这里只写「怎么算」。
  */
 export class Vehicle {
   readonly position = new Vector3();
   readonly velocity = new Vector3();
   readonly orientation = new Quaternion();
 
-  yaw = 0;
+  private _yaw = 0;
   yawRate = 0;
   grounded = false;
-  /** 当前离地高度(车体原点到地面)。 */
+  /** 车身原点到地面的高度。 */
   clearance = 0;
-  /** 是否踩在可跑的路面上。出界判定和圈计时看它。 */
   onTrack = true;
-  /** 到赛道中心线的有符号横向距离,正值在右侧。 */
   lateral = 0;
-  /** 沿赛道的弧长位置(米)。 */
   arc = 0;
   /** 侧向抓地力的使用率 0..1。到 1 就是滑出去了,给音效和 HUD 用。 */
   gripSaturation = 0;
@@ -55,26 +185,45 @@ export class Vehicle {
    * 抓地力这一帧实际施加的侧向加速度(m/s²)。
    *
    * 想知道「车在拉几个 g」必须看这个,**不能拿速度差去算** —— 车头转动本身
-   * 就会让机体坐标系下的侧向速度以 ω·v 的速率变化(0.9 rad/s × 80 m/s = 72 m/s²),
-   * 那是坐标系旋转的记账,不是地面给的力。
+   * 就会让机体系下的侧向速度以 ω·v 的速率变化,那是坐标系旋转的记账。
    */
   lateralGripAccel = 0;
-  /** 最近一次撞墙的强度(法向速度 × 撞击角),没撞是 0。 */
+  /** 最近一次撞墙的强度,没撞是 0。 */
   wallImpact = 0;
-  /**
-   * 侧向速度,**正值 = 向驾驶员右手边滑**。漂移感就看它。
-   *
-   * 右转时速度方向落后于车头,所以是向左滑,这个值为负 —— 别被符号绕进去。
-   */
+  /** 侧向速度,**正值 = 向驾驶员右手边滑**。漂移感就看它。 */
   lateralSpeed = 0;
+  /** 当前前轮转角(弧度),正 = 左。 */
+  steerAngle = 0;
 
   private readonly field: GroundQuery;
+  private readonly physics: Physics;
+  private readonly body: ReturnType<Physics['createChassis']>;
+  private readonly state: BodyState = createBodyState();
   private readonly hit: GroundHit = createGroundHit();
-  private readonly surfaceUp = new Vector3(0, 1, 0);
-  private smoothedForwardAccel = 0;
+  private readonly wheels: Wheel[];
 
-  constructor(field: GroundQuery) {
+  constructor(field: GroundQuery, physics: Physics) {
     this.field = field;
+    this.physics = physics;
+    this.body = physics.createChassis({
+      mass: CAR.mass,
+      width: CAR.bodyWidth,
+      height: CAR.bodyHeight,
+      length: CAR.bodyLength,
+    });
+
+    const halfBase = CAR.wheelBase / 2;
+    const halfTrack = CAR.trackWidth / 2;
+    const rearDrive = CAR.rearDriveBias;
+    const frontBrake = CAR.frontBrakeBias;
+    this.wheels = [
+      // 前轮转向、分到大部分制动;后轮驱动。左右对称,所以左右各一份。
+      makeWheel(halfTrack, halfBase, true, (1 - rearDrive) / 2, frontBrake / 2),
+      makeWheel(-halfTrack, halfBase, true, (1 - rearDrive) / 2, frontBrake / 2),
+      makeWheel(halfTrack, -halfBase, false, rearDrive / 2, (1 - frontBrake) / 2),
+      makeWheel(-halfTrack, -halfBase, false, rearDrive / 2, (1 - frontBrake) / 2),
+    ];
+
     this.reset();
   }
 
@@ -87,301 +236,743 @@ export class Vehicle {
     return Math.hypot(this.velocity.x, this.velocity.z);
   }
 
-  reset(x = 0, z = 0, yaw = 0): void {
-    this.field.sample(x, z, this.hit);
-    this.position.set(x, this.hit.height + VEHICLE.rideHeight, z);
-    this.velocity.set(0, 0, 0);
-    this.yaw = yaw;
-    this.yawRate = 0;
-    this.grounded = true;
-    this.clearance = VEHICLE.rideHeight;
-    this.lateralSpeed = 0;
-    this.smoothedForwardAccel = 0;
-    this.surfaceUp.set(0, 1, 0);
-    this.updateOrientation(0);
+  get yaw(): number {
+    return this._yaw;
   }
 
-  update(input: InputFrame, dt: number): void {
-    this.field.sample(this.position.x, this.position.z, this.hit);
-    this.clearance = this.position.y - this.hit.height;
-    this.grounded = this.clearance < VEHICLE.hoverRange;
+  /** 四个车轮的视觉状态。顺序与内部一致:前右、前左、后右、后左。 */
+  get wheelViews(): readonly WheelView[] {
+    return this.wheels;
+  }
+
+  set yaw(value: number) {
+    const delta = value - this._yaw;
+    this._yaw = value;
+    if (Math.abs(delta) > 1e-5) {
+      spin.setFromAxisAngle(chassisUp, delta);
+      this.orientation.premultiply(spin);
+      this.physics.setTransform(
+        this.body,
+        this.position.x,
+        this.position.y,
+        this.position.z,
+        this.orientation.x,
+        this.orientation.y,
+        this.orientation.z,
+        this.orientation.w,
+      );
+      this.physics.setVelocity(
+        this.body,
+        this.velocity.x,
+        this.velocity.y,
+        this.velocity.z,
+        this.state.wx,
+        this.state.wy,
+        this.state.wz,
+      );
+    }
+  }
+
+  reset(x = 0, z = 0, yaw = 0): void {
+    this.field.sample(x, z, this.hit);
+
+    // 静止时悬挂已经被车重压掉一截,直接放在完全伸展的高度上,车会先掉下来弹一下。
+    const staticCompression = Math.min(
+      CAR.suspensionTravel,
+      (CAR.mass * VEHICLE.gravity) / 4 / CAR.suspensionStiffness,
+    );
+    const rideHeight = CAR.suspensionRest - staticCompression;
+
+    this._yaw = yaw;
+    this.yawRate = 0;
+    this.steerAngle = 0;
+
+    // 出生点姿态对齐地面法线,消除出生点不对称引起的初始翻滚与偏航扰动
+    const gNorm = scratch.set(this.hit.normalX, this.hit.normalY, this.hit.normalZ);
+    const heading = arm.set(Math.sin(yaw), 0, Math.cos(yaw));
+    heading.addScaledVector(gNorm, -heading.dot(gNorm));
+    if (heading.lengthSq() > 1e-6) {
+      heading.normalize();
+    } else {
+      heading.set(0, 0, 1);
+    }
+    const gLeft = pointVelocity.crossVectors(gNorm, heading).normalize();
+
+    mat.makeBasis(gLeft, gNorm, heading);
+    this.orientation.setFromRotationMatrix(mat);
+
+    this.position.set(x, this.hit.height, z).addScaledVector(gNorm, rideHeight);
+    this.velocity.set(0, 0, 0);
+    this.lateralSpeed = 0;
+    this.gripSaturation = 0;
+    this.lateralGripAccel = 0;
+    this.wallImpact = 0;
+    this.grounded = true;
+    this.clearance = rideHeight;
     this.onTrack = this.hit.onTrack;
     this.lateral = this.hit.lateral;
     this.arc = this.hit.arc;
 
-    forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    rightward.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
+    for (const wheel of this.wheels) {
+      wheel.spin = 0;
+      wheel.length = rideHeight;
+      wheel.grounded = true;
+      wheel.load = (CAR.mass * VEHICLE.gravity) / 4;
+      wheel.slipRatio = 0;
+      wheel.slipAngle = 0;
+    }
 
-    this.applyHover(dt);
-    this.applySteering(input, dt);
-    this.applyThrust(input, dt);
-    this.applyDrag(input, dt);
-    this.applyLateralGrip(input, dt);
+    this.physics.setTransform(
+      this.body,
+      this.position.x,
+      this.position.y,
+      this.position.z,
+      this.orientation.x,
+      this.orientation.y,
+      this.orientation.z,
+      this.orientation.w,
+    );
+    this.physics.setVelocity(this.body, 0, 0, 0, 0, 0, 0);
+  }
 
-    this.position.addScaledVector(this.velocity, dt);
-    this.resolveWall();
+  update(input: InputFrame, dt: number): void {
+    // 先清掉上一步的力:Rapier 的 addForce 是持续力,不清会逐帧累加成指数爆炸。
+    this.physics.resetForces(this.body);
+    // 清空上一帧的遥测缓冲,免得「上一帧接地、这一帧离地」的轮子残留旧数据。
+    beginTelemetryFrame();
 
-    // 兜底:高速冲上陡坡时不让车体穿进地里。
-    this.field.sample(this.position.x, this.position.z, this.hit);
-    const floor = this.hit.height + HARD_FLOOR;
-    if (this.position.y < floor) {
-      this.position.y = floor;
-      if (this.velocity.y < 0) {
-        this.velocity.y = 0;
+    this.physics.read(this.body, this.state);
+    this.readBasis();
+
+    this.updateSteering(input, dt);
+
+    const s = this.state;
+    const maxLength = CAR.suspensionRest;
+    const upComponent = chassisUp.y;
+
+    // 阶段 1: 几何采样、悬挂压缩与法向力计算
+    for (let i = 0; i < this.wheels.length; i++) {
+      const wheel = this.wheels[i]!;
+      const ctx = contexts[i]!;
+
+      attach.set(wheel.localX, 0, wheel.localZ).applyQuaternion(spin);
+      attach.x += s.x;
+      attach.y += s.y;
+      attach.z += s.z;
+
+      this.field.sample(attach.x, attach.z, this.hit);
+      normal.set(this.hit.normalX, this.hit.normalY, this.hit.normalZ);
+
+      const distance =
+        upComponent > MIN_UP_COMPONENT
+          ? (attach.y - this.hit.height) / upComponent
+          : Number.POSITIVE_INFINITY;
+
+      if (!(distance < maxLength)) {
+        wheel.grounded = false;
+        wheel.load = 0;
+        wheel.length = maxLength;
+        wheel.slipRatio = 0;
+        wheel.slipAngle = 0;
+
+        ctx.grounded = false;
+        ctx.load = 0;
+        ctx.distance = maxLength;
+        ctx.compression = 0;
+        ctx.vLong = 0;
+        ctx.vLeft = 0;
+        ctx.reference = SLIP_SPEED_FLOOR;
+        ctx.slipAngle = 0;
+        ctx.friction = 1;
+        ctx.normalX = normal.x;
+        ctx.normalY = normal.y;
+        ctx.normalZ = normal.z;
+
+        wheelSlot.grounded = false;
+        wheelSlot.length = maxLength;
+        wheelSlot.compression = 0;
+        wheelSlot.load = 0;
+        wheelSlot.slipRatio = 0;
+        wheelSlot.slipAngle = 0;
+        wheelSlot.fx = 0;
+        wheelSlot.fy = 0;
+        wheelSlot.px = 0;
+        wheelSlot.py = 0;
+        wheelSlot.pz = 0;
+        wheelSlot.wfX = 0;
+        wheelSlot.wfY = 0;
+        wheelSlot.wfZ = 0;
+        wheelSlot.wlX = 0;
+        wheelSlot.wlY = 0;
+        wheelSlot.wlZ = 0;
+        commitWheel(i);
+        continue;
+      }
+
+      wheel.grounded = true;
+      const compression = clamp(maxLength - distance, 0, CAR.suspensionTravel);
+
+      arm.set(attach.x - s.x, attach.y - s.y, attach.z - s.z);
+      pointVelocity.set(s.wx, s.wy, s.wz).cross(arm);
+      pointVelocity.x += s.vx;
+      pointVelocity.y += s.vy;
+      pointVelocity.z += s.vz;
+
+      const minLength = maxLength - CAR.suspensionTravel;
+      const penetration = Math.max(0, minLength - distance);
+      const bumpStopForce = penetration * 150_000;
+
+      const compressionRate = -pointVelocity.dot(chassisUp);
+      const load = Math.max(
+        0,
+        CAR.suspensionStiffness * compression +
+          CAR.suspensionDamping * compressionRate +
+          bumpStopForce,
+      );
+      wheel.length = Math.max(0, distance);
+      wheel.load = load;
+
+      contact.copy(chassisUp).multiplyScalar(-Math.max(0, distance)).add(attach);
+
+      wheelForward.copy(chassisForward);
+      if (wheel.steered) {
+        wheelForward.applyAxisAngle(chassisUp, this.steerAngle);
+      }
+      wheelForward.addScaledVector(normal, -wheelForward.dot(normal));
+      const fwdLen = wheelForward.length();
+      if (fwdLen > 1e-6) {
+        wheelForward.divideScalar(fwdLen);
+      } else {
+        wheelForward.copy(chassisForward);
+      }
+      wheelLeft.copy(normal).cross(wheelForward);
+
+      arm.set(contact.x - s.x, contact.y - s.y, contact.z - s.z);
+      pointVelocity.set(s.wx, s.wy, s.wz).cross(arm);
+      pointVelocity.x += s.vx;
+      pointVelocity.y += s.vy;
+      pointVelocity.z += s.vz;
+
+      const vLong = pointVelocity.dot(wheelForward);
+      const vLeft = pointVelocity.dot(wheelLeft);
+      const reference = Math.max(Math.abs(vLong), SLIP_SPEED_FLOOR);
+      const slipAngle = Math.atan2(vLeft, reference);
+      const friction = this.hit.onTrack ? 1 : 0.55;
+
+      ctx.grounded = true;
+      ctx.load = load;
+      ctx.distance = distance;
+      ctx.compression = compression;
+      ctx.contactX = contact.x;
+      ctx.contactY = contact.y;
+      ctx.contactZ = contact.z;
+      ctx.normalX = normal.x;
+      ctx.normalY = normal.y;
+      ctx.normalZ = normal.z;
+      ctx.wfX = wheelForward.x;
+      ctx.wfY = wheelForward.y;
+      ctx.wfZ = wheelForward.z;
+      ctx.wlX = wheelLeft.x;
+      ctx.wlY = wheelLeft.y;
+      ctx.wlZ = wheelLeft.z;
+      ctx.vLong = vLong;
+      ctx.vLeft = vLeft;
+      ctx.reference = reference;
+      ctx.slipAngle = slipAngle;
+      ctx.friction = friction;
+
+      if (load > 0) {
+        this.physics.addForceAtPoint(
+          this.body,
+          normal.x * load,
+          normal.y * load,
+          normal.z * load,
+          contact.x,
+          contact.y,
+          contact.z,
+        );
       }
     }
 
-    this.updateOrientation(dt);
-  }
+    // 阶段 2: 隐式单调轮速求解器 + 限滑差速器(LSD)耦合
+    const R = CAR.wheelRadius;
+    const I = CAR.wheelInertia;
+    const invDt = 1 / dt;
+    const CI = I * invDt;
+    const throttleTorque =
+      input.throttle * CAR.driveTorque -
+      input.reverse * CAR.driveTorque * CAR.reverseTorqueScale;
 
-  private applyHover(dt: number): void {
-    this.velocity.y -= VEHICLE.gravity * dt;
+    // 驱动/差速计算: 后轴左右轮耦合求解
+    const ctx2 = contexts[2]!;
+    const ctx3 = contexts[3]!;
+    const rearDriveTotal = throttleTorque * CAR.rearDriveBias;
+    const w2_old = this.wheels[2]!.spin;
+    const w3_old = this.wheels[3]!.spin;
 
-    if (!this.grounded) {
-      return;
+    const vLong_avg = (ctx2.vLong + ctx3.vLong) / 2;
+    const load_rear = ctx2.load + ctx3.load;
+    const fz0 = TIRE.staticLoadPerWheel;
+    const fric_rear = (ctx2.friction + ctx3.friction) / 2;
+    const mu_rear = Math.max(
+      0,
+      TIRE.mu0 * fric_rear * (1 - (TIRE.loadSensitivity * (load_rear / 2 - fz0)) / fz0),
+    );
+    const peak_rear = mu_rear * load_rear;
+    const ref_rear = Math.max((ctx2.reference + ctx3.reference) / 2, SLIP_SPEED_FLOOR);
+    const peak_torque = peak_rear * R;
+
+    let w_avg: number;
+    if (load_rear > 0 && Math.abs(rearDriveTotal) <= peak_torque) {
+      const targetSlip = TIRE.peakSlipRatio * (rearDriveTotal / peak_torque);
+      const w_target = (vLong_avg + targetSlip * ref_rear) / R;
+      const K_rear = (peak_rear * R * R) / (TIRE.peakSlipRatio * ref_rear);
+      w_avg = (2 * CI * ((w2_old + w3_old) / 2) + K_rear * w_target) / (2 * CI + K_rear);
+    } else if (load_rear > 0) {
+      // 力矩超过抓地预算就该空转,超得越多滑得越远 —— 后轮滑移率跑到峰值另一
+      // 侧之后纵向力开始掉,摩擦圆被纵向吃光,侧向力让位,这就是油门甩尾。
+      // 原来这里钉死在 1.05 倍峰值,等于装了个永远关不掉的牵引力控制。
+      const excess = Math.abs(rearDriveTotal) / peak_torque - 1;
+      // 低速时放大量淡入,见 TIRE.overdriveSlipSpeed 的注释。
+      const gain =
+        TIRE.overdriveSlipGain * Math.min(1, this.groundSpeed / TIRE.overdriveSlipSpeed);
+      const slipScale = Math.min(TIRE.overdriveSlipMax, 1 + gain * excess);
+      const targetSlip = TIRE.peakSlipRatio * slipScale * Math.sign(rearDriveTotal);
+      const w_target = (vLong_avg + targetSlip * ref_rear) / R;
+      const K_rear = (peak_rear * R * R) / (TIRE.peakSlipRatio * ref_rear);
+      w_avg = (2 * CI * ((w2_old + w3_old) / 2) + K_rear * w_target) / (2 * CI + K_rear);
+    } else {
+      w_avg = (w2_old + w3_old) / 2 + (rearDriveTotal / (2 * I)) * dt;
     }
 
-    // 只推不拉:悬浮力把车顶起来,但不该像磁铁一样把车吸回地面 ——
-    // 那样冲上跳台就飞不起来了。
-    //
-    // 额外加一份重力补偿:不加的话平衡点会停在 rideHeight - g/k(约低 14 cm),
-    // tuning 里那个数就名不副实,人类照着调会一直差一截。
-    //
-    // 补偿之后仍有约 +4.6 cm 的残差(= damping·gravity·dt / stiffness),
-    // 那是固定步长离散化的产物,不是 bug;换 dt 才会变。
-    const compression = VEHICLE.rideHeight - this.clearance;
-    const spring =
-      VEHICLE.hoverStiffness * compression -
-      VEHICLE.hoverDamping * this.velocity.y +
-      VEHICLE.gravity;
-    if (spring > 0) {
-      this.velocity.y += spring * dt;
-    }
-  }
+    const kLock = CAR.differentialLock;
+    const w_diff = (CI * (w2_old - w3_old)) / (CI + 2 * kLock);
 
-  private applySteering(input: InputFrame, dt: number): void {
-    const speed = this.groundSpeed;
-    const speed01 = normalize01(speed, 0, REFERENCE_TOP_SPEED);
-    // 速度越高转向上限越低,否则高速原地打转,速度感全丢。
-    const envelope = lerp(VEHICLE.yawRateMax, VEHICLE.yawRateAtTopSpeed, speed01);
+    let w2_final = w_avg + w_diff / 2;
+    let w3_final = w_avg - w_diff / 2;
+
+    const brakeRear = (input.airBrake * CAR.brakeTorque * (1 - CAR.frontBrakeBias)) / 2;
+    if (brakeRear > 0) {
+      const deltaBrake = (brakeRear / I) * dt;
+      w2_final =
+        w2_final > 0 ? Math.max(0, w2_final - deltaBrake) : Math.min(0, w2_final + deltaBrake);
+      w3_final =
+        w3_final > 0 ? Math.max(0, w3_final - deltaBrake) : Math.min(0, w3_final + deltaBrake);
+    }
+
+    const maxSpin = (REFERENCE_TOP_SPEED * 1.15) / CAR.wheelRadius;
+    const airborneSpinLimit = (this.groundSpeed + 3) / R;
+    if (!ctx2.grounded) {
+      w2_final = Math.min(w2_final, airborneSpinLimit);
+    }
+    if (!ctx3.grounded) {
+      w3_final = Math.min(w3_final, airborneSpinLimit);
+    }
+    w2_final = clamp(w2_final, -maxSpin, maxSpin);
+    w3_final = clamp(w3_final, -maxSpin, maxSpin);
+
+    this.wheels[2]!.spin = Number.isFinite(w2_final) ? w2_final : 0;
+    this.wheels[3]!.spin = Number.isFinite(w3_final) ? w3_final : 0;
+
+    // 前轮独立求解
+    for (let i = 0; i < 2; i++) {
+      const wheel = this.wheels[i]!;
+      const ctx = contexts[i]!;
+      const brakeFront = input.airBrake * CAR.brakeTorque * (CAR.frontBrakeBias / 2);
+      const driveFront = throttleTorque * ((1 - CAR.rearDriveBias) / 2);
+
+      let w = wheel.spin;
+      if (ctx.grounded && ctx.load > 0) {
+        const peakFront = TIRE.mu0 * ctx.friction * ctx.load;
+        const peakTorqueFront = peakFront * R;
+        if (Math.abs(driveFront) <= peakTorqueFront) {
+          const targetSlip = TIRE.peakSlipRatio * (driveFront / peakTorqueFront);
+          const w_target = (ctx.vLong + targetSlip * ctx.reference) / R;
+          const KFront = (peakFront * R * R) / (TIRE.peakSlipRatio * ctx.reference);
+          w = (CI * wheel.spin + KFront * w_target) / (CI + KFront);
+        } else {
+          const excess = driveFront - Math.sign(driveFront) * peakTorqueFront;
+          w += (excess / I) * dt;
+        }
+      } else {
+        w += (driveFront / I) * dt;
+      }
+      if (brakeFront > 0) {
+        const deltaBrake = (brakeFront / I) * dt;
+        w = w > 0 ? Math.max(0, w - deltaBrake) : Math.min(0, w + deltaBrake);
+      }
+      if (!ctx.grounded) {
+        w = Math.min(w, airborneSpinLimit);
+      }
+      w = clamp(w, -maxSpin, maxSpin);
+      wheel.spin = Number.isFinite(w) ? w : 0;
+    }
 
     /*
-     * 真正的上限来自侧向力:稳态过弯时 ω = a_lat / v,能维持的转向速率完全由
-     * 地面能给多大的侧向加速度决定。
+     * 滚转角只在这里积分:四个轮子的 `spin` 到这一步才全部定下来。
+     * 对 2π 取模是为了别让浮点数在长时间跑图后累积到丢精度。
+     */
+    for (let i = 0; i < this.wheels.length; i++) {
+      const wheel = this.wheels[i]!;
+      const next = wheel.rollAngle + wheel.spin * dt;
+      wheel.rollAngle = Number.isFinite(next) ? next % (Math.PI * 2) : 0;
+    }
+
+    /*
+     * 后轴左右的纵向力必须按**差速器**的约束来配,不能各按各的载荷算。
      *
-     * 不加这一层的话,抓地力有上限而转向没有 —— 车头能瞬间甩过去,速度矢量
-     * 还朝着原方向,侧滑角一路涨到 170°,也就是打转。实测 186 km/h 满舵两秒
-     * 就能把车转成倒着走,速度从 212 崩到 57。「车太轻、很飘」就是这么来的。
+     * 差速器给两个半轴的扭矩是相等的(开式)或差额有上限(限滑),所以左右
+     * 载荷不等只体现为**转速**不等,不体现为**力**不等。而这里每个轮子的
+     * 纵向力是拿自己的载荷算出来的,载荷差 20% 力就差 20%,乘上半轮距的力臂
+     * 直接凑出净偏航力矩 —— 这正是 docs/tasks/spin-diagnosis.md 里那个「一给油
+     * 就原地打转」的根因。放开空转钳位之后它在低速段又回来了:全油门直线、
+     * 方向盘不动,实测偏航角速度冲到 1.7 rad/s。
+     *
+     * 修法是把后轴两轮的纵向力按轴平均载荷归一。两轮滑移率相同时(LSD 已经
+     * 把转速拉到一起),归一后两边的力相等,净偏航力矩归零;而轴上的合力
+     * 一分不少 —— 力正比于载荷时 fx_i·(avg/load_i) 求和恒等于原来的合力。
      */
-    const capacity = VEHICLE.lateralGripLimit + VEHICLE.airBrakeGripBonus * input.airBrake;
-    const sustainable = (capacity * VEHICLE.yawSlideAllowance) / Math.max(speed, 6);
-    const maxYawRate = Math.min(envelope, sustainable);
+    const rearLoadAvg = (ctx2.load + ctx3.load) / 2;
 
-    const authority = this.grounded ? 1 : VEHICLE.yawAuthorityAirborne;
-    /*
-     * 低速时转向权限衰减到 0。上面那个 `Math.max(speed, 6)` 是为了避免除零,
-     * 副作用是**静止的车也能原地转头** —— 而偏航靠的是地面/气流给的侧向力,
-     * 没有速度就没有力可用。用平滑过渡而不是硬阈值,免得起步瞬间车头一跳。
-     */
-    const traction = smoothstep(0, VEHICLE.steerMinSpeed, speed);
+    // 阶段 3: 施加轮胎力并收集遥测与整车合力
+    let totalLateralForce = 0;
+    let groundedCount = 0;
+    let saturation = 0;
 
-    // 取负:steer 为正表示向右,而 yaw 增大是向左(见类注释)。
-    const target = -input.steer * maxYawRate * authority * traction;
-    const lambda = input.steer === 0 ? VEHICLE.yawRecenter : VEHICLE.yawResponse;
-    this.yawRate = damp(this.yawRate, target, lambda, dt);
-    this.yaw += this.yawRate * dt;
+    for (let i = 0; i < 4; i++) {
+      const wheel = this.wheels[i]!;
+      const ctx = contexts[i]!;
 
-    this.applySlipRestoring(dt);
-  }
+      if (!ctx.grounded || ctx.load <= 0) {
+        wheel.slipRatio = 0;
+        wheel.slipAngle = 0;
+        continue;
+      }
 
-  /**
-   * 侧滑回正:把车头往速度方向拉。
-   *
-   * 这是车辆自稳的来源。正常过弯时侧滑角只有几度,这个力很轻,不会妨碍转向;
-   * 一旦打转起来侧滑角几十度,它就成了主导项,把车头拽回行进方向。
-   */
-  private applySlipRestoring(dt: number): void {
+      groundedCount++;
+      wheel.slipRatio = (wheel.spin * R - ctx.vLong) / ctx.reference;
+      wheel.slipAngle = ctx.slipAngle;
+
+      tireState.slipRatio = wheel.slipRatio;
+      tireState.slipAngle = wheel.slipAngle;
+      tireState.load = ctx.load;
+      tireState.friction = ctx.friction;
+      tireForce(tireState, tireOut);
+
+      // 滚动阻力:轮胎变形的迟滞损失,和滑移率无关,只跟载荷与滚动方向有关。
+      // 缺了它,车在任意非零坡度上都会无休止加速 —— 真车在 1.5% 以下的缓坡
+      // 空挡也停得住,因为下滑分量吃不动这份阻力。tanh 让它在零速附近平滑
+      // 收敛到 0,不会在静止时抖着换向。
+      const rolling =
+        -TIRE.rollingResistance * ctx.load * Math.tanh(ctx.vLong / TIRE.rollingResistanceSpeed);
+      const fy = tireOut.lateral;
+
+      // 后轮按差速器约束归一,见上面 rearLoadAvg 处的注释。归一会把力从重载轮
+      // 匀给轻载轮,所以必须按**轻载轮自己的**摩擦预算封顶 —— 匀过去也吃不下的
+      // 那部分传不出去,真车表现为那一侧空转得更凶。不封的话摩擦圆会被捅破。
+      let drive = tireOut.longitudinal;
+      if (i >= 2 && ctx.load > 0) {
+        const budget = ctx.load * TIRE.mu0 * ctx.friction;
+        const room = Math.sqrt(Math.max(0, budget * budget - fy * fy));
+        const shared = (tireOut.longitudinal * rearLoadAvg) / ctx.load;
+        drive = clamp(shared, -room, room);
+      }
+      const fx = drive + rolling;
+      const tireFx = ctx.wfX * fx + ctx.wlX * fy;
+      const tireFy = ctx.wfY * fx + ctx.wlY * fy;
+      const tireFz = ctx.wfZ * fx + ctx.wlZ * fy;
+
+      this.physics.addForceAtPoint(
+        this.body,
+        tireFx,
+        tireFy,
+        tireFz,
+        ctx.contactX,
+        ctx.contactY,
+        ctx.contactZ,
+      );
+
+      wheelSlot.grounded = true;
+      wheelSlot.length = wheel.length;
+      wheelSlot.compression = ctx.compression;
+      wheelSlot.load = ctx.load;
+      wheelSlot.slipRatio = wheel.slipRatio;
+      wheelSlot.slipAngle = wheel.slipAngle;
+      wheelSlot.fx = fx;
+      wheelSlot.fy = fy;
+      wheelSlot.px = ctx.contactX;
+      wheelSlot.py = ctx.contactY;
+      wheelSlot.pz = ctx.contactZ;
+      wheelSlot.wfX = ctx.wfX;
+      wheelSlot.wfY = ctx.wfY;
+      wheelSlot.wfZ = ctx.wfZ;
+      wheelSlot.wlX = ctx.wlX;
+      wheelSlot.wlY = ctx.wlY;
+      wheelSlot.wlZ = ctx.wlZ;
+      commitWheel(i);
+
+      appliedSlot.px = ctx.contactX;
+      appliedSlot.py = ctx.contactY;
+      appliedSlot.pz = ctx.contactZ;
+      appliedSlot.fx = ctx.normalX * ctx.load + tireFx;
+      appliedSlot.fy = ctx.normalY * ctx.load + tireFy;
+      appliedSlot.fz = ctx.normalZ * ctx.load + tireFz;
+      commitApplied(i);
+
+      /*
+       * 轮胎级自回正力矩 (SAT)。总拖距 = 机械拖距 + 气胎拖距,**但机械拖距
+       * 只有转向轮才有**。
+       *
+       * 机械拖距是**主销(转向轴)几何**的产物:接地点落在主销延长线交点后方
+       * 多远。它产生的是绕主销的力矩,由转向拉杆撑住、再经转向机壳传回车身,
+       * 所以转向轮把它算进车身偏航力矩是对的。**后轮没有主销**,它的回正力矩
+       * 只有气胎拖距那一项(接地印痕的侧向压力中心偏后)。
+       *
+       * 原来四个轮子一律加 casterTrail,等于给后轴装了一根「一滑就把车摆正」
+       * 的杠杆 —— 实测这正是甩尾出不来的主因:90 km/h 满油满舵稳态,后轴侧偏
+       * 角被摁在 2.81°,而去掉后轴这一项之后是 13.6°。同时它还掩盖了前后轴
+       * 侧向力的失衡(前轴 10566 N / 后轴 6292 N,差额几乎全部等于这份 SAT)。
+       */
+      const u = Math.abs(wheel.slipAngle) / TIRE.peakSlipAngle;
+      const pneumatic = (TIRE.pneumaticTrail * Math.max(0, 1 - u)) / (1 + u * u);
+      const trail = (wheel.steered ? TIRE.casterTrail : 0) + pneumatic;
+      const sat = -trail * fy;
+      // 接地印痕偏航阻尼 (随载荷缩放)
+      const yawDamp =
+        -TIRE.aligningDamping * s.wy * (ctx.load / TIRE.staticLoadPerWheel);
+      const totalWheelSAT = sat + yawDamp;
+
+      if (totalWheelSAT !== 0) {
+        this.physics.addTorque(
+          this.body,
+          ctx.normalX * totalWheelSAT,
+          ctx.normalY * totalWheelSAT,
+          ctx.normalZ * totalWheelSAT,
+        );
+      }
+
+      totalLateralForce += fy;
+
+      const budget = ctx.load * TIRE.mu0;
+      if (budget > 0) {
+        saturation = Math.max(saturation, Math.min(1, Math.hypot(fx, fy) / budget));
+      }
+    }
+
+    this.grounded = groundedCount > 0;
+    this.gripSaturation = saturation;
+    this.lateralGripAccel = Math.abs(totalLateralForce) / CAR.mass;
+
     if (!this.grounded) {
-      return;
-    }
-    const speed = this.groundSpeed;
-    if (speed < VEHICLE.slipRestoringMinSpeed) {
-      return;
-    }
-
-    // 速度方向相对车头的有符号夹角。用 atan2 而不是 acos:需要方向,不只是大小。
-    const headingX = Math.sin(this.yaw);
-    const headingZ = Math.cos(this.yaw);
-    const along = this.velocity.x * headingX + this.velocity.z * headingZ;
-    const across = this.velocity.x * headingZ - this.velocity.z * headingX;
-    const slip = Math.atan2(across, along);
-
-    // 倒着开时 atan2 会给出接近 ±π 的角,那时候不该把车头强行拧过去。
-    if (Math.abs(slip) > Math.PI * 0.6) {
-      return;
+      const airDamp = Math.max(0, 1 - 10.0 * dt);
+      this.physics.setVelocity(
+        this.body,
+        s.vx,
+        s.vy,
+        s.vz,
+        s.wx * airDamp,
+        s.wy * airDamp,
+        s.wz * airDamp,
+      );
     }
 
-    const blend = 1 - Math.exp(-VEHICLE.slipRestoring * dt);
-    this.yaw += slip * blend;
+    this.applyAero();
+    this.physics.step();
+
+    this.physics.read(this.body, this.state);
+    this.writeBack();
+    this.resolveWall(dt);
+
+    // 诊断探针的整车帧采样(read 之后才算数),只复写预分配槽,见 diagnostics.ts。
+    frameSlot.x = this.state.x;
+    frameSlot.y = this.state.y;
+    frameSlot.z = this.state.z;
+    frameSlot.vx = this.state.vx;
+    frameSlot.vy = this.state.vy;
+    frameSlot.vz = this.state.vz;
+    frameSlot.qx = this.state.qx;
+    frameSlot.qy = this.state.qy;
+    frameSlot.qz = this.state.qz;
+    frameSlot.qw = this.state.qw;
+    frameSlot.yaw = this._yaw;
+    frameSlot.yawRate = this.yawRate;
+    commitFrame();
   }
 
-  private applyThrust(input: InputFrame, dt: number): void {
-    const drive = input.throttle * VEHICLE.thrust - input.reverse * VEHICLE.reverseThrust;
-    // 空中推力大幅衰减:能微调落点,但不能当飞行器开。
-    const accel = drive * (this.grounded ? 1 : 0.25);
-    this.velocity.addScaledVector(forward, accel * dt);
-    this.smoothedForwardAccel = damp(this.smoothedForwardAccel, accel, 6, dt);
+  /** 从刚体姿态取出车身三轴。 */
+  private readBasis(): void {
+    const s = this.state;
+    spin.set(s.qx, s.qy, s.qz, s.qw);
+    chassisUp.set(0, 1, 0).applyQuaternion(spin);
+    chassisForward.set(0, 0, 1).applyQuaternion(spin);
+    // 模型朝 +Z 建,右手系下局部 +X 指向驾驶员的**左**边。名字直接叫左,免得又搞反。
+    chassisLeft.set(1, 0, 0).applyQuaternion(spin);
   }
 
-  private applyDrag(input: InputFrame, dt: number): void {
-    const horizontal = Math.hypot(this.velocity.x, this.velocity.z);
-    if (horizontal <= 1e-5) {
-      return;
-    }
-
-    const airBrake = VEHICLE.airBrakeDrag * input.airBrake;
-    const decel = (VEHICLE.dragLinear + airBrake + VEHICLE.dragQuadratic * horizontal) * horizontal;
-    // 不允许阻力把速度拉成负数并反向。
-    const scale = Math.max(0, 1 - (decel * dt) / horizontal);
-    this.velocity.x *= scale;
-    this.velocity.z *= scale;
-  }
-
-  private applyLateralGrip(input: InputFrame, dt: number): void {
-    this.lateralSpeed = this.velocity.dot(rightward);
-
-    let grip = this.grounded ? VEHICLE.lateralGrip : VEHICLE.lateralGripAirborne;
-    if (this.grounded) {
-      grip += VEHICLE.airBrakeGripBonus * input.airBrake;
-    }
-
-    const wanted = this.lateralSpeed * (1 - Math.exp(-grip * dt));
-
-    // 抓地力封顶(摩擦圆)。没有这一层的话,抓地力正比于侧滑速度且无上限,
-    // 任何速度进弯都能被硬拽回线上 —— 也就没有「过弯极限」这回事了。
-    const budget = this.lateralGripBudget(input) * dt;
-    const removed = Math.sign(wanted) * Math.min(Math.abs(wanted), budget);
-
-    this.gripSaturation = budget > 1e-6 ? Math.min(1, Math.abs(wanted) / budget) : 0;
-    this.lateralGripAccel = Math.abs(removed) / dt;
-    this.velocity.addScaledVector(rightward, -removed);
+  private updateSteering(input: InputFrame, dt: number): void {
+    // steer 正值是右转,而 yaw/局部 +X 正方向是左,所以这里取负。
+    const target = -input.steer * this.steerLimit();
+    // 回中比打舵快:真车松手是主销回正力矩在弹,不是驾驶员在推。
+    const rate = Math.abs(target) < Math.abs(this.steerAngle) ? CAR.steerReturnRate : CAR.steerRate;
+    this.steerAngle = damp(this.steerAngle, target, rate, dt);
   }
 
   /**
-   * 当前可用的侧向加速度上限。
+   * 当前车速下的转向上限。
    *
-   * 侧倾会加分:路面朝侧滑方向抬起时,重力的分量帮着把车推回来。这正是
-   * 真实赛道压弯道外侧能多带速度的原因,也让侧倾对圈速产生了实际意义。
+   * 上限由「前轮侧偏角不越过峰值太多」反推,而不是按车速线性缩放:抓地极限
+   * 侧向加速度 a = μ·g 对应的稳态偏航角速度是 a/v,换成前轮转角就是
+   * `wheelBase·a/v² + peakSlipAngle`。低速时这个值很大,由 `CAR.steerMax`
+   * 兜住。打得比它多只会把前轮推过峰值、掉抓地,方向盘越打越不转弯。
    */
-  private lateralGripBudget(input: InputFrame): number {
-    if (!this.grounded) {
-      return VEHICLE.lateralGripLimit * 0.12;
+  private steerLimit(): number {
+    const speed = Math.max(this.groundSpeed, 1);
+    const gripAccel = TIRE.mu0 * VEHICLE.gravity;
+    const kinematic = (CAR.wheelBase * gripAccel) / (speed * speed);
+    return Math.min(CAR.steerMax, kinematic + TIRE.peakSlipAngle * CAR.steerPastPeak);
+  }
+
+  /** 空气阻力与下压力。 */
+  private applyAero(): void {
+    const s = this.state;
+    const speedSq = s.vx * s.vx + s.vy * s.vy + s.vz * s.vz;
+    if (speedSq < 1e-6) {
+      return;
     }
+    const speed = Math.sqrt(speedSq);
 
-    let budget = VEHICLE.lateralGripLimit;
-    budget += VEHICLE.airBrakeGripBonus * input.airBrake;
+    // 阻力与速度反向,大小正比于 v²。
+    const drag = CAR.dragArea * speedSq;
+    scratch.set(-s.vx / speed, -s.vy / speed, -s.vz / speed).multiplyScalar(drag);
 
-    if (this.hit.normalY > 1e-6 && this.lateralSpeed !== 0) {
-      // 法线在横向上的分量给出路面的横向坡度;车往哪边滑,那边是上坡就得分。
-      const slope = -(this.hit.normalX * rightward.x + this.hit.normalZ * rightward.z) /
-        this.hit.normalY;
-      // 夹到赛道最大侧倾能给的量:赛道外的陡坡不该白送无上限的抓地力,
-      // 不然贴着山壁跑反而比在赛道上抓得还狠。
-      const capped = clamp(slope * Math.sign(this.lateralSpeed), 0, VEHICLE.maxBankSlope);
-      budget += VEHICLE.gravity * capped;
-    }
+    // 下压力沿车身向下:速度越高抓地越强,高速弯反而比低速弯稳。
+    const down = CAR.downforce * speedSq;
+    scratch.addScaledVector(chassisUp, -down);
 
-    return budget;
+    this.physics.addForceAtPoint(
+      this.body,
+      scratch.x, scratch.y, scratch.z,
+      s.x, s.y, s.z,
+    );
+  }
+
+  /** 把刚体状态写回公开字段,供渲染、相机、计时读取。 */
+  private writeBack(): void {
+    const s = this.state;
+    this.position.set(s.x, s.y, s.z);
+    this.velocity.set(s.vx, s.vy, s.vz);
+    this.orientation.set(s.qx, s.qy, s.qz, s.qw);
+    this.readBasis();
+
+    // 偏航角由车头的水平投影反解,和 forward = (sin yaw, 0, cos yaw) 一致。
+    this._yaw = Math.atan2(chassisForward.x, chassisForward.z);
+    this.yawRate = s.wy;
+
+    this.field.sample(s.x, s.z, this.hit);
+    this.clearance = s.y - this.hit.height;
+    this.onTrack = this.hit.onTrack;
+    this.lateral = this.hit.lateral;
+    this.arc = this.hit.arc;
+
+    // 侧向速度:向车头右手边为负、向左为正(与 chassisLeft 同向)
+    this.lateralSpeed = this.velocity.dot(chassisLeft);
   }
 
   /**
-   * 护栏碰撞。M2 的护栏只是画出来的,车能直接穿过去。
-   *
-   * 处理成「贴着墙滑行」而不是弹开:把超出的部分推回来,法向速度按反弹系数
-   * 反向,切向速度按撞击角度扣一刀。正面撞掉速多、小角度擦墙掉速少 ——
-   * 反过来的话贴着墙磨会变成最快跑法。
+   * 护墙。仍然用解析判定 + 冲量,没有交给引擎的碰撞体 ——
+   * 墙是沿赛道条带外缘生成的,`wallDistance` 已经是精确的横向距离,
+   * 再造一套三角网碰撞体等于引入第二个面,正是不变量 1 要避免的事。
    */
-  private resolveWall(): void {
-    // 减掉车体半宽:夹车体中心的话护栏会从车身正中穿过去。
-    const limit = this.hit.wallDistance - VEHICLE.halfWidth;
+  private resolveWall(dt: number): void {
+    const limit = this.hit.wallDistance - CAR.halfWidth;
     if (!Number.isFinite(limit)) {
-      return;
-    }
-
-    this.field.sample(this.position.x, this.position.z, this.hit);
-    const lateral = this.hit.lateral;
-    if (!Number.isFinite(lateral) || Math.abs(lateral) <= limit) {
       this.wallImpact = 0;
       return;
     }
 
-    // 墙的法线就是赛道横向轴,朝向赛道内侧。
-    rightward.set(-this.hit.tangentZ, 0, this.hit.tangentX);
+    const lateral = this.hit.lateral;
+    if (
+      !Number.isFinite(lateral) ||
+      Math.abs(lateral) <= limit ||
+      Math.abs(lateral) > this.hit.wallDistance + 3.0
+    ) {
+      this.wallImpact = 0;
+      return;
+    }
+
+    // scratch 指向内侧 (向中心线)。Course.sample 中 lateral > 0 为右侧,故向内为 (-right)
     const outward = Math.sign(lateral);
-    const overshoot = Math.abs(lateral) - limit;
+    scratch.set(this.hit.tangentZ * outward, 0, -this.hit.tangentX * outward);
+    const overshoot = Math.min(1.5, Math.abs(lateral) - limit);
 
-    this.position.addScaledVector(rightward, -overshoot * outward);
-
-    const normalSpeed = this.velocity.dot(rightward) * outward;
-    if (normalSpeed > 0) {
-      this.velocity.addScaledVector(
-        rightward,
-        -normalSpeed * (1 + VEHICLE.wallRestitution) * outward,
-      );
-
-      const speed = this.velocity.length() || 1;
-      // 撞击角:法向速度占总速度的比例。正面撞接近 1,擦墙接近 0。
-      const bite = Math.min(1, normalSpeed / speed);
-      this.wallImpact = bite * normalSpeed;
-      const scrub = Math.exp(-VEHICLE.wallScrubbing * bite * (1 / 60));
-      this.velocity.multiplyScalar(scrub);
-    }
-  }
-
-  private updateOrientation(dt: number): void {
-    // 贴地时姿态跟随地面法线,离地后慢慢回到世界竖直方向。
-    const lambda = this.grounded ? VEHICLE.attitudeAlign : VEHICLE.attitudeAlignAirborne;
-    const targetX = this.grounded ? this.hit.normalX : 0;
-    const targetY = this.grounded ? this.hit.normalY : 1;
-    const targetZ = this.grounded ? this.hit.normalZ : 0;
-
-    const blend = dt > 0 ? 1 - Math.exp(-lambda * dt) : 1;
-    this.surfaceUp.x += (targetX - this.surfaceUp.x) * blend;
-    this.surfaceUp.y += (targetY - this.surfaceUp.y) * blend;
-    this.surfaceUp.z += (targetZ - this.surfaceUp.z) * blend;
-    this.surfaceUp.normalize();
-
-    up.copy(this.surfaceUp);
-    forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    // 把车头投影到与地面法线垂直的平面上,车身才真正贴着坡面而不是插进去。
-    scratch.copy(up).multiplyScalar(forward.dot(up));
-    forward.sub(scratch);
-    if (forward.lengthSq() < 1e-8) {
-      forward.set(0, 0, 1);
-    }
-    forward.normalize();
-    // up × forward 得到的是模型的局部 +X(驾驶员左手边),makeBasis 要的正是它。
-    bodyX.copy(up).cross(forward).normalize();
-
-    basis.makeBasis(bodyX, up, forward);
-    this.orientation.setFromRotationMatrix(basis);
-
-    // 车身向弯内压坡度:右转时向左滑(lateralSpeed 为负),要把右半边压下去。
-    // 绕局部 +Z 正向旋转会把局部 +X(左半边)抬起来,所以这里取负号。
-    const bank = clamp(
-      -this.lateralSpeed * VEHICLE.bankPerLateralSpeed,
-      -VEHICLE.bankMax,
-      VEHICLE.bankMax,
+    const s = this.state;
+    this.position.addScaledVector(scratch, overshoot);
+    this.physics.setTransform(
+      this.body,
+      this.position.x,
+      this.position.y,
+      this.position.z,
+      s.qx,
+      s.qy,
+      s.qz,
+      s.qw,
     );
-    bankQuat.setFromAxisAngle(AXIS_Z, bank);
-    this.orientation.multiply(bankQuat);
 
-    const pitch = clamp(
-      -this.smoothedForwardAccel * VEHICLE.pitchPerAcceleration,
-      -VEHICLE.pitchMax,
-      VEHICLE.pitchMax,
+    const inwardSpeed = this.velocity.dot(scratch);
+    if (inwardSpeed >= 0) {
+      this.wallImpact = 0;
+      return;
+    }
+
+    const restitution = 1 + CAR.wallRestitution;
+    this.velocity.addScaledVector(scratch, -inwardSpeed * restitution);
+
+    // 护墙摩擦力: 沿车身前进方向阻尼速度与偏航角速度
+    const fwdSpeed = this.velocity.dot(chassisForward);
+    this.velocity.addScaledVector(
+      chassisForward,
+      -fwdSpeed * Math.min(1, CAR.wallFriction * 10 * dt),
     );
-    pitchQuat.setFromAxisAngle(AXIS_X, pitch);
-    this.orientation.multiply(pitchQuat);
+    const dampedWy = s.wy * Math.max(0, 1 - CAR.wallFriction * 10 * dt);
+
+    this.physics.setVelocity(
+      this.body,
+      this.velocity.x,
+      this.velocity.y,
+      this.velocity.z,
+      s.wx,
+      dampedWy,
+      s.wz,
+    );
+
+    this.field.sample(this.position.x, this.position.z, this.hit);
+    this.lateral = this.hit.lateral;
+    this.onTrack = this.hit.onTrack;
+
+    const speed = this.velocity.length() || 1;
+    this.wallImpact = Math.min(1, -inwardSpeed / speed) * -inwardSpeed;
   }
+}
+
+function makeWheel(
+  localX: number,
+  localZ: number,
+  steered: boolean,
+  driveShare: number,
+  brakeShare: number,
+): Wheel {
+  return {
+    rollAngle: 0,
+    localX,
+    localZ,
+    steered,
+    driveShare,
+    brakeShare,
+    spin: 0,
+    length: CAR.suspensionRest,
+    grounded: false,
+    load: 0,
+    slipRatio: 0,
+    slipAngle: 0,
+  };
 }

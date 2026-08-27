@@ -1,9 +1,11 @@
+import { HUD_TUNING } from './tuning';
+import { loadRecord, saveRecord } from './records';
 import type { TrackLayout } from './trackLayout';
 import { TRACK } from './tuning';
 import type { Vehicle } from './vehicle';
 
 /**
- * 检查点、圈计时、出界重置。
+ * 检查点、分段计时、圈计时、出界重置与本地最佳成绩持久化。
  *
  * 检查点必须**按顺序**通过才算数:否则抄近道或者倒着开都能刷圈,
  * 计时就没有意义了。
@@ -28,23 +30,76 @@ export class Race {
   /** 累计被重置了几次。 */
   resets = 0;
 
+  /** 当前圈各检查点的累计用时(秒)。 */
+  readonly currentSectorTimes: number[];
+  /** 最佳圈各检查点的累计用时(秒)。 */
+  readonly bestSectorTimes: number[];
+  /** 当前最新分段相对于最佳圈的 delta(秒),负值领先,正值落后,无最佳圈时为 null。 */
+  delta: number | null = null;
+  /** delta 提示剩余显示时间(秒)。 */
+  deltaTimer = 0;
+  /** 最近一次触发 delta 的检查点编号。 */
+  deltaCheckpoint = 0;
+  /** 上一圈是否刷新了最佳纪录。 */
+  isNewBestLap = false;
+
+  private seed: number | null = null;
   private readonly layout: TrackLayout;
   private readonly checkpointArc: number;
 
   constructor(layout: TrackLayout) {
     this.layout = layout;
     this.checkpointArc = layout.totalLength / this.checkpointCount;
+    this.currentSectorTimes = new Array<number>(this.checkpointCount).fill(0);
+    this.bestSectorTimes = new Array<number>(this.checkpointCount).fill(0);
+  }
+
+  /** 关联赛道 seed,并加载该 seed 下的历史最佳记录。 */
+  setSeed(seed: number): void {
+    this.seed = seed;
+    const record = loadRecord(seed);
+    if (record !== null && record.bestLapTime > 0) {
+      this.bestLapTime = record.bestLapTime;
+      if (Array.isArray(record.bestSectorTimes)) {
+        for (let i = 0; i < this.checkpointCount; i++) {
+          this.bestSectorTimes[i] = record.bestSectorTimes[i] ?? 0;
+        }
+      }
+    }
+  }
+
+  getSeed(): number | null {
+    return this.seed;
   }
 
   reset(): void {
     this.laps = 0;
     this.lapTime = 0;
     this.lastLapTime = 0;
-    this.bestLapTime = 0;
     this.nextCheckpoint = 1;
     this.lastCheckpoint = 0;
     this.offTrackTime = 0;
     this.resets = 0;
+    this.currentSectorTimes.fill(0);
+    this.delta = null;
+    this.deltaTimer = 0;
+    this.isNewBestLap = false;
+
+    if (this.seed !== null) {
+      const record = loadRecord(this.seed);
+      if (record !== null && record.bestLapTime > 0) {
+        this.bestLapTime = record.bestLapTime;
+        for (let i = 0; i < this.checkpointCount; i++) {
+          this.bestSectorTimes[i] = record.bestSectorTimes[i] ?? 0;
+        }
+      } else {
+        this.bestLapTime = 0;
+        this.bestSectorTimes.fill(0);
+      }
+    } else {
+      this.bestLapTime = 0;
+      this.bestSectorTimes.fill(0);
+    }
   }
 
   /** 本圈进度 0..1,按已通过的检查点算,不看弧长 —— 抄近道不该算进度。 */
@@ -54,6 +109,9 @@ export class Race {
 
   update(vehicle: Vehicle, dt: number): void {
     this.lapTime += dt;
+    if (this.deltaTimer > 0) {
+      this.deltaTimer = Math.max(0, this.deltaTimer - dt);
+    }
     this.trackCheckpoints(vehicle);
     this.handleOutOfBounds(vehicle, dt);
   }
@@ -69,15 +127,51 @@ export class Race {
     }
 
     this.lastCheckpoint = index;
+    this.currentSectorTimes[index] = this.lapTime;
+
     if (index === 0) {
       // 绕回 0 号点意味着一整圈的检查点都按顺序过了。
       this.laps++;
       this.lastLapTime = this.lapTime;
-      if (this.bestLapTime === 0 || this.lapTime < this.bestLapTime) {
-        this.bestLapTime = this.lapTime;
+      const prevBest = this.bestLapTime;
+      const isNewBest = prevBest === 0 || this.lapTime < prevBest;
+
+      if (prevBest > 0) {
+        this.delta = this.lapTime - prevBest;
+        this.deltaTimer = HUD_TUNING.deltaHoldTime;
+        this.deltaCheckpoint = 0;
+      } else {
+        this.delta = null;
       }
+
+      if (isNewBest) {
+        this.bestLapTime = this.lapTime;
+        this.isNewBestLap = true;
+        for (let i = 0; i < this.checkpointCount; i++) {
+          this.bestSectorTimes[i] = this.currentSectorTimes[i] ?? 0;
+        }
+        if (this.seed !== null) {
+          saveRecord(this.seed, {
+            bestLapTime: this.bestLapTime,
+            bestSectorTimes: [...this.bestSectorTimes],
+          });
+        }
+      } else {
+        this.isNewBestLap = false;
+      }
+
       this.lapTime = 0;
+      this.currentSectorTimes.fill(0);
+    } else {
+      // 中途各检查点:如果已有最佳圈的分段记录,计算分段 delta
+      const bestSplit = this.bestSectorTimes[index];
+      if (this.bestLapTime > 0 && typeof bestSplit === 'number' && bestSplit > 0) {
+        this.delta = this.lapTime - bestSplit;
+        this.deltaTimer = HUD_TUNING.deltaHoldTime;
+        this.deltaCheckpoint = index;
+      }
     }
+
     this.nextCheckpoint = (index + 1) % this.checkpointCount;
   }
 

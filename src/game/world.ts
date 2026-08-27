@@ -4,7 +4,7 @@ import {
   Scene,
   Vector3,
 } from 'three';
-import { type InputFrame, createInputFrame } from '../core/input';
+import { type InputFrame, InputRecorder, createInputFrame } from '../core/input';
 import type { Rng } from '../core/rng';
 import { type Craft, createCraft } from '../gfx/craft';
 import { createGround } from '../gfx/ground';
@@ -15,10 +15,13 @@ import { createTrackMesh } from '../gfx/trackMesh';
 import { normalize01 } from '../core/mathx';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
+import { Ghost } from './ghost';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
+import { Physics } from './physics';
 import { Race } from './race';
-import { type TrackLayout, generateTrack } from './trackLayout';
+import { encodeGhostInput, saveRecord } from './records';
+import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
 import { CRAFT, REFERENCE_TOP_SPEED } from './tuning';
 import { Vehicle } from './vehicle';
 
@@ -58,6 +61,10 @@ export class World {
   readonly atmosphere: Atmosphere;
   /** 检查点与圈计时。`flat` 场地下是 null —— 那块地没有赛道可计圈。 */
   readonly race: Race | null;
+  /** 物理世界。**造 World 之前必须 await `initPhysics()`**,否则这里会抛。 */
+  readonly physics: Physics;
+  /** 幽灵回放。`flat` 场地(没有 `Race`)下是 null。 */
+  readonly ghost: Ghost | null;
 
   private readonly craft: Craft;
   private readonly prevPosition = new Vector3();
@@ -65,6 +72,11 @@ export class World {
   private preset = 'chase';
   private readonly fixedCamera: PerspectiveCamera;
   private readonly input: InputFrame = createInputFrame();
+  /**
+   * 玩家本圈的输入录制。**只在跨过起跑线时清空**(`spawnAtStart` /
+   * 圈完成),出界重置不清 —— 幽灵要重放出那次出界和被拽回来的过程。
+   */
+  private readonly recorder = new InputRecorder();
 
   constructor(rng: Rng, kind: CourseKind = 'race') {
     const palette = createPalette(rng.fork());
@@ -74,7 +86,13 @@ export class World {
     this.scene.add(this.atmosphere.sunLight);
 
     if (kind === 'race') {
-      const layout = generateTrack(rng.fork());
+      // 起点要避开逆光,而太阳方位角是 Atmosphere 定的,所以只能等它先造好。
+      // 换起点不消耗随机数,rng 的取用顺序不变 —— 同 seed 的赛道形状还是那条。
+      const layout = alignStartAwayFromSun(
+        generateTrack(rng.fork()),
+        this.atmosphere.sunDirection.x,
+        this.atmosphere.sunDirection.z,
+      );
       const course = new Course(layout, rng.fork());
       this.track = layout;
       this.field = course;
@@ -88,7 +106,8 @@ export class World {
     }
 
     this.race = this.track === null ? null : new Race(this.track);
-    this.vehicle = new Vehicle(this.field);
+    this.physics = new Physics();
+    this.vehicle = new Vehicle(this.field, this.physics);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
     this.spawnAtStart();
@@ -96,6 +115,10 @@ export class World {
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft.group);
 
+    this.ghost = this.track === null ? null : new Ghost(this.field, this.track, rng.fork(), palette);
+    if (this.ghost !== null) {
+      this.scene.add(this.ghost.craft.group);
+    }
 
     // 背光面不再靠半球光去补,改由 IBL 提供 —— 环境反射来自真实的大气散射,
     // 明暗过渡和天空是一致的,而不是人为塞一个补光。
@@ -108,6 +131,8 @@ export class World {
   /** 把载具放到起跑线,车头朝赛道前进方向。平地场景就是原点朝 +Z。 */
   spawnAtStart(): void {
     this.race?.reset();
+    this.recorder.clear();
+    this.ghost?.restartLap();
     const start = this.track?.samples[0];
     if (start === undefined) {
       this.vehicle.reset();
@@ -121,6 +146,23 @@ export class World {
     return this.preset === 'chase' ? this.chase.camera : this.fixedCamera;
   }
 
+  /**
+   * 车头方向和太阳方位角的夹角余弦:**1 = 正对太阳(逆光),-1 = 太阳在背后**。
+   *
+   * 逆光的强弱只有截图能看,而截图要先知道往哪开才拍得到 —— 这个值让
+   * 「跑到逆光路段」变成可搜索的量,不用靠猜帧数。跟随机位大致朝着车头,
+   * 所以它同时也是相机的逆光程度。
+   */
+  get sunAhead(): number {
+    const sun = this.atmosphere.sunDirection;
+    const horizontal = Math.hypot(sun.x, sun.z);
+    if (horizontal < 1e-6) {
+      return 0;
+    }
+    const yaw = this.vehicle.yaw;
+    return (Math.sin(yaw) * sun.x + Math.cos(yaw) * sun.z) / horizontal;
+  }
+
   update(input: InputFrame, dt: number): void {
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
@@ -130,8 +172,40 @@ export class World {
     this.input.steer = input.steer;
     this.input.airBrake = input.airBrake;
 
+    if (this.race !== null) {
+      // 就地把 this.input 量化成回放精度 —— 物理这一帧吃到的和录下来的必须是
+      // 同一串数字,否则幽灵会慢慢和玩家原本跑的线漂开(见 InputRecorder 类注释)。
+      this.recorder.record(this.input);
+    }
+
     this.vehicle.update(this.input, dt);
+
+    const lapsBefore = this.race?.laps ?? 0;
     this.race?.update(this.vehicle, dt);
+
+    if (this.race !== null && this.race.laps > lapsBefore) {
+      if (this.race.isNewBestLap) {
+        const seed = this.race.getSeed();
+        if (seed !== null) {
+          /*
+           * Race.update() 内部(trackCheckpoints)已经为新纪录写过一次不带
+           * 幽灵数据的记录。Race 不认识 InputRecorder——层次上不该让它认识——
+           * 所以这里带着 ghostInput 再写一次覆盖它。多写一次的代价可以接受,
+           * 新纪录本来就不常发生。
+           */
+          saveRecord(seed, {
+            bestLapTime: this.race.bestLapTime,
+            bestSectorTimes: [...this.race.bestSectorTimes],
+            ghostInput: encodeGhostInput(this.recorder.toRecording()),
+          });
+          this.ghost?.loadRecording(this.recorder.toRecording());
+        }
+      }
+      this.recorder.clear();
+      this.ghost?.restartLap();
+    }
+
+    this.ghost?.update(dt);
     this.chase.update(this.vehicle, dt);
   }
 
@@ -147,6 +221,27 @@ export class World {
       this.input.throttle * CRAFT.thrustThrottleWeight +
         normalize01(this.vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
     );
+    /*
+     * 摆四个轮子。**用当前帧的值,不做插值** —— 悬挂行程和转向角的变化幅度
+     * 是厘米/几度的量级,插不插值看不出来;而为了插值再存一份上一帧的四轮状态,
+     * 是每帧四次拷贝换一个看不见的差别。
+     */
+    const wheels = this.vehicle.wheelViews;
+    for (let i = 0; i < wheels.length; i++) {
+      const wheel = wheels[i];
+      if (wheel === undefined) {
+        continue;
+      }
+      this.craft.setWheel(
+        i,
+        wheel.length,
+        wheel.steered ? this.vehicle.steerAngle : 0,
+        wheel.rollAngle,
+      );
+    }
+
+    this.ghost?.present(alpha);
+
     // 阴影相机只罩住车周围一小块,必须跟着车走。
     this.atmosphere.followShadow(shownPosition.x, shownPosition.y, shownPosition.z);
 
