@@ -93,8 +93,11 @@ describe('M2 验收:10 个 seed 都能跑完', () => {
       expect(rig.race.laps).toBe(1);
       expect(rig.race.resets).toBe(0);
       // 圈时能反映赛道长度是否合理:太短说明赛道退化了,太长说明处处是死弯。
+      // 上界 200s:载具按 Alpine A110 真实极速/加速度校准后(见 tuning.ts
+      // 的 REFERENCE_TOP_SPEED),自动驾驶圈时比早期反重力/超高性能版本慢了
+      // 不少,实测跑到 148s 属于正常量级,不是赛道退化。
       expect(rig.race.lastLapTime).toBeGreaterThan(20);
-      expect(rig.race.lastLapTime).toBeLessThan(120);
+      expect(rig.race.lastLapTime).toBeLessThan(200);
     });
   }
 });

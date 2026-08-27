@@ -11,11 +11,15 @@
  *   2. 总长落在 2.6~3.8 km(参考 HANDOFF 第六节「赛道长度 2.8–3.4 km」那条
  *      验收数据,两头各放宽一点给挑选留余地)。
  *
- * 筛过之后按主题(`palette.ts` 的三套 `THEMES`)分组,每套主题挑不超过 2 条,
- * 再用 `Autopilot`(M2 的验收循迹器,不是玩法内容)实际跑一圈,量出一个
- * **保守基线圈速**——目标时间 = 基线 × `TARGET_FACTOR`,代表「一个还可以的
- * 人类玩家应该能超过自动驾驶多少」。这不是精确的人类圈速预测,只是给目标时间
- * 一个数据支撑的量级,而不是拍脑袋。
+ * 筛过之后按主题(`palette.ts` 的三套 `THEMES`)分组,每套主题挑不超过 2 条。
+ *
+ * **目标时间的来源(2026-08 改,现实参照校准)不是这个脚本算出来的**——
+ * 是 Alpine A110 官方纽博格林北环圈速换算的配速(`REAL_PACE_S_PER_KM`,
+ * 见 `curatedTracks.ts` 的类注释与 `docs/CLAUDE.md`「现实参照」一节)乘赛道
+ * 长度。`Autopilot`(M2 的验收循迹器,保守、不甩尾)在这里**只做可行性
+ * 校验**——证明这条赛道确实能在合理时间内跑完,不是拿它的圈速当目标来源:
+ * 它偏保守,拿它的时间乘系数得到的目标会随车辆性能调整而漂移,不如直接钉
+ * 在真实数据上稳。
  *
  * 用法:
  *   npm run curate-tracks
@@ -33,8 +37,11 @@ import { generateTrack } from '../src/game/trackLayout';
 import { Vehicle } from '../src/game/vehicle';
 import { createPalette } from '../src/gfx/palette';
 
-/** 自动驾驶是保守的验收工具,不是玩法上限——目标时间取基线的这个比例。 */
-const TARGET_FACTOR = 0.82;
+/**
+ * Alpine A110(2017 基础版)纽博格林北环官方圈速 8:03(483s)/ 20.832km。
+ * 来源与信心等级见 `docs/CLAUDE.md`「现实参照」一节。
+ */
+const REAL_PACE_S_PER_KM = 483 / 20.832;
 const MIN_LENGTH = 2600;
 const MAX_LENGTH = 3800;
 /** 一圈最多推进这么多帧(200 秒)还没完赛就放弃,免得卡死在异常 seed 上。 */
@@ -101,10 +108,11 @@ async function main(): Promise<void> {
   const timed: Timed[] = [];
   for (const c of selected) {
     const lapTime = runAutopilotLap(c.seed);
+    const targetLapTime = Math.round((c.totalLength / 1000) * REAL_PACE_S_PER_KM * 100) / 100;
     timed.push({
       ...c,
       autopilotLapTime: lapTime,
-      targetLapTime: lapTime === null ? null : Math.round(lapTime * TARGET_FACTOR * 100) / 100,
+      targetLapTime: lapTime === null ? null : targetLapTime,
     });
   }
 
@@ -113,11 +121,11 @@ async function main(): Promise<void> {
   process.stdout.write(`扫了 seed 1..${args.range},候选(attempts=1 且 ${MIN_LENGTH}-${MAX_LENGTH}m)${candidates.length} 条\n`);
   process.stdout.write(`按主题分组:${Array.from(byTheme.entries()).map(([t, l]) => `${t}=${l.length}`).join(', ')}\n\n`);
   for (const t of timed) {
-    const lapText = t.autopilotLapTime === null ? '未完赛(异常,别用)' : `${t.autopilotLapTime.toFixed(2)}s`;
+    const lapText = t.autopilotLapTime === null ? '未完赛(异常,别用,可行性校验没过)' : `${t.autopilotLapTime.toFixed(2)}s(仅可行性校验)`;
     const targetText = t.targetLapTime === null ? '—' : `${t.targetLapTime.toFixed(2)}s`;
     process.stdout.write(
       `seed=${t.seed}\t主题=${t.theme}\t长度=${t.totalLength.toFixed(0)}m\t` +
-        `autopilot=${lapText}\t目标=${targetText}\n`,
+        `autopilot=${lapText}\t目标(真实配速)=${targetText}\n`,
     );
   }
 }
