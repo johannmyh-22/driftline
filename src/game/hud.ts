@@ -1,3 +1,4 @@
+import type { CuratedTrack } from './curatedTracks';
 import { MINIMAP_TUNING } from './tuning';
 import type { Race } from './race';
 import type { TrackLayout, TrackSample } from './trackLayout';
@@ -65,6 +66,7 @@ export class Hud {
     seed: number,
     track: TrackLayout | null,
     race: Race | null,
+    curated: CuratedTrack | null = null,
   ) {
     this.root = document.createElement('div');
     this.root.id = 'readout';
@@ -98,6 +100,19 @@ export class Hud {
 
     const timingFooter = document.createElement('div');
     timingFooter.className = 'hud-timing-footer';
+
+    if (curated !== null) {
+      const targetRow = document.createElement('div');
+      targetRow.className = 'hud-record-row';
+      const targetLabel = document.createElement('span');
+      targetLabel.className = 'hud-record-label';
+      targetLabel.textContent = 'TARGET';
+      const targetVal = document.createElement('span');
+      targetVal.className = 'hud-record-val hud-target-val';
+      targetVal.textContent = formatTime(curated.targetLapTime);
+      targetRow.append(targetLabel, targetVal);
+      timingFooter.append(targetRow);
+    }
 
     const bestRow = document.createElement('div');
     bestRow.className = 'hud-record-row';

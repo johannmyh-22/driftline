@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { CURATED_TRACKS } from '../../src/game/curatedTracks';
 import { Menu } from '../../src/game/menu';
 
 /**
@@ -87,6 +88,18 @@ function querySelectorImpl(root: MockNode, selector: string): MockNode | null {
   return null;
 }
 
+/** 收集子树里所有匹配的节点(深度优先),`querySelector` 只返回第一个,测多个按钮时不够用。 */
+function collectAll(root: MockNode, selector: string): MockNode[] {
+  const result: MockNode[] = [];
+  for (const child of root.children) {
+    if (matchesSelector(child, selector)) {
+      result.push(child);
+    }
+    result.push(...collectAll(child, selector));
+  }
+  return result;
+}
+
 function matchesSelector(node: MockNode, selector: string): boolean {
   if (selector.startsWith('#')) {
     return node.id === selector.slice(1);
@@ -109,6 +122,14 @@ beforeAll(() => {
   });
 });
 
+const NOOP_CALLBACKS = {
+  onResume: () => {},
+  onRestart: () => {},
+  onChangeSeed: (_seed: number) => {},
+  onVolumeChange: (_volume: number) => {},
+  onToggleMute: () => {},
+};
+
 describe('Menu 暂停/换 seed 菜单', () => {
   let container: MockNode;
 
@@ -117,10 +138,8 @@ describe('Menu 暂停/换 seed 菜单', () => {
   });
 
   it('初始隐藏,show/hide/toggle 正确切换', () => {
-    const menu = new Menu(container as unknown as HTMLElement, 42, {
-      onResume: () => {},
-      onRestart: () => {},
-      onChangeSeed: () => {},
+    const menu = new Menu(container as unknown as HTMLElement, 42, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
     });
 
     const overlay = container.querySelector('#menu-overlay');
@@ -141,10 +160,9 @@ describe('Menu 暂停/换 seed 菜单', () => {
 
   it('继续按钮触发 onResume', () => {
     let resumed = false;
-    const menu = new Menu(container as unknown as HTMLElement, 1, {
+    const menu = new Menu(container as unknown as HTMLElement, 1, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
       onResume: () => { resumed = true; },
-      onRestart: () => {},
-      onChangeSeed: () => {},
     });
     menu.show();
 
@@ -157,10 +175,9 @@ describe('Menu 暂停/换 seed 菜单', () => {
 
   it('重开按钮触发 onRestart', () => {
     let restarted = false;
-    const menu = new Menu(container as unknown as HTMLElement, 1, {
-      onResume: () => {},
+    const menu = new Menu(container as unknown as HTMLElement, 1, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
       onRestart: () => { restarted = true; },
-      onChangeSeed: () => {},
     });
     void menu;
 
@@ -175,9 +192,8 @@ describe('Menu 暂停/换 seed 菜单', () => {
 
   it('提交 seed 表单触发 onChangeSeed,携带解析出的整数', () => {
     let receivedSeed: number | null = null;
-    const menu = new Menu(container as unknown as HTMLElement, 7, {
-      onResume: () => {},
-      onRestart: () => {},
+    const menu = new Menu(container as unknown as HTMLElement, 7, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
       onChangeSeed: (seed) => { receivedSeed = seed; },
     });
     void menu;
@@ -196,9 +212,8 @@ describe('Menu 暂停/换 seed 菜单', () => {
 
   it('非法 seed 输入不触发 onChangeSeed', () => {
     let called = false;
-    const menu = new Menu(container as unknown as HTMLElement, 7, {
-      onResume: () => {},
-      onRestart: () => {},
+    const menu = new Menu(container as unknown as HTMLElement, 7, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
       onChangeSeed: () => { called = true; },
     });
     void menu;
@@ -212,11 +227,65 @@ describe('Menu 暂停/换 seed 菜单', () => {
     expect(called).toBe(false);
   });
 
+  it('精选赛道每条渲染一个按钮,点击触发 onChangeSeed(该 seed)', () => {
+    let received: number | null = null;
+    const menu = new Menu(container as unknown as HTMLElement, 1, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
+      onChangeSeed: (seed) => { received = seed; },
+    });
+    void menu;
+
+    const buttons = collectAll(container, '.menu-curated-button');
+    expect(buttons.length).toBe(CURATED_TRACKS.length);
+
+    const first = CURATED_TRACKS[0];
+    if (first === undefined) {
+      throw new Error('CURATED_TRACKS 不该是空的');
+    }
+    expect(buttons[0]?.textContent).toBe(first.name);
+    buttons[0]?.dispatch('click');
+    expect(received).toBe(first.seed);
+  });
+
+  it('音量滑块预填当前音量,拖动触发 onVolumeChange', () => {
+    let received: number | null = null;
+    const menu = new Menu(container as unknown as HTMLElement, 1, { volume: 0.42, muted: false }, {
+      ...NOOP_CALLBACKS,
+      onVolumeChange: (volume) => { received = volume; },
+    });
+    void menu;
+
+    const slider = container.querySelector('.menu-volume-input');
+    expect(slider?.value).toBe('0.42');
+    if (slider !== null) {
+      slider.value = '0.8';
+    }
+    slider?.dispatch('input');
+
+    expect(received).toBe(0.8);
+  });
+
+  it('静音按钮文案随初始状态与外部 setMuted 同步', () => {
+    let toggled = false;
+    const menu = new Menu(container as unknown as HTMLElement, 1, { volume: 0.5, muted: true }, {
+      ...NOOP_CALLBACKS,
+      onToggleMute: () => { toggled = true; },
+    });
+
+    const button = container.querySelector('.menu-volume-row')?.children.find(
+      (node) => node.tagName === 'BUTTON',
+    );
+    expect(button?.textContent).toBe('取消静音');
+    button?.dispatch('click');
+    expect(toggled).toBe(true);
+
+    menu.setMuted(false);
+    expect(button?.textContent).toBe('静音');
+  });
+
   it('dispose 移除挂载的节点', () => {
-    const menu = new Menu(container as unknown as HTMLElement, 1, {
-      onResume: () => {},
-      onRestart: () => {},
-      onChangeSeed: () => {},
+    const menu = new Menu(container as unknown as HTMLElement, 1, { volume: 0.5, muted: false }, {
+      ...NOOP_CALLBACKS,
     });
     expect(container.querySelector('#menu-overlay')).not.toBeNull();
     menu.dispose();

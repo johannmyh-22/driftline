@@ -10,18 +10,30 @@
  * 玩家主动要暂停或换 seed 时才出现。**这是一个需要和人类核对的产品判断**,
  * 写在 docs/HANDOFF.md 里留给人类确认。
  */
+import { CURATED_TRACKS } from './curatedTracks';
+
+export interface MenuAudioState {
+  volume: number;
+  muted: boolean;
+}
+
 export class Menu {
   private readonly root: HTMLDivElement;
   private readonly seedInput: HTMLInputElement;
+  private readonly volumeInput: HTMLInputElement;
+  private readonly muteButton: HTMLButtonElement;
   private open = false;
 
   constructor(
     parent: HTMLElement,
     currentSeed: number,
+    audio: MenuAudioState,
     callbacks: {
       onResume: () => void;
       onRestart: () => void;
       onChangeSeed: (seed: number) => void;
+      onVolumeChange: (volume: number) => void;
+      onToggleMute: () => void;
     },
   ) {
     this.root = document.createElement('div');
@@ -79,11 +91,57 @@ export class Menu {
 
     seedRow.append(seedLabel, this.seedInput, seedButton);
 
+    const curatedRow = document.createElement('div');
+    curatedRow.className = 'menu-curated-row';
+    for (const track of CURATED_TRACKS) {
+      const trackButton = document.createElement('button');
+      trackButton.type = 'button';
+      trackButton.className = 'menu-button menu-button-small menu-curated-button';
+      trackButton.textContent = track.name;
+      trackButton.addEventListener('click', () => callbacks.onChangeSeed(track.seed));
+      curatedRow.append(trackButton);
+    }
+
+    const volumeRow = document.createElement('div');
+    volumeRow.className = 'menu-volume-row';
+
+    const volumeLabel = document.createElement('label');
+    volumeLabel.className = 'menu-seed-label';
+    volumeLabel.textContent = '音量';
+    volumeLabel.htmlFor = 'menu-volume-input';
+
+    this.volumeInput = document.createElement('input');
+    this.volumeInput.id = 'menu-volume-input';
+    this.volumeInput.type = 'range';
+    this.volumeInput.className = 'menu-volume-input';
+    this.volumeInput.min = '0';
+    this.volumeInput.max = '1';
+    this.volumeInput.step = '0.01';
+    this.volumeInput.value = String(audio.volume);
+    this.volumeInput.addEventListener('input', () => {
+      const volume = Number.parseFloat(this.volumeInput.value);
+      if (Number.isFinite(volume)) {
+        callbacks.onVolumeChange(volume);
+      }
+    });
+
+    this.muteButton = document.createElement('button');
+    this.muteButton.type = 'button';
+    this.muteButton.className = 'menu-button menu-button-small';
+    this.muteButton.textContent = audio.muted ? '取消静音' : '静音';
+    this.muteButton.addEventListener('click', () => callbacks.onToggleMute());
+
+    volumeRow.append(volumeLabel, this.volumeInput, this.muteButton);
+
     const help = document.createElement('p');
     help.className = 'menu-help';
     help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹 · Esc 暂停';
 
-    card.append(title, resumeButton, restartButton, seedRow, help);
+    const curatedLabel = document.createElement('p');
+    curatedLabel.className = 'menu-curated-label';
+    curatedLabel.textContent = '精选赛道';
+
+    card.append(title, resumeButton, restartButton, seedRow, curatedLabel, curatedRow, volumeRow, help);
     this.root.append(card);
     parent.append(this.root);
   }
@@ -108,6 +166,11 @@ export class Menu {
 
   get isOpen(): boolean {
     return this.open;
+  }
+
+  /** 静音按钮的文案是「取消静音」还是「静音」由外部状态决定,主循环切换后同步一次。 */
+  setMuted(muted: boolean): void {
+    this.muteButton.textContent = muted ? '取消静音' : '静音';
   }
 
   dispose(): void {

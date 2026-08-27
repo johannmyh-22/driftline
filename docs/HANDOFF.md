@@ -2146,3 +2146,217 @@ UI),提供继续、重开本圈、换 seed 三个操作;换 seed 走整页跳转
 
 `__BUILD_ID__` 由提交数自动算,这一轮几个提交会让它从 #68 往上涨,具体数字
 以 `git rev-list --count HEAD` 实测为准,不在这里手动维护。
+
+---
+
+## 第二十七节:M5 起步 —— 程序化音频(2026-08)
+
+第二十六节的 PR(#9)人类已经合并进 `main`。M4 到此全部完成。人类选下一步方向
+时选了「M5 剩余」,而 M5 本身又拆成四块相对独立的工作(精选赛道+主题、程序化
+音频、加速带/跳台/隧道段、主音量与 `prefers-reduced-motion`)—— 问过人类先做
+哪一块,选的是**程序化音频**:不碰赛道生成/物理,风险最低,而且是当时唯一还
+完全空白的子系统(`src/audio/` 之前只有一份占位 README)。
+
+### 一、做了什么
+
+新增 `src/audio/`,五个文件,全部 Web Audio API 程序化合成,**零音频文件**:
+
+- `context.ts` —— `AudioBus`:唯一的 `AudioContext` + 主音量总线。音量/静音
+  存 localStorage(key `driftline:audio`),和 `records.ts` 的持久化不是一套
+  存储(没必要绑同一个 seed,音量是全局偏好)。
+- `engine.ts` —— `EngineSound`:锯齿波过一个随速度调制的低通滤波器,不是采样
+  循环。频率/滤波截止/音量三个参数按 `REFERENCE_TOP_SPEED` 线性映射,松油门
+  滑行音量降到 30% 而不是归零(引擎还在转)。
+- `wind.ts` —— `WindNoise`:一段预生成的白噪声循环(用注入的 `Rng`,不调
+  `Math.random()`)过低通滤波器,音量和截止频率都随速度涨。
+- `impact.ts` / `ui.ts` —— 撞墙音 / UI 点击音,事件驱动的一次性脉冲,用完即扔
+  (不在每帧路径上,不违反「每帧不分配对象」)。撞墙音的强度直接读
+  `Vehicle.wallImpact`(0..1,当帧撞墙强度,没撞是 0,不需要自己做边缘检测)。
+- `director.ts` —— `AudioDirector`:`main.ts` 唯一直接接线的入口,拼装引擎音
+  + 气流噪声两个持续声源,每个固定步调一次。
+
+数值全部集中在 `tuning.ts` 新增的 `AUDIO` 段,和其余六段(`VEHICLE`/`CAMERA`/
+`TRACK`/`SKY`/`CRAFT`/`POST`)同一个来源。
+
+**接线到 `main.ts`**:测试模式不构造 `AudioDirector`(`?test=1` 下没有真实用户
+手势,`AudioContext` 起不来,和 `Hud`/`Menu` 同一条约定)。浏览器自动播放策略
+要求先有一次真实用户手势才会真正出声——`AudioContext` 造出来是 `suspended`
+的,`main.ts` 监听首次 `keydown`/`pointerdown` 调一次 `audio.resume()`,监听器
+自己摘掉自己。
+
+**接到 `Menu`(第二十六节那个 Esc 暂停菜单)**:菜单卡片里加了一行音量滑块 +
+静音按钮,构造时读 `audio.masterVolume`/`audio.muted` 预填,拖动/点击回调进
+`AudioDirector`。继续/重开按钮点击时顺手 `audio?.triggerUiClick()`,菜单第一次
+有了自己的音效反馈。
+
+### 二、这一轮唯一的产品判断:`prefers-reduced-motion` 没做
+
+PLAN.md 原句是「主音量与静音,尊重 `prefers-reduced-motion`」。**这一轮只做了
+「主音量与静音」,没有碰 `prefers-reduced-motion`,这是这一轮自己做的取舍,
+没有单独问过人类,写在这里等确认。** 标准语境里 `prefers-reduced-motion` 管的
+是**视觉**动画(相机滚转/FOV 突变这类),不是音频音量;如果字面上把它塞进音频
+这一块,最直接的落点会是改 `ChaseCamera` 的滚转/FOV 效果 —— 那是人类已经验收
+过的手感/观感的一部分(第十九、二十节),这一轮判断不该在没问清楚范围之前
+顺手碰,留给做「加速带/跳台/隧道段」或专门一轮视觉打磨时,和人类确认过范围
+再处理。
+
+### 三、四道质量门禁实测结果
+
+- `npm run typecheck`:0 错误。
+- `npm run test -- --run`:24 个文件,**261 passed**(基线 241,新增
+  `audio.test.ts` 11 条 —— 用一套假 `AudioContext`/`AudioParam` 节点图断言
+  合成公式的方向对不上对:速度/油门越高频率和音量越高、强度低于阈值的撞击不
+  发声、峰值随撞击强度缩放、噪声缓冲同 seed 确定性等;`menu.test.ts` 补 2 条
+  音量滑块/静音按钮的交互测试;另外 `noMathRandom.test.ts` 按源文件数生成用例,
+  新增 5 个 `src/audio/*.ts` 源文件带来 5 条扫描用例)。
+- `npm run build`:通过。
+- `npm run test:visual`:**19 passed**(和第二十六节持平,声音拍不出截图,
+  这一轮没加新的视觉测试,靠 `不带 test=1 时自行跑主循环` 那条断言「页面无
+  console error/pageerror」间接确认 `AudioContext` 在真实 headless Chromium
+  里能正常构造、不崩溃)。
+
+### 四、踩到的一个坑:`window.localStorage` 在 Node 测试环境里直接抛错
+
+第一版 `context.ts` 的 `loadSettings`/`saveSettings` 直接写 `window.localStorage`。
+写单测时(`AudioBus` 的持久化那条)发现存进去的值读不出来 —— 查下去是
+`window` 在 vitest 的 `node` 环境下压根不存在,`window.localStorage` 直接抛
+`ReferenceError`,被 `try/catch` 悄悄吞掉,音量偏好因此永远存不下也读不出来,
+**而且不会有任何测试变红**(如果没有专门为持久化写单测的话)。
+
+`records.ts` 的 `getStorage()` 早就用「先判 `typeof window !== 'undefined'`,
+再退到 `globalThis.localStorage`」这套写法处理过同一个问题(见第二十二节
+`setStorageEnabled` 那条讨论,以及 `records.ts` 本身的实现)。`context.ts` 现在
+改成同一套写法,并补了单测(`audio.test.ts` 的 `AudioBus` 持久化那条)守住它。
+**教训:这个项目里任何新写的 `localStorage` 访问,都先去抄 `records.ts` 的
+`getStorage()`,别自己直接写 `window.localStorage`。**
+
+### 五、给人类的确认点
+
+1. **音效数值(`tuning.ts` 的 `AUDIO` 段)完全是拍脑袋定的量级**,没有人耳
+   听过、调过。这一轮只保证「代码逻辑对(速度越快音调越高之类)」,不保证
+   「听着舒服」——这是 CLAUDE.md 里「好玩/好听由人判断」的音频版本,需要人类
+   本地 `npm run dev` 实际听一遍,给具体反馈(太吵/太闷/引擎音音域不对之类)。
+2. **`prefers-reduced-motion` 留给了后续,范围待定**,见上面第二节。
+3. M5 剩下的三块(精选赛道+主题+目标时间、加速带/跳台/隧道段)还没开始。
+
+### 六、构建号
+
+这一轮几个提交会让构建号从 #70 往上涨,以 `git rev-list --count HEAD` 实测
+为准。
+
+---
+
+## 第二十八节:精选赛道 + 一个已经上线的严重 bug(2026-08)
+
+紧接第二十七节,同一轮会话里继续做 M5 的「精选赛道+主题+目标时间」,过程中
+**发现并修了一个已经合并进 `main`、正在 Pages 上线跑的严重 bug** —— 优先级
+比继续加新功能高,记在最前面。
+
+### 一、严重 bug:暂停菜单从第一帧就盖住整个游戏
+
+**现象**:第二十六节加的 Esc 暂停菜单,`Menu` 构造时 `root.hidden = true`,
+逻辑上应该默认不可见。但 `style.css` 里 `.menu-overlay { display: grid; ... }`
+没有对 `[hidden]` 开后门,而 `.menu-overlay` 和浏览器 UA 样式表的
+`[hidden] { display: none }` 选择器特异度打平(都是 (0,1,0)),**源码顺序
+在后的赢** —— 也就是自己写的 `display: grid` 压过了 `hidden` 属性,菜单
+**从第一帧就盖在整个游戏上面**,而不是等玩家按 Esc 才出现。
+
+这条从 PR #9(第二十六节)合并进 `main` 起就在线上,`npm run dev` 或 Pages
+打开就能看到:标题「已暂停」的卡片糊在画面正中央,canvas 在它后面继续跑但
+被完全挡住 —— 这不是「暂停功能」,是「整个游戏被一直锁着」。
+
+**为什么两轮四道门都没测出来**:
+
+1. `npm run shoot`(以及本节之前所有靠它产出的截图)默认走 `?test=1`,
+   而 `Menu` 在测试模式下**根本不构造**(和 `Hud` 同一条约定)——这条路径
+   永远看不到这个 bug,不管截多少张图。
+2. **唯一会构造 `Menu` 的路径**是 `test:visual` 套件里「实时模式下 seed
+   1/42/1337 正常渲染 HUD 与小地图」那三条,但它们只断言 `#readout`(HUD
+   的根节点,和 `#menu-overlay`是两个不同的 DOM 节点)的文本内容和亮度方差,
+   从没检查过页面上还叠着别的东西。
+3. 第二十六节自己写的 Esc 菜单测试,判定「菜单开没开」用的是
+   `document.getElementById('menu-overlay').hidden` 这个 **DOM 属性**——
+   `hidden` 属性确实被设成了 `true`(JS 逻辑是对的),只是 CSS 没听它的。
+   断言和 bug 完全不在同一层,必然测不出来。
+4. **我自己也没有实际去看一眼「实时模式、没按 Esc」时的截图**——第二十六节
+   验证时只看了 `smoke-pause-menu.png`(那张图本来就该显示菜单)和
+   `npm run shoot` 产出的图(测试模式,menu 不存在),唯一能照见这个 bug 的
+   `smoke-realtime-seed1.png` 就在硬盘上,我却没有在合并前打开看过。
+
+这是这个项目反复吃过的同一类亏(见 HANDOFF 第五节标题:「只有看图才能发现」),
+这次的教训更具体一层:**「有截图产出」不等于「看过能照出这个 bug 的那张」**,
+自动化流程里默认走的测试模式恰好是这个 bug 的盲区。
+
+**是怎么发现的**:给刚做完的 M5「精选赛道」功能拍一张实时截图核对 TARGET
+行时,顺手打开的那张图里菜单赫然在目——不是靠专门去找,是做别的验证时
+撞见的。
+
+**修法**(`style.css`):加一条 `.menu-overlay[hidden] { display: none; }`,
+特异度 (0,2,0) 才压得过下面的 `.menu-overlay { display: grid }`。同时把
+`tests/visual/smoke.spec.ts` 里 Esc 菜单测试判定「开没开」的方式从读
+`.hidden` 属性改成读 `getComputedStyle(overlay).display`——**这条新断言
+实测验证过真的能拦住这个 bug**:临时把 CSS 修复 `git stash` 掉、只保留新
+断言,测试确实红了(`Expected: false, Received: true`),复原修复后再跑
+就绿,证明不是碰巧。
+
+### 二、精选赛道 + 主题 + 目标时间
+
+M5 剩下三块里的第二块。`generateTrack()` 保证任何 seed 都能生成出合格赛道,
+但合格不等于有代表性——退化成近似正圆的赛道也合格,这份精选列表就是从一批
+候选里挑出更有代表性的几条。
+
+**新增 `scripts/curate-tracks.ts`**(纯测量脚本,不改任何生成器/物理参数):
+扫一批候选 seed,筛 `layout.attempts === 1`(第一次就通过校验,弯道形状没被
+「收紧幅度」这个兜底机制修剪过)且总长落在 2.6~3.8 km,按三套环境主题
+(`gfx/palette.ts` 的 `THEMES`)分组各挑几条,再用 `Autopilot`(M2 的验收
+循迹器,保守、不甩尾)实际跑一圈量出基线圈速,目标时间 = 基线 × 0.82。
+`npm run curate-tracks -- --range=500 --perTheme=2` 跑出候选,人工从输出里
+挑 5 条誊进代码。
+
+**新增 `src/game/curatedTracks.ts`**:`CURATED_TRACKS` 常量,5 条(荒漠×2、
+高原岩地×2、火山×1),每条 `{ seed, name, theme, targetLapTime }`。
+
+**接线**:
+
+- `Hud` 新增可选的第 5 个构造参数 `curated: CuratedTrack | null`,有数据时
+  在 BEST/LAST 上方多渲染一行 TARGET(`main.ts` 里用 `getCuratedTrack(seed)`
+  查)。
+- `Menu` 新增「精选赛道」一行按钮(每条精选赛道一个,点击复用已有的
+  `onChangeSeed` 回调,和手填 SEED 走同一条整页跳转路径)。
+
+### 三、四道质量门禁实测结果
+
+- `npm run typecheck`:0 错误。
+- `npm run test -- --run`:25 个文件,**268 passed**(基线 261,新增
+  `curatedTracks.test.ts` 4 条 —— 数量在 3~5 条之间、三套主题都覆盖到、
+  目标时间落在合理量级、`getCuratedTrack` 查找正确;`hud.test.ts` 补 1 条
+  TARGET 行渲染;`menu.test.ts` 补 1 条精选赛道按钮点击)。
+- `npm run build`:通过。
+- `npm run test:visual`:**19 passed**(和上一轮持平,但「Esc 菜单」那条的
+  判定方式换成了实际渲染可见性,见上面第一节)。
+
+### 四、人眼截图核验
+
+- `smoke-realtime-seed1.png`(重新截):暂停菜单不再盖在画面上,车、HUD、
+  小地图正常显示——这就是本节要修的那个 bug 的「修复前/修复后」对照。
+- 手动跑了一次非 test 模式的 seed=135(精选赛道之一)截图,确认左上角
+  HUD 多出的 TARGET 行显示 `01:07.06`,和 `curatedTracks.ts` 里的数据对得上。
+- `smoke-pause-menu.png`(重新截):Esc 打开的菜单里「精选赛道」一行五个
+  按钮(`荒漠 #135` / `荒漠 #325` / `高原岩地 #107` / `高原岩地 #110` /
+  `火山 #154`)排版正常。
+
+### 五、给人类的确认点
+
+1. **目标时间(`curatedTracks.ts` 的 `targetLapTime`)完全没有人类实际开过
+   验证过**,只是「保守自动驾驶基线 × 0.82」这个数据支撑的量级,不是精确
+   预测。人类试玩这几条精选赛道后,如果目标时间明显太松或太紧,直接改这个
+   文件里的数字。
+2. **精选赛道的挑选标准是「代表性」(不是近似圆、长度落在验收量级、主题
+   覆盖全)**,没有人类看过这 5 条赛道本身好不好开、好不好看,需要试玩确认。
+3. 建议**先看一遍这个 bug 修复本身**(seed=1 实时模式截图),这比精选赛道
+   功能更该优先确认。
+
+### 六、构建号
+
+这一轮几个提交会让构建号从 #71 往上涨,以 `git rev-list --count HEAD` 实测
+为准。

@@ -19,7 +19,8 @@
     "perf": "tsx scripts/perf.ts",
     "spin-probe": "tsx scripts/spin-probe.ts",
     "drift-probe": "tsx scripts/drift-probe.ts",
-    "zoom": "tsx scripts/zoom.ts"
+    "zoom": "tsx scripts/zoom.ts",
+    "curate-tracks": "tsx scripts/curate-tracks.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",
