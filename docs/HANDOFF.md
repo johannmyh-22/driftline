@@ -2146,3 +2146,100 @@ UI),提供继续、重开本圈、换 seed 三个操作;换 seed 走整页跳转
 
 `__BUILD_ID__` 由提交数自动算,这一轮几个提交会让它从 #68 往上涨,具体数字
 以 `git rev-list --count HEAD` 实测为准,不在这里手动维护。
+
+---
+
+## 第二十七节:M5 起步 —— 程序化音频(2026-08)
+
+第二十六节的 PR(#9)人类已经合并进 `main`。M4 到此全部完成。人类选下一步方向
+时选了「M5 剩余」,而 M5 本身又拆成四块相对独立的工作(精选赛道+主题、程序化
+音频、加速带/跳台/隧道段、主音量与 `prefers-reduced-motion`)—— 问过人类先做
+哪一块,选的是**程序化音频**:不碰赛道生成/物理,风险最低,而且是当时唯一还
+完全空白的子系统(`src/audio/` 之前只有一份占位 README)。
+
+### 一、做了什么
+
+新增 `src/audio/`,五个文件,全部 Web Audio API 程序化合成,**零音频文件**:
+
+- `context.ts` —— `AudioBus`:唯一的 `AudioContext` + 主音量总线。音量/静音
+  存 localStorage(key `driftline:audio`),和 `records.ts` 的持久化不是一套
+  存储(没必要绑同一个 seed,音量是全局偏好)。
+- `engine.ts` —— `EngineSound`:锯齿波过一个随速度调制的低通滤波器,不是采样
+  循环。频率/滤波截止/音量三个参数按 `REFERENCE_TOP_SPEED` 线性映射,松油门
+  滑行音量降到 30% 而不是归零(引擎还在转)。
+- `wind.ts` —— `WindNoise`:一段预生成的白噪声循环(用注入的 `Rng`,不调
+  `Math.random()`)过低通滤波器,音量和截止频率都随速度涨。
+- `impact.ts` / `ui.ts` —— 撞墙音 / UI 点击音,事件驱动的一次性脉冲,用完即扔
+  (不在每帧路径上,不违反「每帧不分配对象」)。撞墙音的强度直接读
+  `Vehicle.wallImpact`(0..1,当帧撞墙强度,没撞是 0,不需要自己做边缘检测)。
+- `director.ts` —— `AudioDirector`:`main.ts` 唯一直接接线的入口,拼装引擎音
+  + 气流噪声两个持续声源,每个固定步调一次。
+
+数值全部集中在 `tuning.ts` 新增的 `AUDIO` 段,和其余六段(`VEHICLE`/`CAMERA`/
+`TRACK`/`SKY`/`CRAFT`/`POST`)同一个来源。
+
+**接线到 `main.ts`**:测试模式不构造 `AudioDirector`(`?test=1` 下没有真实用户
+手势,`AudioContext` 起不来,和 `Hud`/`Menu` 同一条约定)。浏览器自动播放策略
+要求先有一次真实用户手势才会真正出声——`AudioContext` 造出来是 `suspended`
+的,`main.ts` 监听首次 `keydown`/`pointerdown` 调一次 `audio.resume()`,监听器
+自己摘掉自己。
+
+**接到 `Menu`(第二十六节那个 Esc 暂停菜单)**:菜单卡片里加了一行音量滑块 +
+静音按钮,构造时读 `audio.masterVolume`/`audio.muted` 预填,拖动/点击回调进
+`AudioDirector`。继续/重开按钮点击时顺手 `audio?.triggerUiClick()`,菜单第一次
+有了自己的音效反馈。
+
+### 二、这一轮唯一的产品判断:`prefers-reduced-motion` 没做
+
+PLAN.md 原句是「主音量与静音,尊重 `prefers-reduced-motion`」。**这一轮只做了
+「主音量与静音」,没有碰 `prefers-reduced-motion`,这是这一轮自己做的取舍,
+没有单独问过人类,写在这里等确认。** 标准语境里 `prefers-reduced-motion` 管的
+是**视觉**动画(相机滚转/FOV 突变这类),不是音频音量;如果字面上把它塞进音频
+这一块,最直接的落点会是改 `ChaseCamera` 的滚转/FOV 效果 —— 那是人类已经验收
+过的手感/观感的一部分(第十九、二十节),这一轮判断不该在没问清楚范围之前
+顺手碰,留给做「加速带/跳台/隧道段」或专门一轮视觉打磨时,和人类确认过范围
+再处理。
+
+### 三、四道质量门禁实测结果
+
+- `npm run typecheck`:0 错误。
+- `npm run test -- --run`:24 个文件,**261 passed**(基线 241,新增
+  `audio.test.ts` 11 条 —— 用一套假 `AudioContext`/`AudioParam` 节点图断言
+  合成公式的方向对不上对:速度/油门越高频率和音量越高、强度低于阈值的撞击不
+  发声、峰值随撞击强度缩放、噪声缓冲同 seed 确定性等;`menu.test.ts` 补 2 条
+  音量滑块/静音按钮的交互测试;另外 `noMathRandom.test.ts` 按源文件数生成用例,
+  新增 5 个 `src/audio/*.ts` 源文件带来 5 条扫描用例)。
+- `npm run build`:通过。
+- `npm run test:visual`:**19 passed**(和第二十六节持平,声音拍不出截图,
+  这一轮没加新的视觉测试,靠 `不带 test=1 时自行跑主循环` 那条断言「页面无
+  console error/pageerror」间接确认 `AudioContext` 在真实 headless Chromium
+  里能正常构造、不崩溃)。
+
+### 四、踩到的一个坑:`window.localStorage` 在 Node 测试环境里直接抛错
+
+第一版 `context.ts` 的 `loadSettings`/`saveSettings` 直接写 `window.localStorage`。
+写单测时(`AudioBus` 的持久化那条)发现存进去的值读不出来 —— 查下去是
+`window` 在 vitest 的 `node` 环境下压根不存在,`window.localStorage` 直接抛
+`ReferenceError`,被 `try/catch` 悄悄吞掉,音量偏好因此永远存不下也读不出来,
+**而且不会有任何测试变红**(如果没有专门为持久化写单测的话)。
+
+`records.ts` 的 `getStorage()` 早就用「先判 `typeof window !== 'undefined'`,
+再退到 `globalThis.localStorage`」这套写法处理过同一个问题(见第二十二节
+`setStorageEnabled` 那条讨论,以及 `records.ts` 本身的实现)。`context.ts` 现在
+改成同一套写法,并补了单测(`audio.test.ts` 的 `AudioBus` 持久化那条)守住它。
+**教训:这个项目里任何新写的 `localStorage` 访问,都先去抄 `records.ts` 的
+`getStorage()`,别自己直接写 `window.localStorage`。**
+
+### 五、给人类的确认点
+
+1. **音效数值(`tuning.ts` 的 `AUDIO` 段)完全是拍脑袋定的量级**,没有人耳
+   听过、调过。这一轮只保证「代码逻辑对(速度越快音调越高之类)」,不保证
+   「听着舒服」——这是 CLAUDE.md 里「好玩/好听由人判断」的音频版本,需要人类
+   本地 `npm run dev` 实际听一遍,给具体反馈(太吵/太闷/引擎音音域不对之类)。
+2. **`prefers-reduced-motion` 留给了后续,范围待定**,见上面第二节。
+3. M5 剩下的三块(精选赛道+主题+目标时间、加速带/跳台/隧道段)还没开始。
+
+### 六、构建号
+
+这一轮几个提交会让构建号从 #70 往上涨,以 `git rev-list --count HEAD` 实测
+为准。

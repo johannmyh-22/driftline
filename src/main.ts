@@ -8,13 +8,14 @@ import {
 } from './core/input';
 import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
-import { POST, SKY } from './game/tuning';
+import { AUDIO, POST, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
 import {
   readTelemetry as readVehicleTelemetry,
   setTelemetryEnabled,
 } from './game/diagnostics';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
+import { AudioDirector } from './audio/director';
 import { Hud } from './game/hud';
 import { Menu } from './game/menu';
 import { initPhysics } from './game/physics';
@@ -95,7 +96,8 @@ async function boot(container: HTMLDivElement): Promise<void> {
   renderer.shadowMap.type = PCFSoftShadowMap;
   container.append(renderer.domElement);
 
-  const world = new World(new Rng(seed), courseKind);
+  const rng = new Rng(seed);
+  const world = new World(rng, courseKind);
   // 环境贴图要用渲染器把天空烘出来,所以只能等到这里。烘一次,天空是静态的。
   world.scene.environment = world.atmosphere.buildEnvironment(renderer);
   world.scene.environmentIntensity = SKY.environmentIntensity;
@@ -103,8 +105,8 @@ async function boot(container: HTMLDivElement): Promise<void> {
   /*
    * 幽灵回放:装载这个 seed 上次留下的最佳圈录制(如果有)。
    *
-   * `loadRecord` 内部already respects `setStorageEnabled(!testMode)`(上面
-   * 已经显式调过),测试模式下这里必然拿到 null —— 不需要再判一次 testMode,
+   * `loadRecord` 内部已经会遵守 `setStorageEnabled(!testMode)`(上面已经
+   * 显式调过),测试模式下这里必然拿到 null —— 不需要再判一次 testMode,
    * 存储层的开关本身就是那道闸。
    */
   if (world.ghost !== null) {
@@ -124,6 +126,12 @@ async function boot(container: HTMLDivElement): Promise<void> {
   const source = keyboard ?? scripted;
   const frame: InputFrame = createInputFrame();
   const readout = testMode ? null : new Hud(container, seed, world.track, world.race);
+  /*
+   * 程序化音频。测试模式不构造:`?test=1` 下没有真实用户手势,
+   * `AudioContext` 起不来,建了也是空跑。`rng.fork()` 排在 World 已经
+   * 消耗完的那些 fork 之后,不影响赛道/地形/配色的既有随机数序列。
+   */
+  const audio = testMode ? null : new AudioDirector(rng.fork());
 
   // 首帧画完才在 DOM 上打标记。SwiftShader 上一帧要一秒以上,「canvas 元素出现」
   // 远早于「画面上有东西」—— 冒烟测试拿前者当后者用,后处理一接上就开始拍到空白。
@@ -134,6 +142,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
       // 每个固定步采一次输入:采样频率和物理步长绑死,回放才可能逐帧复现。
       source.sample(frame);
       world.update(frame, dt);
+      audio?.update(world.vehicle, frame);
     },
     render: (alpha) => {
       world.present(alpha);
@@ -169,23 +178,40 @@ async function boot(container: HTMLDivElement): Promise<void> {
    */
   let menu: Menu | null = null;
   if (!testMode) {
-    menu = new Menu(container, seed, {
-      onResume: () => {
-        menu?.hide();
-        loop.start();
+    menu = new Menu(
+      container,
+      seed,
+      { volume: audio?.masterVolume ?? AUDIO.masterVolume, muted: audio?.muted ?? false },
+      {
+        onResume: () => {
+          audio?.triggerUiClick();
+          menu?.hide();
+          loop.start();
+        },
+        onRestart: () => {
+          audio?.triggerUiClick();
+          world.spawnAtStart();
+          world.chase.snapTo(world.vehicle);
+          menu?.hide();
+          loop.start();
+        },
+        onChangeSeed: (newSeed) => {
+          const url = new URL(window.location.href);
+          url.searchParams.set('seed', String(newSeed));
+          window.location.href = url.toString();
+        },
+        onVolumeChange: (volume) => {
+          audio?.setMasterVolume(volume);
+        },
+        onToggleMute: () => {
+          if (audio === null) {
+            return;
+          }
+          audio.setMuted(!audio.muted);
+          menu?.setMuted(audio.muted);
+        },
       },
-      onRestart: () => {
-        world.spawnAtStart();
-        world.chase.snapTo(world.vehicle);
-        menu?.hide();
-        loop.start();
-      },
-      onChangeSeed: (newSeed) => {
-        const url = new URL(window.location.href);
-        url.searchParams.set('seed', String(newSeed));
-        window.location.href = url.toString();
-      },
-    });
+    );
 
     window.addEventListener('keydown', (event) => {
       if (event.code !== 'Escape') {
@@ -200,6 +226,18 @@ async function boot(container: HTMLDivElement): Promise<void> {
         loop.stop();
       }
     });
+
+    /*
+     * 浏览器自动播放策略:AudioContext 造出来是 suspended 的,必须等一次
+     * 真实用户手势才会真正出声。只需要成功一次,监听器自己摘掉自己。
+     */
+    const resumeAudioOnce = (): void => {
+      audio?.resume();
+      window.removeEventListener('keydown', resumeAudioOnce);
+      window.removeEventListener('pointerdown', resumeAudioOnce);
+    };
+    window.addEventListener('keydown', resumeAudioOnce);
+    window.addEventListener('pointerdown', resumeAudioOnce);
   }
 
   if (testMode) {

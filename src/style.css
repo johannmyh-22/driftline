@@ -338,6 +338,19 @@ body {
   font-size: 0.82rem;
 }
 
+.menu-volume-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: 0.35rem;
+}
+
+.menu-volume-input {
+  flex: 1;
+  min-width: 0;
+  accent-color: #38bdf8;
+}
+
 .menu-help {
   margin: 0;
   font-size: 0.7rem;

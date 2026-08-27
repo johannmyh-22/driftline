@@ -879,6 +879,54 @@ export const TIRE = {
 export const REFERENCE_TOP_SPEED = 88;
 
 /**
+ * 程序化音频(M5)。全部由振荡器/噪声缓冲 + 包络合成,零音频文件。
+ *
+ * 参数按「引擎音」「气流噪声」「撞击音」「UI 音」四段分组,和
+ * `src/audio/` 下的四个合成器一一对应。
+ */
+export const AUDIO = {
+  /** 默认主音量(0..1)。存在 localStorage,人类调过之后不会被这个值覆盖。 */
+  masterVolume: 0.55,
+
+  /*
+   * 引擎音:锯齿波过一个随速度调制的低通滤波器,不是采样循环。
+   * 频率区间按参考极速(REFERENCE_TOP_SPEED)线性映射,不是真实发动机转速表——
+   * 这台车没有变速箱模型,目标只是「踩深油门音调会往上走」这个直觉。
+   */
+  engineIdleFreq: 62,
+  engineMaxFreq: 210,
+  /** 怠速(松油门、低速)的基础音量和滑行时的音量,后者略高才有「引擎在转」的感觉。 */
+  engineIdleGain: 0.04,
+  engineMaxGain: 0.16,
+  /** 低通滤波器截止频率区间(Hz):低速沉闷,高速透亮,模拟排气声的高频分量。 */
+  engineFilterIdleFreq: 350,
+  engineFilterMaxFreq: 2600,
+  /** 参数平滑时间常数(秒)。太短会在每帧的阶跃处出咔哒声。 */
+  engineSmoothing: 0.08,
+
+  /** 气流噪声:一段预生成的白噪声循环,过低通滤波器,音量和滤波截止频率都随速度涨。 */
+  windMaxGain: 0.14,
+  windFilterIdleFreq: 200,
+  windFilterMaxFreq: 4200,
+  windSmoothing: 0.12,
+
+  /*
+   * 撞墙音:一次性的噪声脉冲 + 短促指数衰减包络,强度来自
+   * `Vehicle.wallImpact`(0..1,当帧撞墙强度,没撞是 0)。
+   */
+  impactGain: 0.5,
+  impactDuration: 0.16,
+  impactFilterFreq: 900,
+  /** 强度低于这个阈值的擦碰不出声,免得贴着护栏蹭一路时连续炸耳朵。 */
+  impactMinStrength: 0.05,
+
+  /** UI 音:菜单按钮点击的短促方波脉冲。 */
+  uiClickFreq: 720,
+  uiClickGain: 0.1,
+  uiClickDuration: 0.05,
+} as const;
+
+/**
  * HUD 与小地图的视觉与交互调优参数。
  *
  * 原本在 `src/game/hudTuning.ts`(外包分支为避开并发编辑临时分出去的),
