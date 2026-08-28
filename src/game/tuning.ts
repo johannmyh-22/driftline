@@ -200,6 +200,12 @@ export const CAMERA = {
   fovBase: 62,
   fovGain: 17,
   fovLambda: 3.2,
+  /**
+   * `prefers-reduced-motion` 开启时,`fovGain` 按这个比例收窄(滚转直接清零,
+   * 不在这张表里)。收窄不清零:完全没有 FOV 变化会让人分不清车是不是在加速,
+   * 但大幅度的视野拉伸是常见的前庭刺激来源,两者各退一步。见 `chaseCamera.ts`。
+   */
+  reducedMotionFovScale: 0.3,
 
   /** 相机随偏航角速度产生的轻微滚转。太大就晕。 */
   rollPerYawRate: 0.075,

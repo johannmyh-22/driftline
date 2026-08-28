@@ -2613,5 +2613,68 @@ npm run dev
 ### 状态
 
 M5 现在的范围是:精选赛道(已完成,第二十八节)+ 程序化音频(已完成,第
-二十七节)+ 主音量与 `prefers-reduced-motion`(未做,见上文清单第 5 项)。
+二十七节)+ 主音量(已完成,第二十七节)与 `prefers-reduced-motion`(第
+三十二节把相机这块也补上了,音量/静音那部分本来就有)。
 加速带/跳台/隧道段不再是 M5 的遗留项——不是"以后有空再做",是明确不做了。
+
+---
+
+## 第三十二节:`prefers-reduced-motion` 补上相机滚转/FOV 这块(2026-08)
+
+### 起因:两次核查,两次和交接文字对不上
+
+在处理第三十一节那件事的过程中顺手查了一遍 `prefers-reduced-motion` 的
+实际状态,结果又是一次"交接文字和仓库不一致",不过这次不是"完全没做"而是
+"做了一半没写清楚":
+
+- `src/style.css` 里 `@media (prefers-reduced-motion: reduce)` 这条规则
+  **从 M1(`b79fad3`)就存在**,管的是 HUD 数字的 CSS 过渡(`hud-speed-num`/
+  `hud-delta-badge`/`hud-map-player`),M4 HUD 重做(`8747175`)时跟着重命名
+  过一次类名,一直留到现在。这部分**从来不是"没做"**。
+- 音量/静音也早就做完了(`context.ts`/`director.ts`/`menu.ts`,`6103caf`)。
+- 真正没做的,是第二十七节明确点出来的那一小块:`ChaseCamera` 的滚转/FOV
+  拉伸(第十九、二十节验收过的手感/观感的一部分)完全没有响应这个偏好——
+  这一点第二十七节自己写得很清楚,是准确的,不是错误记录。
+
+**结论**:M5 清单里"`prefers-reduced-motion` 没做"这句话本身没错(它说的
+就是相机这一小块),但读起来容易让人以为整个 `prefers-reduced-motion` 都
+没碰过。这一节把它补完,顺便把措辞理清楚。
+
+### 决定与实现
+
+人类在被问到"M5 剩下哪个"时选了这一项(在处理第三十一节的过程中),方案是
+**只在真的开了操作系统偏好的用户身上生效,默认体验一个像素不变**——这样
+不需要重新问"能不能碰已验收的相机手感",因为压根不改默认路径:
+
+- `src/game/chaseCamera.ts`:加了 `prefersReducedMotion()`,防御式读
+  `window.matchMedia`(仿 `records.ts`/`audio/context.ts` 的 `getStorage()`
+  写法,Node 测试环境没有 `window` 时安全返回 `false`,不抛错)。`ChaseCamera`
+  新增第三个构造参数 `reducedMotion`,默认值就是这个检测函数——调用方
+  (`world.ts`)不用改一行。
+  - 开启后:滚转(`targetRoll`)直接清零,不是缩小——转动画面的这个轴是
+    前庭刺激里最强的一类,没有折中的必要。
+  - FOV 拉伸按 `CAMERA.reducedMotionFovScale = 0.3` 收窄,不清零——完全
+    没有 FOV 变化会让人分不清车是不是在加速,和"减少动效"的本意(降低强度,
+    不是关掉所有速度反馈)不是一回事。
+- `src/game/tuning.ts`:`CAMERA` 加了 `reducedMotionFovScale` 这一个数,
+  带注释说明取舍。
+- `tests/unit/chaseCamera.test.ts`(新文件):四条用例——默认分支高速转弯
+  确实滚转且 FOV 确实拉伸;开启后滚转经过 1 秒结算严格为零(`up.x === 0`,
+  因为 `roll` 从初始 0 出发、目标也钉在 0,没有中间态)且 FOV 拉伸精确按
+  `reducedMotionFovScale` 收窄;不传第三个参数时默认走检测函数,在 vitest
+  的 Node 环境下不抛错;`yawRate = 0` 时哪怕不开偏好也不该有滚转,隔离一下
+  避免误把"没有输入"当成"分支生效"。
+
+### 四道门 + 截图
+
+- `typecheck`:0 错误。
+- `test -- --run`:26 个文件、**272 passed**(基线 261,新增 `chaseCamera.test.ts`
+  4 条 + `noMathRandom.test.ts` 因为新源文件多扫出的用例)。
+- `build`:通过。
+- `test:visual`:**19 passed**,和第三十节持平。
+- `npm run shoot`:看了 `smoke-turn.png`/`smoke-throttle.png` ——headless
+  Chromium 默认 `prefers-reduced-motion: no-preference`,走的是没改过的默认
+  分支,画面和之前一致,没有引入回归。**没有专门截一张"开了偏好之后"的图**——
+  Playwright 没有在这轮跑之前配置 `contextOptions.reducedMotion`,想要视觉
+  确认这条分支本身的话需要人类在浏览器里手动开 `(prefers-reduced-motion:
+  reduce)` 系统偏好后 `npm run dev` 看一眼(转弯时镜头应该不再侧倾)。
