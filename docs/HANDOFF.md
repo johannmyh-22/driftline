@@ -2678,3 +2678,55 @@ M5 现在的范围是:精选赛道(已完成,第二十八节)+ 程序化音频(�
   Playwright 没有在这轮跑之前配置 `contextOptions.reducedMotion`,想要视觉
   确认这条分支本身的话需要人类在浏览器里手动开 `(prefers-reduced-motion:
   reduce)` 系统偏好后 `npm run dev` 看一眼(转弯时镜头应该不再侧倾)。
+
+---
+
+## 第三十三节:人类听感反馈 —— 撞击音不分强度,引擎音"怪"待确认(2026-08)
+
+### 起因
+
+人类在等 PR #13 CI 的时候提了两条听感反馈:「不同速度撞击墙面的声音都
+一样」「引擎声音也有点怪怪的,频率之类的」。这是第二十七节标注的确认点
+之一("音效数值完全是拍脑袋定的,没人耳听过、调过"),第一次拿到真实反馈。
+
+### 撞击音:核查属实,不是主观感受问题,是真 bug
+
+翻 `src/audio/impact.ts` 确认:`playImpact(bus, strength)` 只有 `gain`
+的峰值跟着 `strength` 缩放,振荡器频率(固定 55Hz)、滤波截止频率(固定
+`AUDIO.impactFilterFreq`)、包络时长(固定 `AUDIO.impactDuration`)全是
+常量。轻轻蹭一下和正面高速撞墙,放出来的是**同一个声音,只是音量不同**——
+人类是对的,这不是"听感偏好"层面的意见,是这几个参数从一开始就没跟着
+撞击强度走。
+
+还发现一个旁证:`tuning.ts` 里 `AUDIO.impactGain` 那段的注释写的是
+「撞墙音:一次性的**噪声**脉冲」,但 `impact.ts` 的实际实现从始至终是一个
+纯振荡器(方波),从没用过噪声。这条注释像是最初设计就想做噪声撞击音,
+写完注释之后实现的时候换成了更简单的振荡器,注释没跟着改——两边对不上。
+
+**修的方式**:`impact.ts` 从自由函数改成 `ImpactPlayer` 类(仿 `WindNoise`
+持有一个构造时预生成的噪声缓冲,理由同 `wind.ts`:撞墙可能连续好几帧触发,
+没必要每次都现造一段新随机数据)。现在音高、滤波亮度、衰减时长、噪声混合
+音量四个维度都跟 `strength` 走(新增 `impactToneFreqMin/Max`、
+`impactFilterFreqMin/Max`、`impactDurationMin/Max`、`impactNoiseGain`、
+`impactNoiseDuration`,见 `tuning.ts` AUDIO 段),同时把 `tuning.ts` 那条
+过时注释改成和实现一致。`AudioDirector` 里 `wind`/`impact` 各自 `rng.fork()`
+一份(以前只有 `wind` 用 `rng`,现在两个消费者不能共用同一条随机数流)。
+
+`tests/unit/audio.test.ts` 里 `describe('playImpact', …)` 换成
+`describe('ImpactPlayer', …)`,新断言四个维度都随强度变化,不再只测
+音量。四道门:`typecheck` 0 错误,`test -- --run` 274 passed(基线 272,
++2)。`build` 通过。这次改动不涉及画面,没有额外跑 `test:visual`/`shoot`——
+PR #13 的 CI 会跑到,不重复劳动。
+
+### 引擎音:找到一个有依据的候选问题,但没法自己验证,还在等人类确认
+
+`src/audio/engine.ts` 里频率只跟 `speed01` 走(`lerp(engineIdleFreq,
+engineMaxFreq, speed01)`),`throttle` 只影响音量(`throttleFactor`),完全
+不影响音高。这意味着:定速滑行时深踩一脚油门,声音只会变响,音高纹丝不动;
+松开油门高速滑行,音高照样钉在跟车速对应的高位。真实发动机不是这样——
+给油门时转速会先于车速往上蹿(尤其起步瞬间),松油门滑行时转速会往怠速
+方向掉,不管车速多少。这可能是"频率怪"的一个来源,但只是一个候选,不是
+确诊——**没法靠读代码确认"怪"具体怪在哪**(音域太窄?太像蜂鸣器?音色单薄?
+还是真的就是这个"不跟给油联动"的问题?),CLAUDE.md 明确这条归人耳判断,
+贸然改了猜不中还可能改差。已经在对话里问人类确认,这一节先记下候选原因和
+没动代码的理由,等回复。

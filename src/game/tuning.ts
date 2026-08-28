@@ -941,12 +941,28 @@ export const AUDIO = {
   windSmoothing: 0.12,
 
   /*
-   * 撞墙音:一次性的噪声脉冲 + 短促指数衰减包络,强度来自
+   * 撞墙音:低频"闷响"(方波振荡器,车身撞击的实体感)+ 噪声"碎裂"分量
+   * (预生成白噪声过滤波器,金属/护栏刮蹭的粗糙质感)叠加,强度来自
    * `Vehicle.wallImpact`(0..1,当帧撞墙强度,没撞是 0)。
+   *
+   * 早期版本只有音量随强度变化,音高/滤波亮度/时长全部是常数——轻轻蹭一下
+   * 和正面高速撞墙听起来是同一个声音只是音量不同,人耳一听就能分辨出来,
+   * 不像真的撞击。现在音高、亮度、衰减时长、噪声混合量四个维度都跟强度走。
    */
   impactGain: 0.5,
-  impactDuration: 0.16,
-  impactFilterFreq: 900,
+  /** 音高区间(Hz):强度越大,方波音调越高——更硬的一声"哐"而不只是更响。 */
+  impactToneFreqMin: 42,
+  impactToneFreqMax: 85,
+  /** 低通滤波截止频率区间(Hz):强度越大越亮/越炸,轻碰是闷的,正面撞墙是脆的。 */
+  impactFilterFreqMin: 500,
+  impactFilterFreqMax: 2400,
+  /** 衰减时长区间(秒):强度越大,余振拖得越久。 */
+  impactDurationMin: 0.1,
+  impactDurationMax: 0.22,
+  /** 噪声分量的峰值音量(再乘强度),轻碰时噪声接近零,只剩闷响。 */
+  impactNoiseGain: 0.35,
+  /** 噪声分量固定用这么长的一小段包络——"碎裂"是瞬态,拖长了会变成嘶嘶声。 */
+  impactNoiseDuration: 0.07,
   /** 强度低于这个阈值的擦碰不出声,免得贴着护栏蹭一路时连续炸耳朵。 */
   impactMinStrength: 0.05,
 
