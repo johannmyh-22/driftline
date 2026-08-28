@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
 import { AudioBus } from '../../src/audio/context';
 import { EngineSound } from '../../src/audio/engine';
-import { playImpact } from '../../src/audio/impact';
+import { ImpactPlayer } from '../../src/audio/impact';
 import { createNoiseBuffer } from '../../src/audio/noise';
 import { playUiClick } from '../../src/audio/ui';
 import { WindNoise } from '../../src/audio/wind';
@@ -95,6 +95,7 @@ class FakeBufferSourceNode extends FakeAudioNode {
   loop = false;
   started = false;
   stopped = false;
+  private endedHandler: (() => void) | null = null;
 
   start(): void {
     this.started = true;
@@ -102,6 +103,13 @@ class FakeBufferSourceNode extends FakeAudioNode {
 
   stop(): void {
     this.stopped = true;
+    this.endedHandler?.();
+  }
+
+  addEventListener(type: string, handler: () => void): void {
+    if (type === 'ended') {
+      this.endedHandler = handler;
+    }
   }
 }
 
@@ -284,6 +292,46 @@ describe('EngineSound', () => {
     expect(coastGain).toBeGreaterThan(0);
     expect(coastGain).toBeLessThan(fullGain);
   });
+
+  it('同速度下深踩油门音高也会跟着涨,不再只是音量变化', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus);
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+
+    engine.update(0.4, 0, bus.context);
+    const coastFreq = osc.frequency.value;
+    engine.update(0.4, 1, bus.context);
+    const throttleFreq = osc.frequency.value;
+
+    expect(throttleFreq).toBeGreaterThan(coastFreq);
+  });
+
+  it('高速滑行(松油门)音高比同速度地板油低——转速代理不是纯跟车速走', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus);
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+
+    engine.update(1, 0, bus.context);
+    const coastFreq = osc.frequency.value;
+    engine.update(1, 1, bus.context);
+    const fullFreq = osc.frequency.value;
+
+    expect(coastFreq).toBeLessThan(fullFreq);
+    expect(coastFreq).toBeGreaterThan(0);
+  });
+
+  it('第二个失谐振荡器跟着主振荡器的频率走,但按 engineDetuneRatio 略微偏高', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus);
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+    const oscDetune = (engine as unknown as { oscDetune: FakeOscillatorNode }).oscDetune;
+    const detuneGain = (engine as unknown as { detuneGain: FakeGainNode }).detuneGain;
+
+    engine.update(0.7, 0.5, bus.context);
+
+    expect(oscDetune.frequency.value).toBeCloseTo(osc.frequency.value * AUDIO.engineDetuneRatio, 5);
+    expect(detuneGain.gain.value).toBeCloseTo(AUDIO.engineDetuneMix, 5);
+  });
 });
 
 describe('WindNoise', () => {
@@ -303,7 +351,7 @@ describe('WindNoise', () => {
   });
 });
 
-describe('playImpact', () => {
+describe('ImpactPlayer', () => {
   it('强度低于阈值不发声', () => {
     const { bus, context } = makeBus();
     const before = context.createOscillator.bind(context);
@@ -312,20 +360,54 @@ describe('playImpact', () => {
       calls++;
       return before();
     };
-    playImpact(bus, AUDIO.impactMinStrength - 0.01);
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    impact.play(AUDIO.impactMinStrength - 0.01);
     expect(calls).toBe(0);
   });
 
-  it('强度高于阈值时创建振荡器并播放,峰值随强度缩放', () => {
+  it('强度高于阈值时同时播放音调和噪声两个分量', () => {
     const { bus, context } = makeBus();
     const oscillators: FakeOscillatorNode[] = [];
+    const buffers: FakeBufferSourceNode[] = [];
+    const originalOsc = context.createOscillator.bind(context);
+    const originalBuf = context.createBufferSource.bind(context);
+    context.createOscillator = () => {
+      const osc = originalOsc();
+      oscillators.push(osc);
+      return osc;
+    };
+    context.createBufferSource = () => {
+      const src = originalBuf();
+      buffers.push(src);
+      return src;
+    };
+
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    impact.play(0.8);
+
+    expect(oscillators.length).toBe(1);
+    expect(oscillators[0]?.started).toBe(true);
+    expect(buffers.length).toBe(1);
+    expect(buffers[0]?.started).toBe(true);
+  });
+
+  it('音高、滤波亮度、时长、噪声音量四个维度都随强度缩放,不只是音量', () => {
+    const { bus, context } = makeBus();
+    const oscillators: FakeOscillatorNode[] = [];
+    const toneFilters: FakeBiquadFilterNode[] = [];
     const gains: FakeGainNode[] = [];
     const originalOsc = context.createOscillator.bind(context);
+    const originalFilter = context.createBiquadFilter.bind(context);
     const originalGain = context.createGain.bind(context);
     context.createOscillator = () => {
       const osc = originalOsc();
       oscillators.push(osc);
       return osc;
+    };
+    context.createBiquadFilter = () => {
+      const filter = originalFilter();
+      toneFilters.push(filter);
+      return filter;
     };
     context.createGain = () => {
       const gain = originalGain();
@@ -333,15 +415,43 @@ describe('playImpact', () => {
       return gain;
     };
 
-    playImpact(bus, 0.5);
-    playImpact(bus, 1);
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    impact.play(0.3);
+    impact.play(1);
 
-    expect(oscillators.length).toBe(2);
-    expect(oscillators[0]?.started).toBe(true);
-    // 峰值应正比于强度(钳到 1):第二次(强度 1)比第一次(强度 0.5)响。
-    const firstPeak = gains[0]?.gain.valueAtTimeCalls[0]?.value ?? 0;
-    const secondPeak = gains[1]?.gain.valueAtTimeCalls[0]?.value ?? 0;
-    expect(secondPeak).toBeGreaterThan(firstPeak);
+    // 每次 play() 建 2 个振荡器等价物(方波 osc)？不——只有 1 个 osc,但有 2 个
+    // filter(音调+噪声各一个)和 2 个 gain(音调+噪声各一个)。按调用顺序切片。
+    const [lowFreq, highFreq] = [oscillators[0]?.frequency.value, oscillators[1]?.frequency.value];
+    expect(highFreq).toBeGreaterThan(lowFreq ?? 0);
+
+    const [lowBrightness, highBrightness] = [
+      toneFilters[0]?.frequency.value,
+      toneFilters[2]?.frequency.value,
+    ];
+    expect(highBrightness).toBeGreaterThan(lowBrightness ?? 0);
+
+    // gains 数组顺序: [toneGain(强度0.3), noiseGain(强度0.3), toneGain(强度1), noiseGain(强度1)]
+    const lowTonePeak = gains[0]?.gain.valueAtTimeCalls[0]?.value ?? 0;
+    const highTonePeak = gains[2]?.gain.valueAtTimeCalls[0]?.value ?? 0;
+    expect(highTonePeak).toBeGreaterThan(lowTonePeak);
+    const lowNoisePeak = gains[1]?.gain.valueAtTimeCalls[0]?.value ?? 0;
+    const highNoisePeak = gains[3]?.gain.valueAtTimeCalls[0]?.value ?? 0;
+    expect(highNoisePeak).toBeGreaterThan(lowNoisePeak);
+
+    // 衰减时长(ramp 的目标时间)也随强度变长。
+    const lowDurationEnd = gains[0]?.gain.rampCalls[0]?.time ?? 0;
+    const highDurationEnd = gains[2]?.gain.rampCalls[0]?.time ?? 0;
+    expect(highDurationEnd).toBeGreaterThan(lowDurationEnd);
+  });
+
+  it('同一个 seed 构造出的噪声缓冲是确定性的', () => {
+    const { bus: busA } = makeBus();
+    const { bus: busB } = makeBus();
+    const a = new ImpactPlayer(busA, new Rng(9));
+    const b = new ImpactPlayer(busB, new Rng(9));
+    const bufferA = (a as unknown as { noiseBuffer: FakeAudioBuffer }).noiseBuffer;
+    const bufferB = (b as unknown as { noiseBuffer: FakeAudioBuffer }).noiseBuffer;
+    expect(Array.from(bufferA.getChannelData(0))).toEqual(Array.from(bufferB.getChannelData(0)));
   });
 });
 

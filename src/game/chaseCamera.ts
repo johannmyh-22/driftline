@@ -16,6 +16,22 @@ const AXIS_Z = new Vector3(0, 0, 1);
 const rollQuat = new Quaternion();
 
 /**
+ * 读操作系统的「减少动态效果」偏好。**不能直接写 `window.matchMedia`**——
+ * 单测跑在 Node 环境下没有 `window`,直接引用会抛 `ReferenceError`;仿照
+ * `records.ts`/`audio/context.ts` 的 `getStorage()` 写法防御式处理。
+ */
+function prefersReducedMotion(): boolean {
+  try {
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
  * 跟随相机。
  *
  * 三样东西共同制造速度感,缺一个都会「快但不觉得快」:位置弹簧(加速时
@@ -24,12 +40,19 @@ const rollQuat = new Quaternion();
  *
  * 状态在固定步里推进(保证同 seed 同输入 → 同一帧画面),渲染时再用
  * `present(alpha)` 插值,所以高刷新率下也不会看到 60Hz 的台阶。
+ *
+ * `reducedMotion` 默认读 `prefers-reduced-motion` 操作系统偏好,只影响开了
+ * 这个偏好的用户:滚转(转动画面的轴,前庭刺激最强)完全关掉,FOV 拉伸按
+ * `CAMERA.reducedMotionFovScale` 收窄但不清零(仍要看得出「快了」)。默认
+ * 关闭这个偏好的用户画面一个像素不变——已验收的手感/观感(第十九、二十节)
+ * 不受影响。
  */
 export class ChaseCamera {
   readonly camera: PerspectiveCamera;
 
   private readonly field: GroundQuery;
   private readonly hit: GroundHit = createGroundHit();
+  private readonly reducedMotion: boolean;
 
   private readonly position = new Vector3();
   private readonly look = new Vector3();
@@ -41,8 +64,9 @@ export class ChaseCamera {
   private prevFov: number = CAMERA.fovBase;
   private prevRoll = 0;
 
-  constructor(field: GroundQuery, aspect = 16 / 9) {
+  constructor(field: GroundQuery, aspect = 16 / 9, reducedMotion = prefersReducedMotion()) {
     this.field = field;
+    this.reducedMotion = reducedMotion;
     this.camera = new PerspectiveCamera(CAMERA.fovBase, aspect, 0.1, 3000);
   }
 
@@ -72,13 +96,16 @@ export class ChaseCamera {
     }
 
     const speed01 = normalize01(vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED);
-    this.fov = damp(this.fov, CAMERA.fovBase + CAMERA.fovGain * speed01, CAMERA.fovLambda, dt);
+    const fovGain = this.reducedMotion ? CAMERA.fovGain * CAMERA.reducedMotionFovScale : CAMERA.fovGain;
+    this.fov = damp(this.fov, CAMERA.fovBase + fovGain * speed01, CAMERA.fovLambda, dt);
 
-    const targetRoll = clamp(
-      -vehicle.yawRate * CAMERA.rollPerYawRate * (0.35 + speed01),
-      -CAMERA.rollMax,
-      CAMERA.rollMax,
-    );
+    const targetRoll = this.reducedMotion
+      ? 0
+      : clamp(
+          -vehicle.yawRate * CAMERA.rollPerYawRate * (0.35 + speed01),
+          -CAMERA.rollMax,
+          CAMERA.rollMax,
+        );
     this.roll = damp(this.roll, targetRoll, CAMERA.rollLambda, dt);
   }
 
