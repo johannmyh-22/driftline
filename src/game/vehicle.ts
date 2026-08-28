@@ -335,7 +335,26 @@ export class Vehicle {
     this.physics.setVelocity(this.body, 0, 0, 0, 0, 0, 0);
   }
 
+  /**
+   * 单车玩法用的组合入口:`applyForces()` → `physics.step()` → `readState()`
+   * 原样拼起来,行为和拆分之前完全一致。M7 多车共享同一个 `Physics` 世界时
+   * 不走这个方法——所有车各自 `applyForces()`,由 `World`(或未来的赛事
+   * 编排层)统一调一次 `physics.step()`,再各自 `readState()`,不能让每辆车
+   * 都各自 step 把世界重复推进。见 `applyForces()`/`readState()` 的类注释。
+   */
   update(input: InputFrame, dt: number): void {
+    this.applyForces(input, dt);
+    this.physics.step();
+    this.readState(dt);
+  }
+
+  /**
+   * 施加这一步所有的力/力矩(悬挂、轮胎、气动)。**调用方必须紧跟着调一次
+   * `physics.step()`,再调 `readState()`** ——拆成三段就是为了让 `step()`
+   * 能被外部统一调度(见 `update()` 的类注释),这个方法本身不读回、不推进
+   * 物理世界。
+   */
+  applyForces(input: InputFrame, dt: number): void {
     // 先清掉上一步的力:Rapier 的 addForce 是持续力,不清会逐帧累加成指数爆炸。
     this.physics.resetForces(this.body);
     // 清空上一帧的遥测缓冲,免得「上一帧接地、这一帧离地」的轮子残留旧数据。
@@ -777,8 +796,14 @@ export class Vehicle {
     }
 
     this.applyAero();
-    this.physics.step();
+  }
 
+  /**
+   * `physics.step()` 之后读回刚体状态、解墙碰撞、写遥测帧。**调用方必须先
+   * 调过 `applyForces()` 和一次 `physics.step()`,否则读到的是上一步的状态。**
+   * 见 `update()`/`applyForces()` 的类注释。
+   */
+  readState(dt: number): void {
     this.physics.read(this.body, this.state);
     this.writeBack();
     this.resolveWall(dt);

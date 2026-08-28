@@ -178,7 +178,17 @@ export class World {
       this.recorder.record(this.input);
     }
 
-    this.vehicle.update(this.input, dt);
+    /*
+     * 拆成 applyForces() → physics.step() → readState() 三段而不是调
+     * this.vehicle.update(),是 M7(多车共享同一个 Physics 世界)的落地
+     * 准备:这里目前只有一辆车,行为和调 update() 完全一样,但把 step()
+     * 的调度权交给了 World——以后加第二辆车时,只需要把这三行改成
+     * 「所有车 applyForces() → 一次 physics.step() → 所有车 readState()」,
+     * 不用再动 Vehicle 内部。见 vehicle.ts 的 update()/applyForces() 类注释。
+     */
+    this.vehicle.applyForces(this.input, dt);
+    this.physics.step();
+    this.vehicle.readState(dt);
 
     const lapsBefore = this.race?.laps ?? 0;
     this.race?.update(this.vehicle, dt);

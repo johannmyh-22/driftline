@@ -2763,3 +2763,71 @@ engineMaxFreq, speed01)`),`throttle` 只影响音量(`throttleFactor`),完全
 没有任何工具能让我"听"音频,`npm run dev` 需要人类在真实浏览器里打开。
 提交前只能确认合成公式的方向对(该涨的涨了、该跟的跟了),不能确认"好听"。
 这是 CLAUDE.md「人类验收点」的音频版本,还是需要人类实际听一遍反馈。
+
+---
+
+## 第三十四节:M7 第一块——把 `physics.step()` 从 `Vehicle.update()` 搬出来(2026-08)
+
+### 起因
+
+PR #13 合并、M5 正式收尾之后,人类说"好了之后可以继续做",睡前又交代
+"不要问问题、按判断做、保证用完额度前先提交"。M7 架构草案(`docs/PLAN.md`
+第 98-120 行)自己点出了最容易出错的一块:多车共享同一个 `Physics` 世界
+和 `Ghost` 的独立世界方案正好相反,`physics.step()` 大概率要从
+`Vehicle.update()` 里搬出来,变成 `World` 每帧显式调一次。这一节做的就是
+这一件事——**只做这一件事**,不牵连 AI 逻辑、赛制、HUD 名次这些还没设计
+的部分,理由和这一轮的额度交代一致:先把最容易出错、影响面最大的地基做对、
+验证过,再往上叠。
+
+### 现状核实:为什么这是真问题,不是臆测
+
+`ghost.ts` 第 27-29 行的类注释已经把机制写得很清楚:`Vehicle.update()`
+内部调一次 `physics.step()`;如果两辆车共用同一个 Rapier `World`,
+`World.update()` 里对每辆车各调一次 `vehicle.update()`,这个世界一帧内就
+被推进了两次,等于游戏在跑二倍速物理。这就是为什么 `Ghost` 现在造了一个
+自己的、独立的 `Physics` 实例(`this.physics = new Physics()`)而不是复用
+玩家的世界——不是为了"车与车不该碰撞"这个产品决策(那是对的,幽灵确实不该
+被撞),而是**没有别的办法让两个 `Vehicle.update()` 共存于同一个世界**。
+M7 要多车真碰撞,这条路走不通,必须先把 `step()` 的调度权拿出来。
+
+### 改动:三段拆分,单车行为原样保留
+
+`src/game/vehicle.ts`:`update(input, dt)` 从"一个大函数"拆成三段:
+
+- `applyForces(input, dt)`:原来 `update()` 里 `physics.step()` **之前**的
+  全部内容(清力、悬挂采样、轮胎力求解、气动力),不读回、不推进物理世界。
+- （物理世界推进——不再是 `Vehicle` 的方法,由调用方决定什么时候调
+  `physics.step()`。）
+- `readState(dt)`:原来 `update()` 里 `physics.step()` **之后**的全部内容
+  (读回刚体状态、`writeBack()`、`resolveWall()`、遥测帧提交)。
+- `update(input, dt)` 现在只是三行:`applyForces()` → `physics.step()` →
+  `readState()`,原样拼起来——**任何现有调用方(`Ghost`、单测、
+  `drift-probe.ts`/`curate-tracks.ts` 这些脚本)一个字都不用改**,行为和
+  拆分之前完全一致,因为执行顺序没有变,只是把同一段代码从一个方法体搬进
+  了三个方法体。
+
+`src/game/world.ts`:玩家这条路径不再调 `vehicle.update()`,改成显式的
+`vehicle.applyForces() → this.physics.step() → vehicle.readState()` 三行,
+证明"外部调度 `step()`"这条路真的走得通,而不只是 `Vehicle` 里多出来两个
+没人用的方法。**这一步之后,`World` 有且仅有一辆车,行为必须和调
+`update()` 完全一样**——这是本轮验证的核心断言。
+
+### 验证:确定性基准值没有变
+
+`tests/unit/physics.test.ts` 钉的那组基准值(CLAUDE.md 明确写了"这条测试
+哪天红了不要放宽它,只有求解器动过一种可能")跑过了,连同 `vehicle.test.ts`
+`grip.test.ts`/`gripFlat.test.ts`/`diagnostics.test.ts`/`race.test.ts`/
+`raceTiming.test.ts` 这些依赖车辆物理的文件,共 50 条,全部原样通过——
+拆分前后对单车路径是**行为完全等价**的重构,不是"应该等价",是测出来的。
+
+四道门:`typecheck` 0 错误;`test -- --run` 277 passed(和 PR #13 合并后
+持平,这一轮没加新用例,是纯重构,靠已有的基准值测试守住);`build` 通过;
+`test:visual` 见下方结果。
+
+### 下一步(没在这一轮做)
+
+这一节只解决了"`step()` 能被外部统一调度"这一件事。M7 剩下的、体量更大的
+部分(AI 车辆生成、多车 `applyForces()`/`readState()` 循环、车间碰撞响应、
+发车队形、名次计算、终点结算、HUD 加名次)一个字都没动——按人类"睡前交代
+不要用完额度"的要求,这一轮先把地基这一块做完、验证过、提交上去,不在
+同一轮里往上叠更多没验证过的东西。
