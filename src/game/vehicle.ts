@@ -210,6 +210,8 @@ export class Vehicle {
       width: CAR.bodyWidth,
       height: CAR.bodyHeight,
       length: CAR.bodyLength,
+      restitution: CAR.collisionRestitution,
+      friction: CAR.collisionFriction,
     });
 
     const halfBase = CAR.wheelBase / 2;

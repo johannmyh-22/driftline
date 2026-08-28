@@ -533,6 +533,17 @@ export const CAR = {
   bodyHeight: 1.1,
   bodyLength: 4.2,
 
+  /**
+   * 车间碰撞的弹性/摩擦系数(M7,车与车共享同一个 Physics 世界之后才用得到)。
+   *
+   * 按真实车身接触的量级估:保险杠和覆盖件相碰不怎么弹,restitution 取低值;
+   * 车身蹭着车身有摩擦但不该咬死打转,friction 取中等值。**没有实测,是
+   * 估的**——撞车手感和甩尾手感同一类,只有人能判断像不像,这两个数字
+   * 需要人类实际撞一次确认。
+   */
+  collisionRestitution: 0.15,
+  collisionFriction: 0.35,
+
   /** 轴距与轮距(米)。 */
   wheelBase: 2.6,
   trackWidth: 1.6,
