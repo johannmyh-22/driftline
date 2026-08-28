@@ -292,6 +292,46 @@ describe('EngineSound', () => {
     expect(coastGain).toBeGreaterThan(0);
     expect(coastGain).toBeLessThan(fullGain);
   });
+
+  it('同速度下深踩油门音高也会跟着涨,不再只是音量变化', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus);
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+
+    engine.update(0.4, 0, bus.context);
+    const coastFreq = osc.frequency.value;
+    engine.update(0.4, 1, bus.context);
+    const throttleFreq = osc.frequency.value;
+
+    expect(throttleFreq).toBeGreaterThan(coastFreq);
+  });
+
+  it('高速滑行(松油门)音高比同速度地板油低——转速代理不是纯跟车速走', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus);
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+
+    engine.update(1, 0, bus.context);
+    const coastFreq = osc.frequency.value;
+    engine.update(1, 1, bus.context);
+    const fullFreq = osc.frequency.value;
+
+    expect(coastFreq).toBeLessThan(fullFreq);
+    expect(coastFreq).toBeGreaterThan(0);
+  });
+
+  it('第二个失谐振荡器跟着主振荡器的频率走,但按 engineDetuneRatio 略微偏高', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus);
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+    const oscDetune = (engine as unknown as { oscDetune: FakeOscillatorNode }).oscDetune;
+    const detuneGain = (engine as unknown as { detuneGain: FakeGainNode }).detuneGain;
+
+    engine.update(0.7, 0.5, bus.context);
+
+    expect(oscDetune.frequency.value).toBeCloseTo(osc.frequency.value * AUDIO.engineDetuneRatio, 5);
+    expect(detuneGain.gain.value).toBeCloseTo(AUDIO.engineDetuneMix, 5);
+  });
 });
 
 describe('WindNoise', () => {
