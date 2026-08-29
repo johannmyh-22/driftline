@@ -15,6 +15,7 @@ import {
 } from './diagnostics';
 import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
 import { CarCondition } from './condition';
+import { Gearbox } from './gearbox';
 
 // 每帧路径上的临时量,全部提到模块作用域复用。60Hz 下新建 Vector3 的 GC 抖动看得见。
 const chassisUp = new Vector3();
@@ -219,6 +220,11 @@ export class Vehicle {
    * 由 `World.spawnAtStart()` 显式调 `condition.reset()`。
    */
   readonly condition = new CarCondition();
+  /**
+   * 变速箱。**和音频层那套同名的东西不是一回事** —— 那个只生成转速锯齿不回写
+   * 物理,这个决定车轮上到底有多少力矩(见 `gearbox.ts` 的类注释)。
+   */
+  readonly gearbox = new Gearbox();
   /** `applyForces` 存下的刹车输入,给 `readState` 里的车况更新用。 */
   private lastBrakeInput = 0;
   /**
@@ -565,8 +571,15 @@ export class Vehicle {
     const I = CAR.wheelInertia;
     const invDt = 1 / dt;
     const CI = I * invDt;
+    /*
+     * 驱动力矩过一遍变速箱:恒定力矩是「踩下去永远一个劲」那种电动车手感的
+     * 来源,真实内燃机的轮上力矩由「扭矩曲线 × 齿比」决定,换挡还会短暂断动力。
+     * 用后轴平均轮速反推发动机转速。
+     */
+    const rearSpin = (Math.abs(this.wheels[2]?.spin ?? 0) + Math.abs(this.wheels[3]?.spin ?? 0)) / 2;
+    const gearScale = this.gearbox.update(rearSpin, input.throttle, dt);
     const throttleTorque =
-      input.throttle * CAR.driveTorque * this.condition.powerScale -
+      gearScale * CAR.driveTorque * this.condition.powerScale -
       input.reverse * CAR.driveTorque * CAR.reverseTorqueScale * this.condition.powerScale;
 
     // 驱动/差速计算: 后轴左右轮耦合求解

@@ -1076,6 +1076,33 @@ export const CONDITION = {
   damagePowerLoss: 0.35,
 } as const;
 
+/**
+ * 变速箱(物理层)。**和 `audio/engine.ts` 里那套不是一回事** —— 那个是纯
+ * 显示层的,读车速自己算挡位只为生成转速锯齿,不回写物理;这个决定车轮上
+ * 到底有多少力矩。
+ *
+ * `torqueScale` 是标定出来的,让加了变速箱之后的 0-100 尽量贴住原来的
+ * 3.62 秒:齿比会放大扭矩,不重新归一化的话车会快得离谱。
+ */
+export const GEARBOX = {
+  /** 六个前进挡的齿比。越往后越密,和真实变速箱一致。 */
+  ratios: [3.35, 2.18, 1.6, 1.24, 1.0, 0.83],
+  finalDrive: 3.45,
+  idleRpm: 900,
+  peakRpm: 5200,
+  redlineRpm: 7200,
+  /** 升挡/降挡转速。分开留回滞,否则会在换挡点附近来回抖。 */
+  upshiftRpm: 6900,
+  downshiftRpm: 2600,
+  /** 换挡耗时(秒),这段时间动力被切断。真车双离合大约 0.1~0.2 秒。 */
+  shiftTime: 0.14,
+  /** 扭矩曲线两端的相对值(峰值恒为 1)。 */
+  idleTorque: 1.0,
+  redlineTorque: 0.78,
+  /** 轮上力矩的总体归一化系数,见上面的说明。 */
+  torqueScale: 0.15,
+} as const;
+
 export const REFERENCE_TOP_SPEED = 60.3;
 
 /**
