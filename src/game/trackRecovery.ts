@@ -1,5 +1,5 @@
 import type { TrackLayout } from './trackLayout';
-import { TRACK } from './tuning';
+import { RACING_AI, TRACK } from './tuning';
 import type { Vehicle } from './vehicle';
 
 /**
@@ -19,15 +19,25 @@ export class TrackRecovery {
   offTrackTime = 0;
   /** 累计被拉回来几次。 */
   resets = 0;
+  /** 连续几乎不动了多久(秒)。只在开了 `detectStall` 时累计。 */
+  stalledTime = 0;
 
   private readonly layout: TrackLayout;
+  private readonly detectStall: boolean;
 
-  constructor(layout: TrackLayout) {
+  /**
+   * `detectStall` 只给 AI 开。玩家在赛道上停着是合法操作(看风景、等发车),
+   * 把玩家传送走会非常突兀;AI 则**没有自救手段** —— `RacingPilot` 从不挂
+   * 倒挡,顶在墙上就永远出不来。
+   */
+  constructor(layout: TrackLayout, options: { detectStall?: boolean } = {}) {
     this.layout = layout;
+    this.detectStall = options.detectStall === true;
   }
 
   reset(): void {
     this.offTrackTime = 0;
+    this.stalledTime = 0;
     this.resets = 0;
   }
 
@@ -39,6 +49,23 @@ export class TrackRecovery {
    * 返回这一帧是否真的把车放回去了。
    */
   update(vehicle: Vehicle, dt: number, respawnArc: number): boolean {
+    /*
+     * 卡住:**不出界也可能卡死**。实测 seed 107 的 AI 会顶在护墙上,出界判定
+     * 一次都不成立(出界帧 0、回收 0 次),而车速 0 持续了 230 秒。只看出界
+     * 的回收对这种情况完全无效。
+     */
+    if (this.detectStall) {
+      if (vehicle.groundSpeed < RACING_AI.stallSpeed) {
+        this.stalledTime += dt;
+        if (this.stalledTime >= RACING_AI.stallGrace) {
+          this.respawn(vehicle, respawnArc);
+          return true;
+        }
+      } else {
+        this.stalledTime = 0;
+      }
+    }
+
     const outside =
       !vehicle.onTrack &&
       Math.abs(vehicle.lateral) > this.layout.halfWidth + TRACK.outOfBoundsMargin;
@@ -72,6 +99,7 @@ export class TrackRecovery {
     }
     vehicle.reset(sample.x, sample.z, Math.atan2(sample.tangentX, sample.tangentZ));
     this.offTrackTime = 0;
+    this.stalledTime = 0;
     this.resets++;
   }
 }

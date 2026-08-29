@@ -211,7 +211,8 @@ export class World {
           RACING_AI.defaultAggression - i * RACING_AI.aggressionSpread,
         ),
       );
-      this.rivalRecoveries.push(new TrackRecovery(track as TrackLayout));
+      // 只给 AI 开卡住检测:玩家停车是合法操作,见 TrackRecovery 的构造注释。
+      this.rivalRecoveries.push(new TrackRecovery(track as TrackLayout, { detectStall: true }));
       this.rivalInputs.push(createInputFrame());
       this.rivalPrevPositions.push(new Vector3());
       this.rivalPrevOrientations.push(new Quaternion());
@@ -302,6 +303,12 @@ export class World {
       }
     }
 
+    // 一局重开才换新车:出界回收调的是 vehicle.reset(),那个不清车况
+    // ——把车扶回赛道是回收,不是修车(见 condition.ts 的类注释)。
+    this.vehicle.condition.reset();
+    for (const rival of this.rivals) {
+      rival.condition.reset();
+    }
     for (const recovery of this.rivalRecoveries) {
       recovery.reset();
     }
@@ -412,9 +419,12 @@ export class World {
 
     // 对手出界也要被拉回来。送回它**当前**的弧长而不是某个检查点:AI 不刷
     // 成绩,原地扶起来就行,送回检查点反而是平白惩罚。
-    for (let i = 0; i < this.rivals.length; i++) {
-      const rival = this.rivals[i];
-      this.rivalRecoveries[i]?.update(rival as Vehicle, dt, rival?.arc ?? 0);
+    // 发车倒计时期间所有车都静止,那是合法的,别让卡住检测把它们全传送一遍。
+    if (!locked) {
+      for (let i = 0; i < this.rivals.length; i++) {
+        const rival = this.rivals[i];
+        this.rivalRecoveries[i]?.update(rival as Vehicle, dt, rival?.arc ?? 0);
+      }
     }
 
     // 赛制在名次算完之后推进:完赛判定读的是 Standings.laps(每辆车都有,

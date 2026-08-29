@@ -5,7 +5,7 @@ import { Course } from '../../src/game/course';
 import { Physics, initPhysics } from '../../src/game/physics';
 import { generateTrack } from '../../src/game/trackLayout';
 import { TrackRecovery } from '../../src/game/trackRecovery';
-import { TRACK } from '../../src/game/tuning';
+import { RACING_AI, TRACK } from '../../src/game/tuning';
 import { Vehicle } from '../../src/game/vehicle';
 
 beforeAll(async () => {
@@ -111,6 +111,44 @@ describe('TrackRecovery', () => {
     recovery.respawn(vehicle, 0);
     recovery.reset();
     expect(recovery.offTrackTime).toBe(0);
+    expect(recovery.resets).toBe(0);
+  });
+});
+
+/*
+ * 卡住检测。实测 seed 107 的 AI 会顶在护墙上**不出界地**卡死:出界判定一次
+ * 都不成立(出界帧 0、回收 0 次),车速 0 持续 230 秒,只看出界的回收完全
+ * 无效。RacingPilot 又从不挂倒挡,自己退不出来。
+ */
+describe('TrackRecovery 的卡住检测', () => {
+  it('默认不开 —— 玩家在赛道上停着是合法操作,不该被传送', () => {
+    const { vehicle, recovery } = setup();
+    for (let t = 0; t < RACING_AI.stallGrace * 3; t += FIXED_DT) {
+      expect(recovery.update(vehicle, FIXED_DT, 0)).toBe(false);
+    }
+    expect(recovery.resets).toBe(0);
+  });
+
+  it('开了之后,长时间几乎不动就把车放回赛道', () => {
+    const { layout, vehicle } = setup();
+    const recovery = new TrackRecovery(layout, { detectStall: true });
+    let recovered = false;
+    for (let t = 0; t < RACING_AI.stallGrace * 2 && !recovered; t += FIXED_DT) {
+      recovered = recovery.update(vehicle, FIXED_DT, vehicle.arc);
+    }
+    expect(recovered).toBe(true);
+    expect(recovery.resets).toBe(1);
+    expect(recovery.stalledTime).toBe(0);
+  });
+
+  it('宽限时间之内不动不算卡住', () => {
+    const { layout, vehicle } = setup();
+    const recovery = new TrackRecovery(layout, { detectStall: true });
+    const steps = Math.floor((RACING_AI.stallGrace / FIXED_DT) * 0.5);
+    for (let i = 0; i < steps; i++) {
+      expect(recovery.update(vehicle, FIXED_DT, 0)).toBe(false);
+    }
+    expect(recovery.stalledTime).toBeGreaterThan(0);
     expect(recovery.resets).toBe(0);
   });
 });

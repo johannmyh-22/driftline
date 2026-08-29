@@ -67,8 +67,16 @@ export class RacingPilot {
     const speed = vehicle.groundSpeed;
 
     // ── 1. 目标速度:朝前扫,取所有前方弯所允许的最小当前速度 ──
-    const latAccel = RACING_AI.lateralAccel * this.aggression;
-    const brakeAccel = RACING_AI.brakeAccel * this.aggression;
+    /*
+     * 弯速/刹车预算要跟着**当前**轮胎与刹车状况缩放,不能按新车算。
+     *
+     * 实测:胎磨到六成(抓地掉 10%)之后,还按新胎的预算开,第 3 圈单圈从
+     * 58.9s 掉到 77.3s —— 不是"慢了 10%",是一路滑出赛道再修正。真实车手
+     * 感觉到胎不行了会自己收着开,这里把同一件事显式建模。
+     */
+    const grip = vehicle.condition.tireGripScale;
+    const latAccel = RACING_AI.lateralAccel * this.aggression * grip;
+    const brakeAccel = RACING_AI.brakeAccel * this.aggression * grip * vehicle.condition.brakeScale;
     const steps = Math.max(1, Math.round(RACING_AI.scanDistance / spacing));
     let targetSpeed = Number.POSITIVE_INFINITY;
     for (let i = 0; i <= steps; i++) {
@@ -86,6 +94,10 @@ export class RacingPilot {
         targetSpeed = allowedNow;
       }
     }
+
+    // 地板:算出来的弯速可以低到把 AI 刹死在原地,而停下之后目标速度还是
+    // 那个值,永远不再给油。见 `RACING_AI.minTargetSpeed` 的注释。
+    targetSpeed = Math.max(targetSpeed, RACING_AI.minTargetSpeed);
 
     // ── 2. 转向:纯追踪,目标点朝弯内偏 ──
     const lookAhead = RACING_AI.lookAheadBase + speed * RACING_AI.lookAheadTime;

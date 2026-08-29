@@ -14,6 +14,7 @@ import {
   wheelSlot,
 } from './diagnostics';
 import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
+import { CarCondition } from './condition';
 
 // 每帧路径上的临时量,全部提到模块作用域复用。60Hz 下新建 Vector3 的 GC 抖动看得见。
 const chassisUp = new Vector3();
@@ -211,6 +212,16 @@ export class Vehicle {
   /** 当前前轮转角(弧度),正 = 左。 */
   steerAngle = 0;
   /**
+   * 车况(轮胎磨损 / 刹车热衰 / 碰撞损伤)。三样都从 0 开始,所以一局刚开始
+   * 的车和加这套系统之前逐位一样,见 `condition.ts` 的类注释。
+   *
+   * **`reset()` 不清它** —— 出界回收是把车扶回赛道,不是修车。一局结束重开
+   * 由 `World.spawnAtStart()` 显式调 `condition.reset()`。
+   */
+  readonly condition = new CarCondition();
+  /** `applyForces` 存下的刹车输入,给 `readState` 里的车况更新用。 */
+  private lastBrakeInput = 0;
+  /**
    * 气动阻力缩放系数(1 = 无遮挡的干净空气)。跟在别人尾流里时由 `World`
    * 每帧写低,见 `tuning.ts` 的 `DRAFT`。
    *
@@ -252,6 +263,11 @@ export class Vehicle {
     ];
 
     this.reset();
+  }
+
+  /** 当前轮胎摩擦系数 = 基准 μ × 磨损缩放。磨损为 0 时就是 `TIRE.mu0`。 */
+  private get mu(): number {
+    return TIRE.mu0 * this.condition.tireGripScale;
   }
 
   get speed(): number {
@@ -384,6 +400,8 @@ export class Vehicle {
    * 物理世界。
    */
   applyForces(input: InputFrame, dt: number): void {
+    // 车况要用到刹车输入,而 readState() 拿不到 input,先存一份。
+    this.lastBrakeInput = input.airBrake;
     // 先清掉上一步的力:Rapier 的 addForce 是持续力,不清会逐帧累加成指数爆炸。
     this.physics.resetForces(this.body);
     // 清空上一帧的遥测缓冲,免得「上一帧接地、这一帧离地」的轮子残留旧数据。
@@ -548,8 +566,8 @@ export class Vehicle {
     const invDt = 1 / dt;
     const CI = I * invDt;
     const throttleTorque =
-      input.throttle * CAR.driveTorque -
-      input.reverse * CAR.driveTorque * CAR.reverseTorqueScale;
+      input.throttle * CAR.driveTorque * this.condition.powerScale -
+      input.reverse * CAR.driveTorque * CAR.reverseTorqueScale * this.condition.powerScale;
 
     // 驱动/差速计算: 后轴左右轮耦合求解
     const ctx2 = contexts[2]!;
@@ -564,7 +582,7 @@ export class Vehicle {
     const fric_rear = (ctx2.friction + ctx3.friction) / 2;
     const mu_rear = Math.max(
       0,
-      TIRE.mu0 * fric_rear * (1 - (TIRE.loadSensitivity * (load_rear / 2 - fz0)) / fz0),
+      this.mu * fric_rear * (1 - (TIRE.loadSensitivity * (load_rear / 2 - fz0)) / fz0),
     );
     const peak_rear = mu_rear * load_rear;
     const ref_rear = Math.max((ctx2.reference + ctx3.reference) / 2, SLIP_SPEED_FLOOR);
@@ -599,7 +617,8 @@ export class Vehicle {
     let w2_final = w_avg + w_diff / 2;
     let w3_final = w_avg - w_diff / 2;
 
-    const brakeRear = (input.airBrake * CAR.brakeTorque * (1 - CAR.frontBrakeBias)) / 2;
+    const brakeRear =
+      (input.airBrake * CAR.brakeTorque * this.condition.brakeScale * (1 - CAR.frontBrakeBias)) / 2;
     if (brakeRear > 0) {
       const deltaBrake = (brakeRear / I) * dt;
       w2_final =
@@ -626,12 +645,13 @@ export class Vehicle {
     for (let i = 0; i < 2; i++) {
       const wheel = this.wheels[i]!;
       const ctx = contexts[i]!;
-      const brakeFront = input.airBrake * CAR.brakeTorque * (CAR.frontBrakeBias / 2);
+      const brakeFront =
+        input.airBrake * CAR.brakeTorque * this.condition.brakeScale * (CAR.frontBrakeBias / 2);
       const driveFront = throttleTorque * ((1 - CAR.rearDriveBias) / 2);
 
       let w = wheel.spin;
       if (ctx.grounded && ctx.load > 0) {
-        const peakFront = TIRE.mu0 * ctx.friction * ctx.load;
+        const peakFront = this.mu * ctx.friction * ctx.load;
         const peakTorqueFront = peakFront * R;
         if (Math.abs(driveFront) <= peakTorqueFront) {
           const targetSlip = TIRE.peakSlipRatio * (driveFront / peakTorqueFront);
@@ -720,7 +740,7 @@ export class Vehicle {
       // 那部分传不出去,真车表现为那一侧空转得更凶。不封的话摩擦圆会被捅破。
       let drive = tireOut.longitudinal;
       if (i >= 2 && ctx.load > 0) {
-        const budget = ctx.load * TIRE.mu0 * ctx.friction;
+        const budget = ctx.load * this.mu * ctx.friction;
         const room = Math.sqrt(Math.max(0, budget * budget - fy * fy));
         const shared = (tireOut.longitudinal * rearLoadAvg) / ctx.load;
         drive = clamp(shared, -room, room);
@@ -801,7 +821,7 @@ export class Vehicle {
 
       totalLateralForce += fy;
 
-      const budget = ctx.load * TIRE.mu0;
+      const budget = ctx.load * this.mu;
       if (budget > 0) {
         saturation = Math.max(saturation, Math.min(1, Math.hypot(fx, fy) / budget));
       }
@@ -836,6 +856,13 @@ export class Vehicle {
     this.physics.read(this.body, this.state);
     this.writeBack();
     this.resolveWall(dt);
+
+    /*
+     * 车况放在 `resolveWall()` **之后**:损伤要读这一帧的 `wallNormalSpeed`,
+     * 而那个值正是墙解算算出来的。磨损/热衰用的是刚写回的饱和度与车速。
+     */
+    this.condition.update(dt, this.gripSaturation, this.groundSpeed, this.lastBrakeInput);
+    this.condition.addImpact(this.wallNormalSpeed);
 
     // 诊断探针的整车帧采样(read 之后才算数),只复写预分配槽,见 diagnostics.ts。
     frameSlot.x = this.state.x;
@@ -881,7 +908,7 @@ export class Vehicle {
    */
   private steerLimit(): number {
     const speed = Math.max(this.groundSpeed, 1);
-    const gripAccel = TIRE.mu0 * VEHICLE.gravity;
+    const gripAccel = this.mu * VEHICLE.gravity;
     const kinematic = (CAR.wheelBase * gripAccel) / (speed * speed);
     return Math.min(CAR.steerMax, kinematic + TIRE.peakSlipAngle * CAR.steerPastPeak);
   }
