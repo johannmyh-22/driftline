@@ -14,6 +14,7 @@ import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
 import { normalize01 } from '../core/mathx';
 import { Autopilot } from './autopilot';
+import { Standings } from './standings';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
 import { Ghost } from './ghost';
@@ -44,6 +45,9 @@ const mapCentre = new Vector3();
  * 同时不用去改测试本身迁就一个新加入的、和被测行为无关的变量。
  */
 const RIVAL_START_GAP = 20;
+
+/** 名次表里各车的 id 与下标顺序。0 = 玩家,1 = 对手。 */
+const RACER_IDS = ['player', 'rival'] as const;
 
 
 /** 固定机位:回归截图用,和玩家实际在用的跟随机位分开。 */
@@ -90,6 +94,11 @@ export class World {
    * `flat` 场地(没有赛道给 Autopilot 循迹)下是 null。
    */
   readonly rival: Vehicle | null;
+  /**
+   * 名次表(M7)。`flat` 场地没有赛道也就没有弧长,自然也没有名次,是 null。
+   * 下标顺序固定:0 = 玩家,1 = 对手,和 `RACER_IDS` 一致。
+   */
+  readonly standings: Standings | null;
 
   private readonly craft: Craft;
   private readonly rivalPilot: Autopilot | null;
@@ -143,6 +152,8 @@ export class World {
     // 以及 ghost.ts 类注释里「为什么 Ghost 必须用独立世界」的对照说明)。
     this.rival = this.track === null ? null : new Vehicle(this.field, this.physics);
     this.rivalPilot = this.track === null ? null : new Autopilot(this.track);
+    this.standings =
+      this.track === null ? null : new Standings(RACER_IDS, this.track.totalLength);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
     this.spawnAtStart();
@@ -200,6 +211,10 @@ export class World {
         );
       }
     }
+
+    // 名次表要在两辆车都摆好之后按新的弧长重新锚定,否则重开的第一帧会把
+    // 「上一局的位置 → 起跑线」当成一次真实位移记进里程。
+    this.standings?.reset([this.vehicle.arc, this.rival?.arc ?? 0]);
   }
 
   get camera(): PerspectiveCamera {
@@ -257,6 +272,14 @@ export class World {
     this.physics.step();
     this.vehicle.readState(dt);
     this.rival?.readState(dt);
+
+    // 名次:两辆车的弧长都读回来之后算一次。用弧长而不是检查点,理由见
+    // standings.ts 的类注释。
+    if (this.standings !== null) {
+      this.standings.setArc(0, this.vehicle.arc);
+      this.standings.setArc(1, this.rival?.arc ?? 0);
+      this.standings.update();
+    }
 
     const lapsBefore = this.race?.laps ?? 0;
     this.race?.update(this.vehicle, dt);

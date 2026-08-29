@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
-import { Hud, formatDelta, formatTime } from '../../src/game/hud';
+import { Hud, formatDelta, formatGap, formatTime } from '../../src/game/hud';
+import type { StandingRow } from '../../src/game/standings';
 import { Race } from '../../src/game/race';
 import { generateTrack } from '../../src/game/trackLayout';
 
@@ -9,6 +10,7 @@ class MockNode {
   id = '';
   className = '';
   textContent = '';
+  hidden = false;
   style: Record<string, string> = {};
   attributes = new Map<string, string>();
   children: MockNode[] = [];
@@ -225,6 +227,73 @@ describe('HUD 与小地图 UI 逻辑', () => {
       hud.update(10, null, { x: 0, y: 0, z: 0 }, 0);
     }).not.toThrow();
 
+    hud.dispose();
+  });
+});
+
+describe('名次显示(M7)', () => {
+  function makeRow(over: Partial<StandingRow> = {}): StandingRow {
+    return {
+      id: 'player',
+      distance: 0,
+      laps: 0,
+      position: 1,
+      gapToLeader: 0,
+      gapToAhead: 0,
+      gapToBehind: 0,
+      ...over,
+    };
+  }
+
+  it('formatGap 用符号区分领先/落后,和分段 delta 的约定一致', () => {
+    expect(formatGap(0)).toBe('±0m');
+    expect(formatGap(0.4)).toBe('±0m');
+    expect(formatGap(42.4)).toBe('+42m');
+    expect(formatGap(-42.4)).toBe('−42m');
+    expect(formatGap(Number.NaN)).toBe('—');
+  });
+
+  it('formatGap 超过一公里改用 km,免得 HUD 上出现读不快的四位数', () => {
+    expect(formatGap(1834)).toBe('+1.83km');
+    expect(formatGap(-2500)).toBe('−2.50km');
+  });
+
+  it('有对手时显示 P几/几,领跑时挂上高亮类', () => {
+    const container = document.createElement('div');
+    const hud = new Hud(container, 1, null, null, null);
+    hud.update(10, null, undefined, undefined, makeRow({ position: 1 }), 2);
+
+    const badge = container.querySelector('.hud-pos-badge') as HTMLElement | null;
+    expect(badge).not.toBeNull();
+    expect(badge?.hidden).toBe(false);
+    expect(badge?.textContent).toBe('P1/2');
+    expect(badge?.className).toContain('hud-pos-lead');
+
+    hud.update(10, null, undefined, undefined, makeRow({ position: 2, gapToAhead: 30 }), 2);
+    expect(badge?.textContent).toBe('P2/2');
+    expect(badge?.className).not.toContain('hud-pos-lead');
+    hud.dispose();
+  });
+
+  it('领跑时 GAP 显示的是甩开后车的距离(负号),不是恒为 0', () => {
+    const container = document.createElement('div');
+    const hud = new Hud(container, 1, null, null, null);
+    hud.update(10, null, undefined, undefined, makeRow({ position: 1, gapToBehind: 88 }), 2);
+
+    const gapRow = container.querySelector('.hud-gap-row') as HTMLElement | null;
+    expect(gapRow).not.toBeNull();
+    expect(gapRow?.hidden).toBe(false);
+    expect(gapRow?.querySelector('.hud-record-val')?.textContent).toBe('−88m');
+    hud.dispose();
+  });
+
+  it('没有对手(flat 场地)时名次与 GAP 整个隐藏,不占位', () => {
+    const container = document.createElement('div');
+    const hud = new Hud(container, 1, null, null, null);
+    hud.update(10, null, undefined, undefined, null, 0);
+
+    const badge = container.querySelector('.hud-pos-badge') as HTMLElement | null;
+    expect(badge?.hidden).toBe(true);
     hud.dispose();
   });
 });

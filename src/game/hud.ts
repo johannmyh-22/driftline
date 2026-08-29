@@ -2,6 +2,7 @@ import type { CuratedTrack } from './curatedTracks';
 import { MINIMAP_TUNING } from './tuning';
 import type { Race } from './race';
 import type { TrackLayout, TrackSample } from './trackLayout';
+import type { StandingRow } from './standings';
 
 interface VectorLike {
   x: number;
@@ -15,7 +16,8 @@ interface VectorLike {
  * 采用 DOM Overlay 实现(不往 WebGL canvas 里排文字)。
  * 包含:
  * - 速度显示(大字数字仪表, km/h)
- * - 圈数、当前圈时、最佳单圈、上一圈用时
+ * - 圈数、名次(M7)、当前圈时、最佳单圈、上一圈用时
+ * - 和前车/后车的差距(M7,米)
  * - 分段 delta(相对历史最佳圈,绿色领先、红色落后)
  * - 程序化 SVG 小地图(显示赛道闭环、起跑线、玩家实时位置与车头朝向)
  * - 操作说明与构建号(__BUILD_ID__,严格保留在左下角)
@@ -33,6 +35,9 @@ export class Hud {
   // 计时与 Delta 组件
   private readonly timingCard: HTMLDivElement;
   private readonly lapBadge: HTMLSpanElement;
+  private readonly posBadge: HTMLSpanElement;
+  private readonly gapRow: HTMLDivElement;
+  private readonly gapVal: HTMLSpanElement;
   private readonly currentTime: HTMLDivElement;
   private readonly deltaBadge: HTMLSpanElement;
   private readonly bestTimeVal: HTMLSpanElement;
@@ -57,6 +62,8 @@ export class Hud {
   private lastShownDeltaText = '';
   /** delta 的整型脏检查键(百分之一秒)。NaN = 尚未显示过。 */
   private lastShownDeltaKey = Number.NaN;
+  private lastShownPosKey = -1;
+  private lastShownGapKey = Number.NaN;
   private lastShownPlayerX = -99999;
   private lastShownPlayerZ = -99999;
   private lastShownPlayerRot = -99999;
@@ -88,11 +95,17 @@ export class Hud {
     this.lapBadge.className = 'hud-lap-badge';
     this.lapBadge.textContent = 'LAP 1';
 
+    // 名次徽章(M7)。没有对手车(flat 场地)时整个隐藏,不占位。
+    this.posBadge = document.createElement('span');
+    this.posBadge.className = 'hud-pos-badge';
+    this.posBadge.textContent = 'P1';
+    this.posBadge.hidden = true;
+
     this.deltaBadge = document.createElement('span');
     this.deltaBadge.className = 'hud-delta-badge hud-delta-idle';
     this.deltaBadge.textContent = '—';
 
-    timingHeader.append(this.lapBadge, this.deltaBadge);
+    timingHeader.append(this.lapBadge, this.posBadge, this.deltaBadge);
 
     this.currentTime = document.createElement('div');
     this.currentTime.className = 'hud-current-time';
@@ -134,7 +147,19 @@ export class Hud {
     this.lastTimeVal.textContent = formatTime(race?.lastLapTime ?? 0);
     lastRow.append(lastLabel, this.lastTimeVal);
 
-    timingFooter.append(bestRow, lastRow);
+    // 和前车(领跑时是后车)的差距,单位米。没有对手时隐藏。
+    this.gapRow = document.createElement('div');
+    this.gapRow.className = 'hud-record-row hud-gap-row';
+    this.gapRow.hidden = true;
+    const gapLabel = document.createElement('span');
+    gapLabel.className = 'hud-record-label';
+    gapLabel.textContent = 'GAP';
+    this.gapVal = document.createElement('span');
+    this.gapVal.className = 'hud-record-val';
+    this.gapVal.textContent = '—';
+    this.gapRow.append(gapLabel, this.gapVal);
+
+    timingFooter.append(bestRow, lastRow, this.gapRow);
     this.timingCard.append(timingHeader, this.currentTime, timingFooter);
 
     // ── 2. 右上角程序化 SVG 小地图 ──
@@ -194,6 +219,8 @@ export class Hud {
     race: Race | null,
     vehiclePos?: VectorLike,
     vehicleYaw?: number,
+    standing?: StandingRow | null,
+    fieldSize?: number,
   ): void {
     // 1. 速度更新
     const kmh = Math.round(metersPerSecond * 3.6);
@@ -262,6 +289,38 @@ export class Hud {
       }
     }
 
+    // 2.5 名次与差距(M7)
+    if (standing != null && fieldSize !== undefined && fieldSize > 1) {
+      if (this.posBadge.hidden) {
+        this.posBadge.hidden = false;
+        this.gapRow.hidden = false;
+      }
+      const posKey = standing.position * 100 + fieldSize;
+      if (posKey !== this.lastShownPosKey) {
+        this.lastShownPosKey = posKey;
+        this.posBadge.textContent = `P${standing.position}/${fieldSize}`;
+        this.posBadge.className =
+          standing.position === 1 ? 'hud-pos-badge hud-pos-lead' : 'hud-pos-badge';
+      }
+
+      /*
+       * 领跑时 `gapToAhead` 是 0(前面没车),这时候有意义的是「甩开后车多少」。
+       * 两种情况共用一行,靠正负号区分:负 = 领先,正 = 落后,和 delta 那栏
+       * 的符号约定一致。
+       */
+      const gap = standing.position === 1 ? -standing.gapToBehind : standing.gapToAhead;
+      const gapKey = Math.round(gap);
+      if (gapKey !== this.lastShownGapKey) {
+        this.lastShownGapKey = gapKey;
+        this.gapVal.textContent = formatGap(gap);
+        this.gapVal.className =
+          gapKey < 0 ? 'hud-record-val hud-delta-ahead' : 'hud-record-val hud-delta-behind';
+      }
+    } else if (!this.posBadge.hidden) {
+      this.posBadge.hidden = true;
+      this.gapRow.hidden = true;
+    }
+
     // 3. 小地图载具光标更新
     if (this.hasMap && this.playerMarker !== null && vehiclePos !== undefined) {
       const dx = vehiclePos.x - this.lastShownPlayerX;
@@ -294,6 +353,22 @@ export class Hud {
 
 /** 兼容老版导出命名。 */
 export { Hud as Readout };
+
+/**
+ * 名次差距格式化(米)。负 = 领先,正 = 落后,符号约定和分段 delta 那栏一致。
+ * 超过一公里改用 km,免得 HUD 上出现「+1834m」这种读不快的数字。
+ */
+export function formatGap(meters: number): string {
+  if (!Number.isFinite(meters)) {
+    return '—';
+  }
+  const sign = meters < 0 ? '−' : '+';
+  const abs = Math.abs(meters);
+  if (abs < 1) {
+    return '±0m';
+  }
+  return abs >= 1000 ? `${sign}${(abs / 1000).toFixed(2)}km` : `${sign}${Math.round(abs)}m`;
+}
 
 /** 时间格式化为 MM:SS.hh */
 export function formatTime(seconds: number): string {
