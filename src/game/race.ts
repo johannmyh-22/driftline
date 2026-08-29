@@ -1,6 +1,7 @@
 import { HUD_TUNING } from './tuning';
 import { loadRecord, saveRecord } from './records';
 import type { TrackLayout } from './trackLayout';
+import { TrackRecovery } from './trackRecovery';
 import { TRACK } from './tuning';
 import type { Vehicle } from './vehicle';
 
@@ -25,10 +26,21 @@ export class Race {
   nextCheckpoint = 1;
   /** 最近通过的检查点,出界后重置回它。 */
   lastCheckpoint = 0;
+  /**
+   * 出界回收。逻辑本身搬到了 `TrackRecovery`(对手车也要用,见那个类的注释),
+   * 这里保留 `offTrackTime`/`resets` 两个只读转发,HUD 与既有测试还按老名字读。
+   */
+  private readonly recovery: TrackRecovery;
+
   /** 连续在界外待了多久(秒)。 */
-  offTrackTime = 0;
+  get offTrackTime(): number {
+    return this.recovery.offTrackTime;
+  }
+
   /** 累计被重置了几次。 */
-  resets = 0;
+  get resets(): number {
+    return this.recovery.resets;
+  }
 
   /** 当前圈各检查点的累计用时(秒)。 */
   readonly currentSectorTimes: number[];
@@ -44,11 +56,10 @@ export class Race {
   isNewBestLap = false;
 
   private seed: number | null = null;
-  private readonly layout: TrackLayout;
   private readonly checkpointArc: number;
 
   constructor(layout: TrackLayout) {
-    this.layout = layout;
+    this.recovery = new TrackRecovery(layout);
     this.checkpointArc = layout.totalLength / this.checkpointCount;
     this.currentSectorTimes = new Array<number>(this.checkpointCount).fill(0);
     this.bestSectorTimes = new Array<number>(this.checkpointCount).fill(0);
@@ -78,8 +89,7 @@ export class Race {
     this.lastLapTime = 0;
     this.nextCheckpoint = 1;
     this.lastCheckpoint = 0;
-    this.offTrackTime = 0;
-    this.resets = 0;
+    this.recovery.reset();
     this.currentSectorTimes.fill(0);
     this.delta = null;
     this.deltaTimer = 0;
@@ -176,38 +186,12 @@ export class Race {
   }
 
   private handleOutOfBounds(vehicle: Vehicle, dt: number): void {
-    const outside =
-      !vehicle.onTrack &&
-      Math.abs(vehicle.lateral) > this.layout.halfWidth + TRACK.outOfBoundsMargin;
-
-    if (!outside) {
-      this.offTrackTime = 0;
-      return;
-    }
-
-    this.offTrackTime += dt;
-    // 给一段宽限时间:压出路肩、飞出去再落回来都不该被立刻拽走,
-    // 那种「刚出界就传送」的处理比出界本身更破坏手感。
-    if (this.offTrackTime < TRACK.outOfBoundsGrace) {
-      return;
-    }
-
-    this.respawn(vehicle);
+    // 玩家送回**最近通过的检查点**,不是当前弧长——否则出界抄近道反而有赚。
+    this.recovery.update(vehicle, dt, this.lastCheckpoint * this.checkpointArc);
   }
 
   /** 把载具放回最近通过的检查点,速度清零、车头朝赛道方向。 */
   respawn(vehicle: Vehicle): void {
-    const samples = this.layout.samples;
-    const index = Math.floor(
-      (this.lastCheckpoint * this.checkpointArc) / this.layout.spacing,
-    );
-    const sample = samples[index % samples.length];
-    if (sample === undefined) {
-      return;
-    }
-
-    vehicle.reset(sample.x, sample.z, Math.atan2(sample.tangentX, sample.tangentZ));
-    this.offTrackTime = 0;
-    this.resets++;
+    this.recovery.respawn(vehicle, this.lastCheckpoint * this.checkpointArc);
   }
 }

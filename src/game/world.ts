@@ -14,6 +14,7 @@ import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
 import { normalize01 } from '../core/mathx';
 import { RacingPilot } from './racingPilot';
+import { TrackRecovery } from './trackRecovery';
 import { Standings } from './standings';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
@@ -108,6 +109,11 @@ export class World {
 
   private readonly craft: Craft;
   private readonly rivalPilot: RacingPilot | null;
+  /**
+   * 对手车的出界回收。**没有它对手被撞出赛道就再也回不来了**——出界重置本来
+   * 长在 `Race` 里,而 `Race` 只伺候玩家(见 `trackRecovery.ts` 的类注释)。
+   */
+  private readonly rivalRecovery: TrackRecovery | null;
   private readonly rivalCraft: Craft | null;
   private readonly rivalInput: InputFrame = createInputFrame();
   private readonly rivalPrevPosition = new Vector3();
@@ -158,6 +164,7 @@ export class World {
     // 以及 ghost.ts 类注释里「为什么 Ghost 必须用独立世界」的对照说明)。
     this.rival = this.track === null ? null : new Vehicle(this.field, this.physics);
     this.rivalPilot = this.track === null ? null : new RacingPilot(this.track);
+    this.rivalRecovery = this.track === null ? null : new TrackRecovery(this.track);
     this.standings =
       this.track === null ? null : new Standings(RACER_IDS, this.track.totalLength);
     this.chase = new ChaseCamera(this.field);
@@ -220,6 +227,7 @@ export class World {
 
     // 名次表要在两辆车都摆好之后按新的弧长重新锚定,否则重开的第一帧会把
     // 「上一局的位置 → 起跑线」当成一次真实位移记进里程。
+    this.rivalRecovery?.reset();
     this.standings?.reset([this.vehicle.arc, this.rival?.arc ?? 0]);
   }
 
@@ -287,6 +295,12 @@ export class World {
       this.standings.setArc(0, this.vehicle.arc);
       this.standings.setArc(1, this.rival?.arc ?? 0);
       this.standings.update();
+    }
+
+    // 对手出界也要被拉回来。送回它**当前**的弧长而不是某个检查点:AI 不刷
+    // 成绩,原地扶起来就行,送回检查点反而是平白惩罚。
+    if (this.rival !== null && this.rivalRecovery !== null) {
+      this.rivalRecovery.update(this.rival, dt, this.rival.arc);
     }
 
     const lapsBefore = this.race?.laps ?? 0;
