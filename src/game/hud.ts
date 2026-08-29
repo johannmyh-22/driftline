@@ -423,7 +423,9 @@ export class Hud {
         pos.textContent = `P${result.position}`;
         const who = document.createElement('span');
         who.className = 'hud-results-who';
-        who.textContent = result.id === 'player' ? '你' : '对手';
+        // id 形如 player / rival0 / rival1 …,结算面板显示成「你 / 对手 1」。
+        who.textContent =
+          result.id === 'player' ? '你' : `对手 ${Number(result.id.replace('rival', '')) + 1}`;
         const time = document.createElement('span');
         time.className = 'hud-results-time';
         // time 为 0 = 没冲线就被强制结算(见 raceSession.ts 的 finish())。

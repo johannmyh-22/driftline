@@ -113,10 +113,16 @@ export function createPalette(rng: Rng): Palette {
  * 转完之后都离得够远,一眼分得清谁是谁(人类看过并排出现在同一屏的截图,
  * 反馈"对手车不能和玩家长一样",见 docs/HANDOFF.md 第三十六节)。
  */
-export function rivalCraftColors(base: Palette): Palette {
+export function rivalCraftColors(base: Palette, index = 0, count = 1): Palette {
   const hsl = { h: 0, s: 0, l: 0 };
   base.craftHull.getHSL(hsl);
-  const rivalHue = (hsl.h + 0.5) % 1;
+  /*
+   * 多辆对手时把色相在**除玩家之外**的色环上均分,而不是每辆都转半圈——
+   * 转半圈只在一对一时管用,两辆以上会撞成同一个颜色。玩家占 0 号位,
+   * 对手从半圈处开始按 (index+1)/(count+1) 铺开,谁都不会和玩家撞色。
+   */
+  const spread = (index + 1) / (count + 1);
+  const rivalHue = (hsl.h + spread) % 1;
   return {
     ...base,
     craftHull: new Color().setHSL(rivalHue, 0.55, 0.16),

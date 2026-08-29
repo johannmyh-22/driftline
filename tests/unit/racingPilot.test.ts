@@ -102,7 +102,7 @@ describe('RacingPilot vs Autopilot', () => {
     }
   });
 
-  it('单圈落在目标时间附近——对手要能赢也要能被赢', () => {
+  it('单圈明显快过目标时间——人类反馈"对手还是太弱",难度已经拉到收益拐点', () => {
     for (const track of CURATED_TRACKS) {
       const race = runLap(track.seed, 'race');
       expect(race).not.toBeNull();
@@ -110,9 +110,10 @@ describe('RacingPilot vs Autopilot', () => {
         continue;
       }
       const ratio = race.time / track.targetLapTime;
-      // 实测区间 0.89~1.09。放宽到 0.8~1.25:再快就没法赢,再慢就又变成活靶子。
-      expect(ratio, `seed ${track.seed} 用时比 ${ratio.toFixed(2)}`).toBeGreaterThan(0.8);
-      expect(ratio, `seed ${track.seed} 用时比 ${ratio.toFixed(2)}`).toBeLessThan(1.25);
+      // 实测区间 0.69~0.80(即比目标快 20~31%)。下界留到 0.55:再快只可能
+      // 是弯速上限算错了(比如曲率估成 0),那是 bug 不是变强。
+      expect(ratio, `seed ${track.seed} 用时比 ${ratio.toFixed(2)}`).toBeGreaterThan(0.55);
+      expect(ratio, `seed ${track.seed} 用时比 ${ratio.toFixed(2)}`).toBeLessThan(0.95);
     }
   });
 
@@ -127,20 +128,41 @@ describe('RacingPilot vs Autopilot', () => {
     }
   });
 
-  it('难度系数拉满仍然跑得完,只是更快——0.7 是玩法取舍不是能力上限', () => {
+  it('难度系数是有效的旋钮——调低确实会变慢,而且照样跑得完', () => {
     const track = CURATED_TRACKS[0];
     if (track === undefined) {
       return;
     }
-    const normal = runLap(track.seed, 'race', RACING_AI.defaultAggression);
-    const full = runLap(track.seed, 'race', 1);
-    expect(normal).not.toBeNull();
-    expect(full).not.toBeNull();
-    if (normal === null || full === null) {
+    const fast = runLap(track.seed, 'race', RACING_AI.defaultAggression);
+    const slow = runLap(track.seed, 'race', 0.7);
+    expect(fast).not.toBeNull();
+    expect(slow).not.toBeNull();
+    if (fast === null || slow === null) {
       return;
     }
-    expect(full.time).toBeLessThan(normal.time);
-    expect(full.wallHits).toBe(0);
+    expect(fast.time).toBeLessThan(slow.time);
+    expect(fast.wallHits).toBe(0);
+    expect(slow.wallHits).toBe(0);
+  });
+
+  /*
+   * 这条守的是一个真 bug:构造函数原来把 aggression 钳在 [0.3, 1],于是传任何
+   * 大于 1 的值都没有效果——第一次扫 1.15/1.30/1.45 时五条赛道数字一模一样,
+   * 就是这个钳位吃掉的。默认值 1.4 正好在被吃掉的区间里。
+   */
+  it('大于 1 的难度系数不会被钳掉', () => {
+    const track = CURATED_TRACKS[0];
+    if (track === undefined) {
+      return;
+    }
+    const one = runLap(track.seed, 'race', 1);
+    const high = runLap(track.seed, 'race', 1.4);
+    expect(one).not.toBeNull();
+    expect(high).not.toBeNull();
+    if (one === null || high === null) {
+      return;
+    }
+    expect(high.time).toBeLessThan(one.time);
   });
 });
 

@@ -12,7 +12,7 @@ import { createPalette, rivalCraftColors } from '../gfx/palette';
 import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
-import { normalize01 } from '../core/mathx';
+import { clamp, normalize01 } from '../core/mathx';
 import { RacingPilot } from './racingPilot';
 import { TrackRecovery } from './trackRecovery';
 import { RaceSession } from './raceSession';
@@ -26,7 +26,7 @@ import { Physics } from './physics';
 import { Race } from './race';
 import { encodeGhostInput, saveRecord } from './records';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
-import { CRAFT, REFERENCE_TOP_SPEED } from './tuning';
+import { CRAFT, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED } from './tuning';
 import { Vehicle } from './vehicle';
 
 const shownPosition = new Vector3();
@@ -46,13 +46,39 @@ const mapCentre = new Vector3();
  * (这个项目里最长的连续输入测试是 6.5 秒)碰不到跟在后面的对手车,
  * 同时不用去改测试本身迁就一个新加入的、和被测行为无关的变量。
  */
-const RIVAL_START_GAP = 20;
-
 /** 传给对手 AI 的「场上其他车」。复用同一个数组,每帧不分配。 */
 const rivalOpponents: Vehicle[] = [];
 
-/** 名次表里各车的 id 与下标顺序。0 = 玩家,1 = 对手。 */
-const RACER_IDS = ['player', 'rival'] as const;
+/** 名次表 / 结算面板里各车的 id。0 号恒为玩家,其后是对手。 */
+function racerIds(rivalCount: number): string[] {
+  const ids = ['player'];
+  for (let i = 0; i < rivalCount; i++) {
+    ids.push(`rival${i}`);
+  }
+  return ids;
+}
+
+/**
+ * 发车格:第 `slot` 位(0 = 玩家的杆位)相对起跑线的纵向后退距离与横向偏移。
+ *
+ * 两两一排交错(和真实发车格一样),不是一字纵队——纵队里后车全程被前车
+ * 挡着,永远看不到超车。
+ */
+function gridSlot(slot: number): { back: number; lateral: number } {
+  // 杆位(玩家)留在中心线上。真实发车格杆位也是偏一侧的,但把玩家摆偏之后
+  // 一上来就得先并回赛道中间,而且「起跑在中心线」是既有截图测试钉住的行为
+  // (smoke.spec.ts「起跑时在赛道上」断言 |lateral| < 1)。对手才交错排开。
+  if (slot <= 0) {
+    return { back: 0, lateral: 0 };
+  }
+  const index = slot - 1;
+  const row = Math.floor(index / 2);
+  const side = index % 2 === 0 ? -1 : 1;
+  return {
+    back: (row + 1) * RACE_FORMAT.gridRow,
+    lateral: side * RACE_FORMAT.gridLateral,
+  };
+}
 
 
 /** 固定机位:回归截图用,和玩家实际在用的跟随机位分开。 */
@@ -101,7 +127,7 @@ export class World {
    *
    * `flat` 场地(没有赛道可循迹)下是 null。
    */
-  readonly rival: Vehicle | null;
+  readonly rivals: Vehicle[] = [];
   /**
    * 名次表(M7)。`flat` 场地没有赛道也就没有弧长,自然也没有名次,是 null。
    * 下标顺序固定:0 = 玩家,1 = 对手,和 `RACER_IDS` 一致。
@@ -113,16 +139,16 @@ export class World {
   readonly session: RaceSession | null;
 
   private readonly craft: Craft;
-  private readonly rivalPilot: RacingPilot | null;
+  private readonly rivalPilots: RacingPilot[] = [];
   /**
    * 对手车的出界回收。**没有它对手被撞出赛道就再也回不来了**——出界重置本来
    * 长在 `Race` 里,而 `Race` 只伺候玩家(见 `trackRecovery.ts` 的类注释)。
    */
-  private readonly rivalRecovery: TrackRecovery | null;
-  private readonly rivalCraft: Craft | null;
-  private readonly rivalInput: InputFrame = createInputFrame();
-  private readonly rivalPrevPosition = new Vector3();
-  private readonly rivalPrevOrientation = new Quaternion();
+  private readonly rivalRecoveries: TrackRecovery[] = [];
+  private readonly rivalCrafts: Craft[] = [];
+  private readonly rivalInputs: InputFrame[] = [];
+  private readonly rivalPrevPositions: Vector3[] = [];
+  private readonly rivalPrevOrientations: Quaternion[] = [];
   private readonly prevPosition = new Vector3();
   private readonly prevOrientation = new Quaternion();
   private preset = 'chase';
@@ -171,21 +197,35 @@ export class World {
     // 和玩家共享 this.physics——这正是这一节要证明的事:两辆车能安全地
     // 共用同一个 Rapier 世界(见 vehicle.ts 的 applyForces()/readState() 拆分、
     // 以及 ghost.ts 类注释里「为什么 Ghost 必须用独立世界」的对照说明)。
-    this.rival = this.track === null ? null : new Vehicle(this.field, this.physics);
-    this.rivalPilot = this.track === null ? null : new RacingPilot(this.track);
-    this.rivalRecovery = this.track === null ? null : new TrackRecovery(this.track);
-    this.session = this.track === null ? null : new RaceSession();
+    const track = this.track;
+    const rivalCount = track === null ? 0 : RACE_FORMAT.rivalCount;
+    for (let i = 0; i < rivalCount; i++) {
+      this.rivals.push(new Vehicle(this.field, this.physics));
+      // 每辆对手的难度递减一档:全场同速会变成一列火车,谁也超不了谁。
+      this.rivalPilots.push(
+        new RacingPilot(
+          track as TrackLayout,
+          RACING_AI.defaultAggression - i * RACING_AI.aggressionSpread,
+        ),
+      );
+      this.rivalRecoveries.push(new TrackRecovery(track as TrackLayout));
+      this.rivalInputs.push(createInputFrame());
+      this.rivalPrevPositions.push(new Vector3());
+      this.rivalPrevOrientations.push(new Quaternion());
+    }
+    this.session = track === null ? null : new RaceSession();
     this.standings =
-      this.track === null ? null : new Standings(RACER_IDS, this.track.totalLength);
+      track === null ? null : new Standings(racerIds(rivalCount), track.totalLength);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
     this.spawnAtStart();
 
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft.group);
-    this.rivalCraft = this.rival === null ? null : createCraft(rng.fork(), rivalCraftColors(palette));
-    if (this.rivalCraft !== null) {
-      this.scene.add(this.rivalCraft.group);
+    for (let i = 0; i < this.rivals.length; i++) {
+      const craft = createCraft(rng.fork(), rivalCraftColors(palette, i, this.rivals.length));
+      this.rivalCrafts.push(craft);
+      this.scene.add(craft.group);
     }
 
     this.ghost = this.track === null ? null : new Ghost(this.field, this.track, rng.fork(), palette);
@@ -197,12 +237,21 @@ export class World {
     // 明暗过渡和天空是一致的,而不是人为塞一个补光。
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
-    if (this.rival !== null) {
-      this.rivalPrevPosition.copy(this.rival.position);
-      this.rivalPrevOrientation.copy(this.rival.orientation);
-    }
+    this.saveRivalPrevious();
     this.chase.snapTo(this.vehicle);
     this.present(1);
+  }
+
+  /** 记下所有对手车上一帧的位姿,给渲染插值用。 */
+  private saveRivalPrevious(): void {
+    for (let i = 0; i < this.rivals.length; i++) {
+      const rival = this.rivals[i];
+      if (rival === undefined) {
+        continue;
+      }
+      this.rivalPrevPositions[i]?.copy(rival.position);
+      this.rivalPrevOrientations[i]?.copy(rival.orientation);
+    }
   }
 
   /** 把载具放到起跑线,车头朝赛道前进方向。平地场景就是原点朝 +Z。 */
@@ -210,35 +259,50 @@ export class World {
     this.race?.reset();
     this.recorder.clear();
     this.ghost?.restartLap();
-    const start = this.track?.samples[0];
-    if (start === undefined) {
+    if (this.track === null || this.track.samples[0] === undefined) {
+      // 平地场景:没有赛道也就没有发车格,原点起步。
       this.vehicle.reset();
       return;
     }
-    // forward = (sin yaw, 0, cos yaw),所以由切线反解 yaw 用 atan2(x, z)。
-    this.vehicle.reset(start.x, start.z, Math.atan2(start.tangentX, start.tangentZ));
 
-    if (this.rival !== null && this.track !== null) {
-      // 沿赛道往回退 RIVAL_START_GAP 米(不是横向摆放,理由见该常量注释)。
-      // samples 是闭环,往回退用负索引取模自然绕到赛道末尾。
-      const { samples, spacing } = this.track;
+    {
+      /*
+       * 发车格。玩家占杆位(slot 0),对手依次往后排;两两一排交错开,
+       * 横向偏移压在半宽以内。上一版是「对手沿赛道往回退 20 米」的一字纵队,
+       * 多辆车之后那样排会全叠在同一条线上互相追尾。
+       */
+      const { samples, spacing, halfWidth } = this.track;
       const count = samples.length;
-      const behindSteps = Math.round(RIVAL_START_GAP / spacing);
-      const behindIndex = ((-behindSteps % count) + count) % count;
-      const rivalStart = samples[behindIndex];
-      if (rivalStart !== undefined) {
-        this.rival.reset(
-          rivalStart.x,
-          rivalStart.z,
-          Math.atan2(rivalStart.tangentX, rivalStart.tangentZ),
+      const room = halfWidth - 1.5;
+      const placeAt = (vehicle: Vehicle, slot: number): void => {
+        const { back, lateral } = gridSlot(slot);
+        const behindIndex = ((-Math.round(back / spacing) % count) + count) % count;
+        const sample = samples[behindIndex];
+        if (sample === undefined) {
+          return;
+        }
+        const offset = clamp(lateral, -room, room);
+        // 赛道右手法向 = (tangentZ, -tangentX)。
+        vehicle.reset(
+          sample.x + sample.tangentZ * offset,
+          sample.z - sample.tangentX * offset,
+          Math.atan2(sample.tangentX, sample.tangentZ),
         );
+      };
+
+      placeAt(this.vehicle, 0);
+      for (let i = 0; i < this.rivals.length; i++) {
+        const rival = this.rivals[i];
+        if (rival !== undefined) {
+          placeAt(rival, i + 1);
+        }
       }
     }
 
-    // 名次表要在两辆车都摆好之后按新的弧长重新锚定,否则重开的第一帧会把
-    // 「上一局的位置 → 起跑线」当成一次真实位移记进里程。
-    this.rivalRecovery?.reset();
-    this.standings?.reset([this.vehicle.arc, this.rival?.arc ?? 0]);
+    for (const recovery of this.rivalRecoveries) {
+      recovery.reset();
+    }
+    this.standings?.reset([this.vehicle.arc, ...this.rivals.map((r) => r.arc)]);
     this.session?.begin({ skipCountdown: this.skipCountdown });
   }
 
@@ -266,10 +330,7 @@ export class World {
   update(input: InputFrame, dt: number): void {
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
-    if (this.rival !== null) {
-      this.rivalPrevPosition.copy(this.rival.position);
-      this.rivalPrevOrientation.copy(this.rival.orientation);
-    }
+    this.saveRivalPrevious();
 
     /*
      * 发车倒计时中、以及冲线之后,输入被锁住。抢跑不判罚——压根动不了,
@@ -296,35 +357,53 @@ export class World {
      * 额外处理。
      */
     this.vehicle.applyForces(this.input, dt);
-    if (this.rival !== null && this.rivalPilot !== null) {
-      // 把玩家车传进去,AI 才知道前面有人挡路要让/要收油。
-      rivalOpponents[0] = this.vehicle;
-      this.rivalPilot.drive(this.rival, this.rivalInput, rivalOpponents);
+    /*
+     * 每辆对手都要看到**场上所有其他车**(玩家 + 其他对手),否则对手之间
+     * 会互相追尾。`rivalOpponents` 是复用的数组,每帧重填不新建。
+     */
+    if (this.rivals.length > 0) {
+      rivalOpponents.length = 0;
+      rivalOpponents.push(this.vehicle, ...this.rivals);
+    }
+    for (let i = 0; i < this.rivals.length; i++) {
+      const rival = this.rivals[i];
+      const pilot = this.rivalPilots[i];
+      const input = this.rivalInputs[i];
+      if (rival === undefined || pilot === undefined || input === undefined) {
+        continue;
+      }
+      // RacingPilot 自己会跳过 `other === vehicle`,不用在这里剔除自己。
+      pilot.drive(rival, input, rivalOpponents);
       if (locked) {
         // 对手也要等发车灯,否则倒计时期间它自己先跑了。
-        this.rivalInput.throttle = 0;
-        this.rivalInput.reverse = 0;
-        this.rivalInput.steer = 0;
-        this.rivalInput.airBrake = 0;
+        input.throttle = 0;
+        input.reverse = 0;
+        input.steer = 0;
+        input.airBrake = 0;
       }
-      this.rival.applyForces(this.rivalInput, dt);
+      rival.applyForces(input, dt);
     }
     this.physics.step();
     this.vehicle.readState(dt);
-    this.rival?.readState(dt);
+    for (const rival of this.rivals) {
+      rival.readState(dt);
+    }
 
     // 名次:两辆车的弧长都读回来之后算一次。用弧长而不是检查点,理由见
     // standings.ts 的类注释。
     if (this.standings !== null) {
       this.standings.setArc(0, this.vehicle.arc);
-      this.standings.setArc(1, this.rival?.arc ?? 0);
+      for (let i = 0; i < this.rivals.length; i++) {
+        this.standings.setArc(i + 1, this.rivals[i]?.arc ?? 0);
+      }
       this.standings.update();
     }
 
     // 对手出界也要被拉回来。送回它**当前**的弧长而不是某个检查点:AI 不刷
     // 成绩,原地扶起来就行,送回检查点反而是平白惩罚。
-    if (this.rival !== null && this.rivalRecovery !== null) {
-      this.rivalRecovery.update(this.rival, dt, this.rival.arc);
+    for (let i = 0; i < this.rivals.length; i++) {
+      const rival = this.rivals[i];
+      this.rivalRecoveries[i]?.update(rival as Vehicle, dt, rival?.arc ?? 0);
     }
 
     // 赛制在名次算完之后推进:完赛判定读的是 Standings.laps(每辆车都有,
@@ -391,27 +470,36 @@ export class World {
       );
     }
 
-    if (this.rival !== null && this.rivalCraft !== null) {
-      rivalShownPosition.lerpVectors(this.rivalPrevPosition, this.rival.position, alpha);
-      rivalShownOrientation.copy(this.rivalPrevOrientation).slerp(this.rival.orientation, alpha);
-      this.rivalCraft.group.position.copy(rivalShownPosition);
-      this.rivalCraft.group.quaternion.copy(rivalShownOrientation);
-      this.rivalCraft.setThrust(
-        this.rivalInput.throttle * CRAFT.thrustThrottleWeight +
-          normalize01(this.rival.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
+    for (let i = 0; i < this.rivals.length; i++) {
+      const rival = this.rivals[i];
+      const craft = this.rivalCrafts[i];
+      const input = this.rivalInputs[i];
+      const prevPos = this.rivalPrevPositions[i];
+      const prevRot = this.rivalPrevOrientations[i];
+      if (
+        rival === undefined ||
+        craft === undefined ||
+        input === undefined ||
+        prevPos === undefined ||
+        prevRot === undefined
+      ) {
+        continue;
+      }
+      rivalShownPosition.lerpVectors(prevPos, rival.position, alpha);
+      rivalShownOrientation.copy(prevRot).slerp(rival.orientation, alpha);
+      craft.group.position.copy(rivalShownPosition);
+      craft.group.quaternion.copy(rivalShownOrientation);
+      craft.setThrust(
+        input.throttle * CRAFT.thrustThrottleWeight +
+          normalize01(rival.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
       );
-      const rivalWheels = this.rival.wheelViews;
-      for (let i = 0; i < rivalWheels.length; i++) {
-        const wheel = rivalWheels[i];
+      const wheels = rival.wheelViews;
+      for (let w = 0; w < wheels.length; w++) {
+        const wheel = wheels[w];
         if (wheel === undefined) {
           continue;
         }
-        this.rivalCraft.setWheel(
-          i,
-          wheel.length,
-          wheel.steered ? this.rival.steerAngle : 0,
-          wheel.rollAngle,
-        );
+        craft.setWheel(w, wheel.length, wheel.steered ? rival.steerAngle : 0, wheel.rollAngle);
       }
     }
 

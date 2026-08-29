@@ -52,7 +52,7 @@ export class RacingPilot {
 
   constructor(layout: TrackLayout, aggression: number = RACING_AI.defaultAggression) {
     this.layout = layout;
-    this.aggression = clamp(aggression, 0.3, 1);
+    this.aggression = clamp(aggression, 0.3, 2);
   }
 
   drive(vehicle: Vehicle, out: InputFrame, rivals: readonly Vehicle[] = []): void {

@@ -370,7 +370,8 @@ async function boot(container: HTMLDivElement): Promise<void> {
         // 名次(M7)。没有对手的 flat 场地是 0,不是 1——0 表示「没有名次这回事」。
         position: world.standings?.rowOf('player')?.position ?? 0,
         fieldSize: world.standings?.rows.length ?? 0,
-        rivalDistance: world.standings?.rowOf('rival')?.distance ?? 0,
+        rivalCount: world.rivals.length,
+        rivalDistance: world.standings?.rowOf('rival0')?.distance ?? 0,
         playerDistance: world.standings?.rowOf('player')?.distance ?? 0,
         // 1 = 车头正对太阳(逆光),-1 = 太阳在背后。逆光路段靠它搜,不靠猜帧数。
         sunAhead: world.sunAhead,
