@@ -100,7 +100,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
   container.append(renderer.domElement);
 
   const rng = new Rng(seed);
-  const world = new World(rng, courseKind);
+  const world = new World(rng, courseKind, { skipCountdown: testMode });
   // 环境贴图要用渲染器把天空烘出来,所以只能等到这里。烘一次,天空是静态的。
   world.scene.environment = world.atmosphere.buildEnvironment(renderer);
   world.scene.environmentIntensity = SKY.environmentIntensity;
@@ -177,6 +177,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
       world.vehicle.yaw,
       world.standings?.rowOf('player'),
       world.standings?.rows.length,
+      world.session,
     );
       post.render(world.camera);
       if (!painted) {
@@ -355,6 +356,17 @@ async function boot(container: HTMLDivElement): Promise<void> {
         // 不能拍脑袋——把它们暴露出来才能在无头环境里量。
         wallNormalSpeed: world.vehicle.wallNormalSpeed,
         wallTangentSpeed: world.vehicle.wallTangentSpeed,
+        // 赛制(M7)。phase: 0=倒计时 1=比赛中 2=已结束。
+        phase:
+          world.session === null
+            ? -1
+            : world.session.phase === 'countdown'
+              ? 0
+              : world.session.phase === 'running'
+                ? 1
+                : 2,
+        finishedCount: world.session?.results.length ?? 0,
+        totalLaps: world.session?.totalLaps ?? 0,
         // 名次(M7)。没有对手的 flat 场地是 0,不是 1——0 表示「没有名次这回事」。
         position: world.standings?.rowOf('player')?.position ?? 0,
         fieldSize: world.standings?.rows.length ?? 0,

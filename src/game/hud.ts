@@ -3,6 +3,7 @@ import { MINIMAP_TUNING } from './tuning';
 import type { Race } from './race';
 import type { TrackLayout, TrackSample } from './trackLayout';
 import type { StandingRow } from './standings';
+import type { RaceSession } from './raceSession';
 
 interface VectorLike {
   x: number;
@@ -38,6 +39,10 @@ export class Hud {
   private readonly posBadge: HTMLSpanElement;
   private readonly gapRow: HTMLDivElement;
   private readonly gapVal: HTMLSpanElement;
+  // 赛制(M7):发车倒计时与结算面板
+  private readonly countdownEl: HTMLDivElement;
+  private readonly resultsEl: HTMLDivElement;
+  private readonly resultsBody: HTMLDivElement;
   private readonly currentTime: HTMLDivElement;
   private readonly deltaBadge: HTMLSpanElement;
   private readonly bestTimeVal: HTMLSpanElement;
@@ -64,6 +69,9 @@ export class Hud {
   private lastShownDeltaKey = Number.NaN;
   private lastShownPosKey = -1;
   private lastShownGapKey = Number.NaN;
+  private lastShownCountdown = -1;
+  private countdownHideAt = 0;
+  private resultsShown = false;
   private lastShownPlayerX = -99999;
   private lastShownPlayerZ = -99999;
   private lastShownPlayerRot = -99999;
@@ -210,7 +218,32 @@ export class Hud {
     infoCard.append(help, build);
 
     // 组装到 DOM 根节点
-    this.root.append(this.timingCard, this.minimapCard, speedCard, infoCard);
+    // ── 赛制:发车倒计时(画面正中大字)与结算面板 ──
+    this.countdownEl = document.createElement('div');
+    this.countdownEl.className = 'hud-countdown';
+    this.countdownEl.hidden = true;
+
+    this.resultsEl = document.createElement('div');
+    this.resultsEl.className = 'hud-results';
+    this.resultsEl.hidden = true;
+    const resultsTitle = document.createElement('div');
+    resultsTitle.className = 'hud-results-title';
+    resultsTitle.textContent = 'RESULT';
+    this.resultsBody = document.createElement('div');
+    this.resultsBody.className = 'hud-results-body';
+    const resultsHint = document.createElement('div');
+    resultsHint.className = 'hud-results-hint';
+    resultsHint.textContent = 'Esc 打开菜单 · 重开一局';
+    this.resultsEl.append(resultsTitle, this.resultsBody, resultsHint);
+
+    this.root.append(
+      this.timingCard,
+      this.minimapCard,
+      speedCard,
+      infoCard,
+      this.countdownEl,
+      this.resultsEl,
+    );
     parent.append(this.root);
   }
 
@@ -221,6 +254,7 @@ export class Hud {
     vehicleYaw?: number,
     standing?: StandingRow | null,
     fieldSize?: number,
+    session?: RaceSession | null,
   ): void {
     // 1. 速度更新
     const kmh = Math.round(metersPerSecond * 3.6);
@@ -232,10 +266,14 @@ export class Hud {
     // 2. 计时与分段更新
     if (race !== null) {
       // 圈数
-      const currentLap = race.laps + 1;
-      if (currentLap !== this.lastShownLaps) {
-        this.lastShownLaps = currentLap;
-        this.lapBadge.textContent = `LAP ${currentLap}`;
+      const total = session?.totalLaps ?? 0;
+      // 冲线之后圈数停在总圈数上,不要显示 "LAP 4/3"。
+      const raw = race.laps + 1;
+      const currentLap = total > 0 ? Math.min(raw, total) : raw;
+      const lapKey = currentLap * 100 + total;
+      if (lapKey !== this.lastShownLaps) {
+        this.lastShownLaps = lapKey;
+        this.lapBadge.textContent = total > 0 ? `LAP ${currentLap}/${total}` : `LAP ${currentLap}`;
       }
 
       // 当前圈时
@@ -321,6 +359,11 @@ export class Hud {
       this.gapRow.hidden = true;
     }
 
+    // 2.7 赛制:倒计时与结算面板(M7)
+    if (session != null) {
+      this.updateRaceSession(session);
+    }
+
     // 3. 小地图载具光标更新
     if (this.hasMap && this.playerMarker !== null && vehiclePos !== undefined) {
       const dx = vehiclePos.x - this.lastShownPlayerX;
@@ -343,6 +386,55 @@ export class Hud {
           `translate(${u.toFixed(1)}, ${v.toFixed(1)}) rotate(${angleDeg.toFixed(1)})`,
         );
       }
+    }
+  }
+
+  private updateRaceSession(session: RaceSession): void {
+    // 倒计时:剩余秒数向上取整,最后显示 GO。
+    if (session.phase === 'countdown') {
+      const shown = Math.ceil(session.countdown);
+      if (shown !== this.lastShownCountdown) {
+        this.lastShownCountdown = shown;
+        this.countdownEl.hidden = false;
+        this.countdownEl.textContent = String(Math.max(1, shown));
+      }
+    } else if (this.lastShownCountdown !== 0) {
+      // 从倒计时切到比赛:GO 闪一下再消失。用 hidden 而不是 display,
+      // 和 CLAUDE.md 里 artifact 那条一致,也免得和 CSS 打架。
+      this.lastShownCountdown = 0;
+      this.countdownEl.textContent = 'GO';
+      this.countdownEl.hidden = false;
+      this.countdownHideAt = Date.now() + 700;
+    }
+    if (this.countdownHideAt > 0 && Date.now() > this.countdownHideAt) {
+      this.countdownHideAt = 0;
+      this.countdownEl.hidden = true;
+    }
+
+    // 结算面板:只在 finished 那一刻建一次,之后不再动 DOM。
+    if (session.phase === 'finished' && !this.resultsShown) {
+      this.resultsShown = true;
+      this.resultsEl.hidden = false;
+      for (const result of session.results) {
+        const row = document.createElement('div');
+        row.className = 'hud-results-row';
+        const pos = document.createElement('span');
+        pos.className = 'hud-results-pos';
+        pos.textContent = `P${result.position}`;
+        const who = document.createElement('span');
+        who.className = 'hud-results-who';
+        who.textContent = result.id === 'player' ? '你' : '对手';
+        const time = document.createElement('span');
+        time.className = 'hud-results-time';
+        // time 为 0 = 没冲线就被强制结算(见 raceSession.ts 的 finish())。
+        time.textContent = result.time > 0 ? formatTime(result.time) : 'DNF';
+        row.append(pos, who, time);
+        this.resultsBody.append(row);
+      }
+    } else if (session.phase !== 'finished' && this.resultsShown) {
+      this.resultsShown = false;
+      this.resultsEl.hidden = true;
+      this.resultsBody.replaceChildren();
     }
   }
 

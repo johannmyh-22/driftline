@@ -414,3 +414,77 @@ body {
   opacity: 0.65;
   letter-spacing: 0.02em;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 赛制(M7):发车倒计时与结算面板
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+.hud-countdown {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: clamp(4rem, 14vw, 10rem);
+  font-weight: 800;
+  line-height: 1;
+  color: #e8ecff;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0.08em 0.3em rgba(0, 0, 0, 0.75);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.hud-results {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  min-width: min(22rem, 80vw);
+  padding: 1.4rem 1.6rem;
+  border-radius: 10px;
+  background: rgba(5, 8, 18, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+
+.hud-results-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: #94a3b8;
+  margin-bottom: 0.9rem;
+}
+
+.hud-results-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  padding: 0.35rem 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-results-row:first-child .hud-results-pos,
+.hud-results-row:first-child .hud-results-who {
+  color: #fbbf24;
+}
+
+.hud-results-pos {
+  font-weight: 700;
+  color: #e8ecff;
+  min-width: 2.2rem;
+}
+
+.hud-results-who {
+  flex: 1;
+  color: #e8ecff;
+}
+
+.hud-results-time {
+  color: #94a3b8;
+}
+
+.hud-results-hint {
+  margin-top: 1rem;
+  font-size: 0.72rem;
+  color: #64748b;
+}

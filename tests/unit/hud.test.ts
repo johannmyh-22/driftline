@@ -2,6 +2,8 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
 import { Hud, formatDelta, formatGap, formatTime } from '../../src/game/hud';
 import type { StandingRow } from '../../src/game/standings';
+import { RaceSession } from '../../src/game/raceSession';
+import { Standings } from '../../src/game/standings';
 import { Race } from '../../src/game/race';
 import { generateTrack } from '../../src/game/trackLayout';
 
@@ -294,6 +296,94 @@ describe('名次显示(M7)', () => {
 
     const badge = container.querySelector('.hud-pos-badge') as HTMLElement | null;
     expect(badge?.hidden).toBe(true);
+    hud.dispose();
+  });
+});
+
+describe('赛制显示(M7)', () => {
+  function makeRow(over: Partial<StandingRow> = {}): StandingRow {
+    return {
+      id: 'player', distance: 0, laps: 0, position: 1,
+      gapToLeader: 0, gapToAhead: 0, gapToBehind: 0, ...over,
+    };
+  }
+
+  it('倒计时期间在画面中央显示剩余秒数', () => {
+    const container = document.createElement('div');
+    const hud = new Hud(container, 1, null, null, null);
+    const session = new RaceSession();
+    session.begin();
+
+    hud.update(0, null, undefined, undefined, makeRow(), 2, session);
+    const el = container.querySelector('.hud-countdown') as HTMLElement | null;
+    expect(el).not.toBeNull();
+    expect(el?.hidden).toBe(false);
+    expect(el?.textContent).toBe('3');
+    hud.dispose();
+  });
+
+  it('圈数徽章显示 LAP n/N,冲线后不会变成 LAP 4/3', () => {
+    const container = document.createElement('div');
+    const race = new Race(generateTrack(new Rng(1)));
+    const hud = new Hud(container, 1, null, race, null);
+    const session = new RaceSession(3);
+    session.begin({ skipCountdown: true });
+
+    hud.update(0, race, undefined, undefined, makeRow(), 2, session);
+    const badge = container.querySelector('.hud-lap-badge') as HTMLElement | null;
+    expect(badge?.textContent).toBe('LAP 1/3');
+
+    // 跑完 3 圈之后 race.laps 会到 3,显示要停在 3/3。
+    (race as unknown as { laps: number }).laps = 3;
+    hud.update(0, race, undefined, undefined, makeRow(), 2, session);
+    expect(badge?.textContent).toBe('LAP 3/3');
+    hud.dispose();
+  });
+
+  it('比赛结束后弹出结算面板,冠军在最上面,没冲线的显示 DNF', () => {
+    const container = document.createElement('div');
+    const hud = new Hud(container, 1, null, null, null);
+    const session = new RaceSession(1);
+    session.begin({ skipCountdown: true });
+
+    // 让玩家冲线,对手原地不动,然后等过宽限期强制结算。
+    const standings = new Standings(['player', 'rival'], 1000);
+    standings.reset([0, 0]);
+    for (const arc of [250, 500, 750, 990, 20]) {
+      standings.setArc(0, arc);
+      standings.setArc(1, 10);
+      standings.update();
+      session.update(1 / 60, standings);
+    }
+    for (let t = 0; t < 25; t += 1 / 60) {
+      session.update(1 / 60, standings);
+    }
+    expect(session.phase).toBe('finished');
+
+    hud.update(0, null, undefined, undefined, makeRow(), 2, session);
+    const panel = container.querySelector('.hud-results') as HTMLElement | null;
+    expect(panel?.hidden).toBe(false);
+    const rows = container.querySelector('.hud-results-body');
+    expect(rows?.children.length).toBe(2);
+    // 假 DOM 的 textContent 不聚合子节点,直接看子 span。
+    const cells = (row: unknown): string[] =>
+      ((row as { children?: { textContent?: string }[] }).children ?? []).map(
+        (c) => c.textContent ?? '',
+      );
+    const first = cells(rows?.children[0]);
+    expect(first[0]).toBe('P1');
+    expect(first[1]).toBe('你');
+    // 没冲线的那辆记 DNF。
+    expect(cells(rows?.children[1])[2]).toBe('DNF');
+    hud.dispose();
+  });
+
+  it('没有赛制(flat 场地)时倒计时与结算都不出现', () => {
+    const container = document.createElement('div');
+    const hud = new Hud(container, 1, null, null, null);
+    hud.update(0, null, undefined, undefined, null, 0, null);
+    expect((container.querySelector('.hud-countdown') as HTMLElement | null)?.hidden).toBe(true);
+    expect((container.querySelector('.hud-results') as HTMLElement | null)?.hidden).toBe(true);
     hud.dispose();
   });
 });

@@ -15,6 +15,7 @@ import { createTrackMesh } from '../gfx/trackMesh';
 import { normalize01 } from '../core/mathx';
 import { RacingPilot } from './racingPilot';
 import { TrackRecovery } from './trackRecovery';
+import { RaceSession } from './raceSession';
 import { Standings } from './standings';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
@@ -106,6 +107,10 @@ export class World {
    * 下标顺序固定:0 = 玩家,1 = 对手,和 `RACER_IDS` 一致。
    */
   readonly standings: Standings | null;
+  /**
+   * 赛制(M7):倒计时发车、跑 N 圈、结算。`flat` 场地没有赛道也就没有比赛。
+   */
+  readonly session: RaceSession | null;
 
   private readonly craft: Craft;
   private readonly rivalPilot: RacingPilot | null;
@@ -129,7 +134,11 @@ export class World {
    */
   private readonly recorder = new InputRecorder();
 
-  constructor(rng: Rng, kind: CourseKind = 'race') {
+  /** 测试模式:跳过发车倒计时,理由见 `raceSession.ts` 的类注释。 */
+  private readonly skipCountdown: boolean;
+
+  constructor(rng: Rng, kind: CourseKind = 'race', options: { skipCountdown?: boolean } = {}) {
+    this.skipCountdown = options.skipCountdown === true;
     const palette = createPalette(rng.fork());
 
     this.atmosphere = new Atmosphere(rng.fork());
@@ -165,6 +174,7 @@ export class World {
     this.rival = this.track === null ? null : new Vehicle(this.field, this.physics);
     this.rivalPilot = this.track === null ? null : new RacingPilot(this.track);
     this.rivalRecovery = this.track === null ? null : new TrackRecovery(this.track);
+    this.session = this.track === null ? null : new RaceSession();
     this.standings =
       this.track === null ? null : new Standings(RACER_IDS, this.track.totalLength);
     this.chase = new ChaseCamera(this.field);
@@ -229,6 +239,7 @@ export class World {
     // 「上一局的位置 → 起跑线」当成一次真实位移记进里程。
     this.rivalRecovery?.reset();
     this.standings?.reset([this.vehicle.arc, this.rival?.arc ?? 0]);
+    this.session?.begin({ skipCountdown: this.skipCountdown });
   }
 
   get camera(): PerspectiveCamera {
@@ -260,10 +271,16 @@ export class World {
       this.rivalPrevOrientation.copy(this.rival.orientation);
     }
 
-    this.input.throttle = input.throttle;
-    this.input.reverse = input.reverse;
-    this.input.steer = input.steer;
-    this.input.airBrake = input.airBrake;
+    /*
+     * 发车倒计时中、以及冲线之后,输入被锁住。抢跑不判罚——压根动不了,
+     * 这比事后罚时直观。锁住的是**写进物理的那份**,不是外面传进来的
+     * `input`,免得把调用方的帧改脏。
+     */
+    const locked = this.session?.inputLocked === true;
+    this.input.throttle = locked ? 0 : input.throttle;
+    this.input.reverse = locked ? 0 : input.reverse;
+    this.input.steer = locked ? 0 : input.steer;
+    this.input.airBrake = locked ? 0 : input.airBrake;
 
     if (this.race !== null) {
       // 就地把 this.input 量化成回放精度 —— 物理这一帧吃到的和录下来的必须是
@@ -283,6 +300,13 @@ export class World {
       // 把玩家车传进去,AI 才知道前面有人挡路要让/要收油。
       rivalOpponents[0] = this.vehicle;
       this.rivalPilot.drive(this.rival, this.rivalInput, rivalOpponents);
+      if (locked) {
+        // 对手也要等发车灯,否则倒计时期间它自己先跑了。
+        this.rivalInput.throttle = 0;
+        this.rivalInput.reverse = 0;
+        this.rivalInput.steer = 0;
+        this.rivalInput.airBrake = 0;
+      }
       this.rival.applyForces(this.rivalInput, dt);
     }
     this.physics.step();
@@ -302,6 +326,10 @@ export class World {
     if (this.rival !== null && this.rivalRecovery !== null) {
       this.rivalRecovery.update(this.rival, dt, this.rival.arc);
     }
+
+    // 赛制在名次算完之后推进:完赛判定读的是 Standings.laps(每辆车都有,
+    // 而 Race 只伺候玩家),见 raceSession.ts 的类注释。
+    this.session?.update(dt, this.standings);
 
     const lapsBefore = this.race?.laps ?? 0;
     this.race?.update(this.vehicle, dt);
