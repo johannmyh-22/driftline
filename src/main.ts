@@ -199,6 +199,9 @@ async function boot(container: HTMLDivElement): Promise<void> {
           loop.start();
         },
         onRestart: () => {
+          // 开始按钮自己解锁一次,不指望 pointerdown 冒泡到 window 那个监听器
+          // ——按钮的处理器里如果有 stopPropagation,冒泡是收不到的。
+          audio?.resume();
           audio?.triggerUiClick();
           world.spawnAtStart();
           world.chase.snapTo(world.vehicle);
@@ -238,16 +241,30 @@ async function boot(container: HTMLDivElement): Promise<void> {
     });
 
     /*
-     * 浏览器自动播放策略:AudioContext 造出来是 suspended 的,必须等一次
-     * 真实用户手势才会真正出声。只需要成功一次,监听器自己摘掉自己。
+     * 浏览器自动播放策略:AudioContext 必须在真实用户手势之后才会出声。
+     *
+     * **监听器要一直挂到上下文确认在跑为止,不能"调过一次就摘掉"。**
+     * 老代码是首次按键/点击就把自己摘掉,可 `resume()` 是异步的、而且第一次
+     * 未必成功(手势可能被判定为不合格,或者上下文报告 running 却仍被策略
+     * 挡着)。一旦那唯一一次没生效,后面就再也没人调 resume 了——人类实际
+     * 听到的「刚进游戏没声音,撞一下车之后才有」就是这么来的:后来的按键
+     * 碰巧又触发了别的路径才把它解锁。
+     *
+     * 现在每次手势都调,直到 `isRunning` 为真才摘监听器。`resume()` 对已经
+     * 在跑的上下文是空操作,重复调没有代价。
      */
-    const resumeAudioOnce = (): void => {
-      audio?.resume();
-      window.removeEventListener('keydown', resumeAudioOnce);
-      window.removeEventListener('pointerdown', resumeAudioOnce);
+    const resumeAudio = (): void => {
+      if (audio === null) {
+        return;
+      }
+      audio.resume();
+      if (audio.isRunning) {
+        window.removeEventListener('keydown', resumeAudio);
+        window.removeEventListener('pointerdown', resumeAudio);
+      }
     };
-    window.addEventListener('keydown', resumeAudioOnce);
-    window.addEventListener('pointerdown', resumeAudioOnce);
+    window.addEventListener('keydown', resumeAudio);
+    window.addEventListener('pointerdown', resumeAudio);
   }
 
   if (testMode) {
@@ -312,6 +329,10 @@ async function boot(container: HTMLDivElement): Promise<void> {
         bestLapTime: world.race?.bestLapTime ?? 0,
         checkpoint: world.race?.lastCheckpoint ?? 0,
         resets: world.race?.resets ?? 0,
+        // 撞墙的法向/切向速度(m/s)。音频的撞击强度归一化基准要拿真实分布来定,
+        // 不能拍脑袋——把它们暴露出来才能在无头环境里量。
+        wallNormalSpeed: world.vehicle.wallNormalSpeed,
+        wallTangentSpeed: world.vehicle.wallTangentSpeed,
         // 名次(M7)。没有对手的 flat 场地是 0,不是 1——0 表示「没有名次这回事」。
         position: world.standings?.rowOf('player')?.position ?? 0,
         fieldSize: world.standings?.rows.length ?? 0,

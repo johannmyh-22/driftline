@@ -721,6 +721,73 @@ describe('ImpactPlayer', () => {
     expect(calls).toBe(0);
   });
 
+  /*
+   * 下面两条守的是"贴墙磨会连成机关枪"这个问题。实测 90% 的撞墙接触帧法向
+   * 速度不到 0.16 m/s(见 tuning.ts 里那段标定注释),阈值之上的抖动仍然会
+   * 每几帧触发一次,必须再加一道冷却。
+   */
+  it('冷却窗口内的重复轻碰不会连发', () => {
+    const { bus, context } = makeBus();
+    let calls = 0;
+    const before = context.createOscillator.bind(context);
+    context.createOscillator = () => {
+      calls++;
+      return before();
+    };
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    const hit = AUDIO.impactRefNormalSpeed * 0.3;
+    // 8 次轻碰全部落在同一个冷却窗口内(累计推进 0.8 个窗口)。
+    for (let i = 0; i < 8; i++) {
+      impact.play(hit, 0);
+      context.currentTime += AUDIO.impactRetriggerTime / 10;
+    }
+    expect(calls).toBe(1);
+  });
+
+  it('冷却窗口内明显更重的撞击仍然放得出来,不会被前一下轻碰吃掉', () => {
+    const { bus, context } = makeBus();
+    let calls = 0;
+    const before = context.createOscillator.bind(context);
+    context.createOscillator = () => {
+      calls++;
+      return before();
+    };
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    impact.play(AUDIO.impactRefNormalSpeed * 0.2, 0);
+    expect(calls).toBe(1);
+    // 同一窗口内,强度远超上一次(> impactRetriggerRatio 倍)。
+    impact.play(AUDIO.impactRefNormalSpeed * 1.0, 0);
+    expect(calls).toBe(2);
+  });
+
+  it('冷却过后可以再次触发', () => {
+    const { bus, context } = makeBus();
+    let calls = 0;
+    const before = context.createOscillator.bind(context);
+    context.createOscillator = () => {
+      calls++;
+      return before();
+    };
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    const hit = AUDIO.impactRefNormalSpeed * 0.3;
+    impact.play(hit, 0);
+    context.currentTime += AUDIO.impactRetriggerTime * 1.5;
+    impact.play(hit, 0);
+    expect(calls).toBe(2);
+  });
+
+  it('强度标定挡得住磨墙那堆接触帧(实测 p90 = 0.16 m/s)', () => {
+    const gate = AUDIO.impactMinStrength * AUDIO.impactRefNormalSpeed;
+    expect(gate).toBeGreaterThan(0.16);
+    // 但又不能高到把真实撞击(实测 p99 ≈ 3 m/s)也挡掉。
+    expect(gate).toBeLessThan(1);
+  });
+
+  it('撞击的峰值音量盖得过引擎与气流,否则撞了跟没撞一样', () => {
+    expect(AUDIO.impactNoiseGain).toBeGreaterThan(AUDIO.engineMaxGain);
+    expect(AUDIO.impactNoiseGain).toBeGreaterThan(AUDIO.windMaxGain);
+  });
+
   it('同一个 seed 构造出的噪声缓冲是确定性的', () => {
     const { bus: busA } = makeBus();
     const { bus: busB } = makeBus();

@@ -38,6 +38,9 @@ import { createNoiseBuffer } from './noise';
 export class ImpactPlayer {
   private readonly bus: AudioBus;
   private readonly noiseBuffer: AudioBuffer;
+  /** 上一次真的出声的时间与强度,用于抑制磨墙时的机关枪式重复触发。 */
+  private lastPlayTime = Number.NEGATIVE_INFINITY;
+  private lastStrength = 0;
 
   constructor(bus: AudioBus, rng: Rng) {
     this.bus = bus;
@@ -55,6 +58,20 @@ export class ImpactPlayer {
     }
     const context = this.bus.context;
     const now = context.currentTime;
+
+    /*
+     * 磨墙时法向速度会在阈值上下不停抖动,不挡一下就会每几帧放一次 crack,
+     * 连成机关枪。持续接触归 `ScrapeNoise` 管,这里只放"一下"。冷却窗口内
+     * 只有明显更重的撞击才准打断——否则真的撞重了会被前一下轻碰吃掉。
+     */
+    if (
+      now - this.lastPlayTime < AUDIO.impactRetriggerTime &&
+      s < this.lastStrength * AUDIO.impactRetriggerRatio
+    ) {
+      return;
+    }
+    this.lastPlayTime = now;
+    this.lastStrength = s;
 
     // 0 = 纯擦过,1 = 纯正面撞。下面每个 lerp(擦过系数, 1, headOn) 在正面撞时
     // 退化成 1,也就是基准值本身。

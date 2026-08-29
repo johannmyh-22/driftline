@@ -38,9 +38,14 @@ export class AudioDirector {
     this.scrape = new ScrapeNoise(this.bus, rng.fork());
   }
 
-  /** 浏览器自动播放策略要求先有一次用户手势才能出声,`main.ts` 在首次按键/点击时调用。 */
+  /** 浏览器自动播放策略要求先有一次用户手势才能出声,`main.ts` 在每次手势时调用直到真的跑起来。 */
   resume(): void {
     this.bus.resume();
+  }
+
+  /** 音频上下文是否真的在跑(不是"没被 suspend",见 `AudioBus.resume()` 的注释)。 */
+  get isRunning(): boolean {
+    return this.bus.isRunning;
   }
 
   /** 每个固定步调一次,和物理同频率——引擎/气流的参数平滑内建在节点自己的 setTargetAtTime 里。 */
