@@ -13,7 +13,7 @@ import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
 import { normalize01 } from '../core/mathx';
-import { Autopilot } from './autopilot';
+import { RacingPilot } from './racingPilot';
 import { Standings } from './standings';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
@@ -45,6 +45,9 @@ const mapCentre = new Vector3();
  * 同时不用去改测试本身迁就一个新加入的、和被测行为无关的变量。
  */
 const RIVAL_START_GAP = 20;
+
+/** 传给对手 AI 的「场上其他车」。复用同一个数组,每帧不分配。 */
+const rivalOpponents: Vehicle[] = [];
 
 /** 名次表里各车的 id 与下标顺序。0 = 玩家,1 = 对手。 */
 const RACER_IDS = ['player', 'rival'] as const;
@@ -87,11 +90,14 @@ export class World {
   readonly ghost: Ghost | null;
   /**
    * 竞速对手(M7 第一次真的有第二辆车参与物理,和玩家共享同一个
-   * `Physics` 世界——不是幽灵那种独立世界里的半透明重放)。开的是
-   * `Autopilot`,那东西自己的类注释写得很清楚「不是游戏内容,是验收
-   * 工具」——这里先借来当一个能撞的活靶子,真正的「AI 竞速逻辑」
-   * (更激进的油门策略、避让别的车)是 M7 后续独立的一块,还没做。
-   * `flat` 场地(没有赛道给 Autopilot 循迹)下是 null。
+   * `Physics` 世界——不是幽灵那种独立世界里的半透明重放)。
+   *
+   * 开的是 `RacingPilot`。**曾经是 `Autopilot`,换掉了**:那东西自己的类
+   * 注释写着「不是游戏内容,是验收工具」,实测当对手用单圈比目标时间慢
+   * 56~74%、满油门占比只有 5%,人类反馈「AI 车太垃圾了」。`Autopilot` 本身
+   * 一个字没动,截图回归的既有基线还靠它。
+   *
+   * `flat` 场地(没有赛道可循迹)下是 null。
    */
   readonly rival: Vehicle | null;
   /**
@@ -101,7 +107,7 @@ export class World {
   readonly standings: Standings | null;
 
   private readonly craft: Craft;
-  private readonly rivalPilot: Autopilot | null;
+  private readonly rivalPilot: RacingPilot | null;
   private readonly rivalCraft: Craft | null;
   private readonly rivalInput: InputFrame = createInputFrame();
   private readonly rivalPrevPosition = new Vector3();
@@ -151,7 +157,7 @@ export class World {
     // 共用同一个 Rapier 世界(见 vehicle.ts 的 applyForces()/readState() 拆分、
     // 以及 ghost.ts 类注释里「为什么 Ghost 必须用独立世界」的对照说明)。
     this.rival = this.track === null ? null : new Vehicle(this.field, this.physics);
-    this.rivalPilot = this.track === null ? null : new Autopilot(this.track);
+    this.rivalPilot = this.track === null ? null : new RacingPilot(this.track);
     this.standings =
       this.track === null ? null : new Standings(RACER_IDS, this.track.totalLength);
     this.chase = new ChaseCamera(this.field);
@@ -266,7 +272,9 @@ export class World {
      */
     this.vehicle.applyForces(this.input, dt);
     if (this.rival !== null && this.rivalPilot !== null) {
-      this.rivalPilot.drive(this.rival, this.rivalInput);
+      // 把玩家车传进去,AI 才知道前面有人挡路要让/要收油。
+      rivalOpponents[0] = this.vehicle;
+      this.rivalPilot.drive(this.rival, this.rivalInput, rivalOpponents);
       this.rival.applyForces(this.rivalInput, dt);
     }
     this.physics.step();
