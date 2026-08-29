@@ -8,11 +8,12 @@ import { type InputFrame, InputRecorder, createInputFrame } from '../core/input'
 import type { Rng } from '../core/rng';
 import { type Craft, createCraft } from '../gfx/craft';
 import { createGround } from '../gfx/ground';
-import { createPalette } from '../gfx/palette';
+import { createPalette, rivalCraftColors } from '../gfx/palette';
 import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
 import { normalize01 } from '../core/mathx';
+import { Autopilot } from './autopilot';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
 import { Ghost } from './ghost';
@@ -27,7 +28,22 @@ import { Vehicle } from './vehicle';
 
 const shownPosition = new Vector3();
 const shownOrientation = new Quaternion();
+const rivalShownPosition = new Vector3();
+const rivalShownOrientation = new Quaternion();
 const mapCentre = new Vector3();
+
+/**
+ * 对手起步时落后玩家多远(沿赛道弧长,米)。**不是手感参数**,只是起步
+ * 摆位,不放进 `tuning.ts`。
+ *
+ * **故意沿赛道纵向错开,不是并排。** 第一次接这块时试过并排起步(横向
+ * 偏移),结果 `smoke.spec.ts` 里"满油门打满舵 2.5 秒"那条测试红了——
+ * 不是断言太严,是玩家真的被 3 米外的对手车撞歪了,横向位移的方向都变了。
+ * 那条测试的前提是"只有玩家一辆车",纵向错开能保证短时间窗口的测试
+ * (这个项目里最长的连续输入测试是 6.5 秒)碰不到跟在后面的对手车,
+ * 同时不用去改测试本身迁就一个新加入的、和被测行为无关的变量。
+ */
+const RIVAL_START_GAP = 20;
 
 
 /** 固定机位:回归截图用,和玩家实际在用的跟随机位分开。 */
@@ -65,8 +81,22 @@ export class World {
   readonly physics: Physics;
   /** 幽灵回放。`flat` 场地(没有 `Race`)下是 null。 */
   readonly ghost: Ghost | null;
+  /**
+   * 竞速对手(M7 第一次真的有第二辆车参与物理,和玩家共享同一个
+   * `Physics` 世界——不是幽灵那种独立世界里的半透明重放)。开的是
+   * `Autopilot`,那东西自己的类注释写得很清楚「不是游戏内容,是验收
+   * 工具」——这里先借来当一个能撞的活靶子,真正的「AI 竞速逻辑」
+   * (更激进的油门策略、避让别的车)是 M7 后续独立的一块,还没做。
+   * `flat` 场地(没有赛道给 Autopilot 循迹)下是 null。
+   */
+  readonly rival: Vehicle | null;
 
   private readonly craft: Craft;
+  private readonly rivalPilot: Autopilot | null;
+  private readonly rivalCraft: Craft | null;
+  private readonly rivalInput: InputFrame = createInputFrame();
+  private readonly rivalPrevPosition = new Vector3();
+  private readonly rivalPrevOrientation = new Quaternion();
   private readonly prevPosition = new Vector3();
   private readonly prevOrientation = new Quaternion();
   private preset = 'chase';
@@ -108,12 +138,21 @@ export class World {
     this.race = this.track === null ? null : new Race(this.track);
     this.physics = new Physics();
     this.vehicle = new Vehicle(this.field, this.physics);
+    // 和玩家共享 this.physics——这正是这一节要证明的事:两辆车能安全地
+    // 共用同一个 Rapier 世界(见 vehicle.ts 的 applyForces()/readState() 拆分、
+    // 以及 ghost.ts 类注释里「为什么 Ghost 必须用独立世界」的对照说明)。
+    this.rival = this.track === null ? null : new Vehicle(this.field, this.physics);
+    this.rivalPilot = this.track === null ? null : new Autopilot(this.track);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
     this.spawnAtStart();
 
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft.group);
+    this.rivalCraft = this.rival === null ? null : createCraft(rng.fork(), rivalCraftColors(palette));
+    if (this.rivalCraft !== null) {
+      this.scene.add(this.rivalCraft.group);
+    }
 
     this.ghost = this.track === null ? null : new Ghost(this.field, this.track, rng.fork(), palette);
     if (this.ghost !== null) {
@@ -124,6 +163,10 @@ export class World {
     // 明暗过渡和天空是一致的,而不是人为塞一个补光。
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
+    if (this.rival !== null) {
+      this.rivalPrevPosition.copy(this.rival.position);
+      this.rivalPrevOrientation.copy(this.rival.orientation);
+    }
     this.chase.snapTo(this.vehicle);
     this.present(1);
   }
@@ -140,6 +183,23 @@ export class World {
     }
     // forward = (sin yaw, 0, cos yaw),所以由切线反解 yaw 用 atan2(x, z)。
     this.vehicle.reset(start.x, start.z, Math.atan2(start.tangentX, start.tangentZ));
+
+    if (this.rival !== null && this.track !== null) {
+      // 沿赛道往回退 RIVAL_START_GAP 米(不是横向摆放,理由见该常量注释)。
+      // samples 是闭环,往回退用负索引取模自然绕到赛道末尾。
+      const { samples, spacing } = this.track;
+      const count = samples.length;
+      const behindSteps = Math.round(RIVAL_START_GAP / spacing);
+      const behindIndex = ((-behindSteps % count) + count) % count;
+      const rivalStart = samples[behindIndex];
+      if (rivalStart !== undefined) {
+        this.rival.reset(
+          rivalStart.x,
+          rivalStart.z,
+          Math.atan2(rivalStart.tangentX, rivalStart.tangentZ),
+        );
+      }
+    }
   }
 
   get camera(): PerspectiveCamera {
@@ -166,6 +226,10 @@ export class World {
   update(input: InputFrame, dt: number): void {
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
+    if (this.rival !== null) {
+      this.rivalPrevPosition.copy(this.rival.position);
+      this.rivalPrevOrientation.copy(this.rival.orientation);
+    }
 
     this.input.throttle = input.throttle;
     this.input.reverse = input.reverse;
@@ -179,16 +243,20 @@ export class World {
     }
 
     /*
-     * 拆成 applyForces() → physics.step() → readState() 三段而不是调
-     * this.vehicle.update(),是 M7(多车共享同一个 Physics 世界)的落地
-     * 准备:这里目前只有一辆车,行为和调 update() 完全一样,但把 step()
-     * 的调度权交给了 World——以后加第二辆车时,只需要把这三行改成
-     * 「所有车 applyForces() → 一次 physics.step() → 所有车 readState()」,
-     * 不用再动 Vehicle 内部。见 vehicle.ts 的 update()/applyForces() 类注释。
+     * 所有车先 applyForces(),物理世界只 step() 一次,再所有车 readState() ——
+     * 这正是 vehicle.ts 拆分 update() 时预留的模式(见那边的类注释),
+     * 现在真的用上了第二辆车。玩家和对手共享同一个 this.physics,
+     * 车间碰撞靠 Physics.createChassis() 挂的碰撞体自然发生,不用在这里
+     * 额外处理。
      */
     this.vehicle.applyForces(this.input, dt);
+    if (this.rival !== null && this.rivalPilot !== null) {
+      this.rivalPilot.drive(this.rival, this.rivalInput);
+      this.rival.applyForces(this.rivalInput, dt);
+    }
     this.physics.step();
     this.vehicle.readState(dt);
+    this.rival?.readState(dt);
 
     const lapsBefore = this.race?.laps ?? 0;
     this.race?.update(this.vehicle, dt);
@@ -248,6 +316,30 @@ export class World {
         wheel.steered ? this.vehicle.steerAngle : 0,
         wheel.rollAngle,
       );
+    }
+
+    if (this.rival !== null && this.rivalCraft !== null) {
+      rivalShownPosition.lerpVectors(this.rivalPrevPosition, this.rival.position, alpha);
+      rivalShownOrientation.copy(this.rivalPrevOrientation).slerp(this.rival.orientation, alpha);
+      this.rivalCraft.group.position.copy(rivalShownPosition);
+      this.rivalCraft.group.quaternion.copy(rivalShownOrientation);
+      this.rivalCraft.setThrust(
+        this.rivalInput.throttle * CRAFT.thrustThrottleWeight +
+          normalize01(this.rival.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
+      );
+      const rivalWheels = this.rival.wheelViews;
+      for (let i = 0; i < rivalWheels.length; i++) {
+        const wheel = rivalWheels[i];
+        if (wheel === undefined) {
+          continue;
+        }
+        this.rivalCraft.setWheel(
+          i,
+          wheel.length,
+          wheel.steered ? this.rival.steerAngle : 0,
+          wheel.rollAngle,
+        );
+      }
     }
 
     this.ghost?.present(alpha);

@@ -105,6 +105,25 @@ export function createPalette(rng: Rng): Palette {
   };
 }
 
+/**
+ * 从一份基础配色派生「和玩家明显不同」的车身配色,给 M7 的对手车用。
+ *
+ * 不重新挑主题 —— 地形/路面/护墙必须和玩家共享同一个环境,只有车身颜色
+ * 需要区分。直接把色相转半圈:不管原来是三套主题里哪一套选出来的色相,
+ * 转完之后都离得够远,一眼分得清谁是谁(人类看过并排出现在同一屏的截图,
+ * 反馈"对手车不能和玩家长一样",见 docs/HANDOFF.md 第三十六节)。
+ */
+export function rivalCraftColors(base: Palette): Palette {
+  const hsl = { h: 0, s: 0, l: 0 };
+  base.craftHull.getHSL(hsl);
+  const rivalHue = (hsl.h + 0.5) % 1;
+  return {
+    ...base,
+    craftHull: new Color().setHSL(rivalHue, 0.55, 0.16),
+    craftAccent: new Color().setHSL(rivalHue, 0.45, 0.26),
+  };
+}
+
 /** 直接指定线性空间的值。写实反照率是查表来的,不该再过一遍 sRGB 转换。 */
 function linear(r: number, g: number, b: number): Color {
   return new Color().setRGB(r, g, b);
