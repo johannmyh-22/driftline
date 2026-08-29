@@ -7,6 +7,8 @@ import { AudioBus } from './context';
 import { EngineSound } from './engine';
 import { ImpactPlayer } from './impact';
 import { ScrapeNoise } from './scrape';
+import { TireSqueal } from './skid';
+import { SurfaceNoise } from './surface';
 import { playUiClick } from './ui';
 import { WindNoise } from './wind';
 
@@ -16,8 +18,8 @@ import { WindNoise } from './wind';
  * 注释)。撞击音(`ImpactPlayer`)虽然也是事件驱动,但要预生成噪声缓冲
  * (见 `impact.ts` 的类注释),所以和引擎/气流一样长期持有一个实例。
  *
- * 四个消费者各 `rng.fork()` 一份:引擎的排气粗糙度层、气流、撞击、刮擦都要
- * 预生成自己的噪声缓冲,共用同一条随机数流的话,任何一处改了取数个数都会连带改掉
+ * 六个消费者各 `rng.fork()` 一份:引擎的排气粗糙度层、气流、撞击、刮擦、
+ * 轮胎尖叫、出界地面噪声都要预生成自己的噪声缓冲,共用同一条随机数流的话,任何一处改了取数个数都会连带改掉
  * 另外两处的缓冲内容。
  *
  * 和 `Hud`/`Menu` 一样,测试模式下不构造这个类——`?test=1` 下没有真实
@@ -29,6 +31,10 @@ export class AudioDirector {
   private readonly wind: WindNoise;
   private readonly impact: ImpactPlayer;
   private readonly scrape: ScrapeNoise;
+  private readonly squeal: TireSqueal;
+  private readonly surface: SurfaceNoise;
+  /** 上一帧是否接地,用来抓「落地」这个瞬间。 */
+  private wasGrounded = true;
 
   constructor(rng: Rng) {
     this.bus = new AudioBus();
@@ -36,6 +42,8 @@ export class AudioDirector {
     this.wind = new WindNoise(this.bus, rng.fork());
     this.impact = new ImpactPlayer(this.bus, rng.fork());
     this.scrape = new ScrapeNoise(this.bus, rng.fork());
+    this.squeal = new TireSqueal(this.bus, rng.fork());
+    this.surface = new SurfaceNoise(this.bus, rng.fork());
   }
 
   /** 浏览器自动播放策略要求先有一次用户手势才能出声,`main.ts` 在每次手势时调用直到真的跑起来。 */
@@ -59,6 +67,18 @@ export class AudioDirector {
     if (vehicle.wallNormalSpeed > 0) {
       this.impact.play(vehicle.wallNormalSpeed, vehicle.wallTangentSpeed);
     }
+
+    // 甩尾:抓地饱和 + 真的滑出速度,两个条件都在 TireSqueal 里判。
+    this.squeal.update(vehicle.gripSaturation, vehicle.lateralSpeed, this.bus.context);
+    // 出界:压在土石上的滚动噪声,和气流音色刻意分开。
+    this.surface.update(!vehicle.onTrack, speed01, this.bus.context);
+
+    // 落地:只在「上一帧腾空、这一帧接地」的那一瞬间放一次。用垂直速度定
+    // 强度 —— 轻轻压过路肩和从跳台砸下来不该是同一声。
+    if (vehicle.grounded && !this.wasGrounded) {
+      this.impact.playLanding(Math.max(0, -vehicle.velocity.y));
+    }
+    this.wasGrounded = vehicle.grounded;
   }
 
   triggerUiClick(): void {
@@ -85,6 +105,8 @@ export class AudioDirector {
     this.engine.dispose();
     this.wind.dispose();
     this.scrape.dispose();
+    this.squeal.dispose();
+    this.surface.dispose();
     this.bus.dispose();
   }
 }

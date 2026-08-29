@@ -140,4 +140,64 @@ export class ImpactPlayer {
       toneGain.disconnect();
     });
   }
+
+  /**
+   * 落地:腾空之后重新接地时悬挂被压到底的那一下。
+   *
+   * 和撞墙同属「一次性冲击」,但性格相反 —— 撞墙的重点是高频 crack,落地
+   * 是**闷**的:低频车身为主,噪声层只是轮胎拍地的一点点质感,而且走低通
+   * 不走高通。所以复用同一个噪声缓冲,但不复用 `play()` 的参数体系。
+   *
+   * `descentSpeed` 是接地那一帧的垂直下降速度(m/s,正值)。
+   */
+  playLanding(descentSpeed: number): void {
+    if (descentSpeed < AUDIO.landingMinSpeed) {
+      return;
+    }
+    const s = Math.min(1, descentSpeed / AUDIO.landingRefSpeed);
+    const context = this.bus.context;
+    const now = context.currentTime;
+    const duration = lerp(AUDIO.landingDurationMin, AUDIO.landingDurationMax, s);
+
+    // 车身:低频下滑音,比撞墙更低更闷。
+    const osc = context.createOscillator();
+    osc.type = 'sine';
+    const endFreq = lerp(AUDIO.landingToneFreqMin, AUDIO.landingToneFreqMax, s);
+    osc.frequency.setValueAtTime(endFreq * 2, now);
+    osc.frequency.exponentialRampToValueAtTime(endFreq, now + duration * 0.5);
+
+    const toneGain = context.createGain();
+    toneGain.gain.setValueAtTime(AUDIO.landingGain * s, now);
+    toneGain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+    osc.connect(toneGain);
+    toneGain.connect(this.bus.master);
+    osc.start(now);
+    osc.stop(now + duration + 0.02);
+    osc.addEventListener('ended', () => {
+      osc.disconnect();
+      toneGain.disconnect();
+    });
+
+    // 轮胎拍地:一小撮低通噪声,不是撞墙那种高通 crack。
+    const noise = context.createBufferSource();
+    noise.buffer = this.noiseBuffer;
+    const noiseFilter = context.createBiquadFilter();
+    noiseFilter.type = 'lowpass';
+    noiseFilter.frequency.value = AUDIO.landingFilterFreq;
+    const noiseGain = context.createGain();
+    noiseGain.gain.setValueAtTime(AUDIO.landingNoiseGain * s, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + duration * 0.6);
+
+    noise.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(this.bus.master);
+    noise.start(now);
+    noise.stop(now + duration * 0.6 + 0.02);
+    noise.addEventListener('ended', () => {
+      noise.disconnect();
+      noiseFilter.disconnect();
+      noiseGain.disconnect();
+    });
+  }
 }

@@ -4,6 +4,8 @@ import { AudioBus } from '../../src/audio/context';
 import { EngineSound } from '../../src/audio/engine';
 import { ImpactPlayer } from '../../src/audio/impact';
 import { ScrapeNoise } from '../../src/audio/scrape';
+import { TireSqueal } from '../../src/audio/skid';
+import { SurfaceNoise } from '../../src/audio/surface';
 import { createNoiseBuffer } from '../../src/audio/noise';
 import { playUiClick } from '../../src/audio/ui';
 import { WindNoise } from '../../src/audio/wind';
@@ -827,6 +829,159 @@ describe('ScrapeNoise', () => {
     expect(filter.Q.value).toBeCloseTo(AUDIO.scrapeQ, 5);
     // 两层噪声要是同一个音色会糊成一片,刮擦必须比气流更快跟随接触通断。
     expect(AUDIO.scrapeSmoothing).toBeLessThan(AUDIO.windSmoothing);
+  });
+});
+
+describe('TireSqueal(甩尾)', () => {
+  function gainOf(squeal: TireSqueal): FakeGainNode {
+    return (squeal as unknown as { gain: FakeGainNode }).gain;
+  }
+
+  /*
+   * 这一组守的是「甩尾一直是静音的」那个洞。核心是**两个条件必须同时满足**:
+   * 只看饱和度,低速原地打死方向也会满饱和;只看侧滑速度,高速正常过弯的
+   * 横向分量会一路误触发。
+   */
+  it('抓地饱和但没真的滑出速度 —— 不叫', () => {
+    const { bus } = makeBus();
+    const squeal = new TireSqueal(bus, new Rng(2));
+    squeal.update(1, 0, bus.context);
+    expect(gainOf(squeal).gain.value).toBeCloseTo(0, 6);
+    squeal.dispose();
+  });
+
+  it('滑得很快但抓地没饱和 —— 也不叫', () => {
+    const { bus } = makeBus();
+    const squeal = new TireSqueal(bus, new Rng(2));
+    squeal.update(AUDIO.skidMinSaturation - 0.01, AUDIO.skidRefSlip, bus.context);
+    expect(gainOf(squeal).gain.value).toBeCloseTo(0, 6);
+    squeal.dispose();
+  });
+
+  it('两个条件同时满足才叫,而且滑得越狠越响', () => {
+    const { bus } = makeBus();
+    const squeal = new TireSqueal(bus, new Rng(2));
+
+    squeal.update(1, AUDIO.skidRefSlip * 0.4, bus.context);
+    const mild = gainOf(squeal).gain.value;
+    expect(mild).toBeGreaterThan(0);
+
+    squeal.update(1, AUDIO.skidRefSlip, bus.context);
+    const hard = gainOf(squeal).gain.value;
+    expect(hard).toBeGreaterThan(mild);
+    expect(hard).toBeCloseTo(AUDIO.skidMaxGain, 5);
+    squeal.dispose();
+  });
+
+  it('侧滑方向不影响音量 —— 往左甩和往右甩一样响', () => {
+    const { bus } = makeBus();
+    const squeal = new TireSqueal(bus, new Rng(2));
+    squeal.update(1, AUDIO.skidRefSlip * 0.6, bus.context);
+    const right = gainOf(squeal).gain.value;
+    squeal.update(1, -AUDIO.skidRefSlip * 0.6, bus.context);
+    expect(gainOf(squeal).gain.value).toBeCloseTo(right, 6);
+    squeal.dispose();
+  });
+
+  it('滑得越快叫得越尖,而且用的是比刮擦更窄的高 Q 带通', () => {
+    const { bus } = makeBus();
+    const squeal = new TireSqueal(bus, new Rng(2));
+    const filter = (squeal as unknown as { filter: FakeBiquadFilterNode }).filter;
+    expect(filter.type).toBe('bandpass');
+    expect(filter.Q.value).toBeGreaterThan(AUDIO.scrapeQ);
+
+    squeal.update(1, 0, bus.context);
+    const low = filter.frequency.value;
+    squeal.update(1, AUDIO.skidRefSlip, bus.context);
+    expect(filter.frequency.value).toBeGreaterThan(low);
+    squeal.dispose();
+  });
+});
+
+describe('SurfaceNoise(出界)', () => {
+  it('在赛道上静音,出界之后随速度出声', () => {
+    const { bus } = makeBus();
+    const surface = new SurfaceNoise(bus, new Rng(6));
+    const gain = (surface as unknown as { gain: FakeGainNode }).gain;
+
+    surface.update(false, 1, bus.context);
+    expect(gain.gain.value).toBeCloseTo(0, 6);
+
+    surface.update(true, 1, bus.context);
+    expect(gain.gain.value).toBeCloseTo(AUDIO.surfaceMaxGain, 5);
+
+    // 出界但停着不动也不该响。
+    surface.update(true, 0, bus.context);
+    expect(gain.gain.value).toBeCloseTo(0, 6);
+    surface.dispose();
+  });
+
+  it('走低通,而且截止频率远低于气流 —— 出界要「变粗糙」不是「变吵」', () => {
+    const { bus } = makeBus();
+    const surface = new SurfaceNoise(bus, new Rng(6));
+    const filter = (surface as unknown as { filter: FakeBiquadFilterNode }).filter;
+    expect(filter.type).toBe('lowpass');
+    expect(AUDIO.surfaceFilterFreq).toBeLessThan(AUDIO.windFilterMaxFreq);
+    surface.dispose();
+  });
+});
+
+describe('ImpactPlayer.playLanding(落地)', () => {
+  it('轻微起伏不出声', () => {
+    const { bus, context } = makeBus();
+    let calls = 0;
+    const before = context.createOscillator.bind(context);
+    context.createOscillator = () => {
+      calls++;
+      return before();
+    };
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    impact.playLanding(AUDIO.landingMinSpeed - 0.01);
+    expect(calls).toBe(0);
+  });
+
+  it('砸得越重音量越大、音调越高', () => {
+    const capture = (descent: number): { gain: number; freq: number } => {
+      const { bus, context } = makeBus();
+      const gains: FakeGainNode[] = [];
+      const oscs: FakeOscillatorNode[] = [];
+      const og = context.createGain.bind(context);
+      const oo = context.createOscillator.bind(context);
+      const impact = new ImpactPlayer(bus, new Rng(1));
+      context.createGain = () => {
+        const g = og();
+        gains.push(g);
+        return g;
+      };
+      context.createOscillator = () => {
+        const o = oo();
+        oscs.push(o);
+        return o;
+      };
+      impact.playLanding(descent);
+      return {
+        gain: gains[0]?.gain.valueAtTimeCalls[0]?.value ?? 0,
+        freq: oscs[0]?.frequency.rampCalls[0]?.value ?? 0,
+      };
+    };
+    const soft = capture(AUDIO.landingRefSpeed * 0.4);
+    const hard = capture(AUDIO.landingRefSpeed);
+    expect(hard.gain).toBeGreaterThan(soft.gain);
+    expect(hard.freq).toBeGreaterThan(soft.freq);
+  });
+
+  it('落地是闷的:噪声走低通,不是撞墙那种高通 crack', () => {
+    const { bus, context } = makeBus();
+    const filters: FakeBiquadFilterNode[] = [];
+    const of = context.createBiquadFilter.bind(context);
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    context.createBiquadFilter = () => {
+      const f = of();
+      filters.push(f);
+      return f;
+    };
+    impact.playLanding(AUDIO.landingRefSpeed);
+    expect(filters.every((f) => f.type === 'lowpass')).toBe(true);
   });
 });
 
