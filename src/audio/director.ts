@@ -15,6 +15,10 @@ import { WindNoise } from './wind';
  * 注释)。撞击音(`ImpactPlayer`)虽然也是事件驱动,但要预生成噪声缓冲
  * (见 `impact.ts` 的类注释),所以和引擎/气流一样长期持有一个实例。
  *
+ * 三个消费者各 `rng.fork()` 一份:引擎的排气粗糙度层、气流、撞击都要预生成
+ * 自己的噪声缓冲,共用同一条随机数流的话,任何一处改了取数个数都会连带改掉
+ * 另外两处的缓冲内容。
+ *
  * 和 `Hud`/`Menu` 一样,测试模式下不构造这个类——`?test=1` 下没有真实
  * 用户手势,`AudioContext` 也起不来,构造了也是白白多一个悬空的音频图。
  */
@@ -26,7 +30,7 @@ export class AudioDirector {
 
   constructor(rng: Rng) {
     this.bus = new AudioBus();
-    this.engine = new EngineSound(this.bus);
+    this.engine = new EngineSound(this.bus, rng.fork());
     this.wind = new WindNoise(this.bus, rng.fork());
     this.impact = new ImpactPlayer(this.bus, rng.fork());
   }
