@@ -3,6 +3,7 @@ import { Rng } from '../../src/core/rng';
 import { AudioBus } from '../../src/audio/context';
 import { EngineSound } from '../../src/audio/engine';
 import { ImpactPlayer } from '../../src/audio/impact';
+import { ScrapeNoise } from '../../src/audio/scrape';
 import { createNoiseBuffer } from '../../src/audio/noise';
 import { playUiClick } from '../../src/audio/ui';
 import { WindNoise } from '../../src/audio/wind';
@@ -404,6 +405,86 @@ describe('EngineSound', () => {
     // 噪声只是质感,盖过音调就变成嘶嘶声了。
     expect(noiseGain.gain.value).toBeLessThan(gain.gain.value);
   });
+
+  /*
+   * 下面这组守的是"没有换挡的声音,感觉有点假"那次反馈的修法。核心断言是
+   * **频率对车速非单调**——单调上升就是无级变速的电动机,不是有变速箱的车。
+   */
+  it('地板油从静止加到满速,音高会掉下来若干次(每次升挡一次)', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+
+    let drops = 0;
+    let prev = -Infinity;
+    for (let i = 0; i <= 400; i++) {
+      engine.update(i / 400, 1, bus.context);
+      const freq = osc.frequency.value;
+      if (freq < prev - 1e-9) {
+        drops++;
+      }
+      prev = freq;
+    }
+    // 6 个挡位 = 5 次升挡。允许多算不允许少算(浮点边界可能在同一挡内抖一下)。
+    expect(drops).toBeGreaterThanOrEqual(AUDIO.engineUpshiftPoints.length - 1);
+  });
+
+  it('挡内音高仍然随车速上升——锯齿的"齿"必须是斜的不是平的', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+
+    // 取一挡中段的两个点,中间不跨越任何升挡点。
+    const first = AUDIO.engineUpshiftPoints[0] ?? 0.13;
+    engine.update(first * 0.4, 1, bus.context);
+    const low = osc.frequency.value;
+    engine.update(first * 0.9, 1, bus.context);
+    expect(osc.frequency.value).toBeGreaterThan(low);
+  });
+
+  it('在升挡点附近来回巡航不会每帧换挡(降挡回滞)', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+    const point = AUDIO.engineUpshiftPoints[0] ?? 0.13;
+
+    // 先升上去,再在升挡点下方一点点反复摆动——回滞窗口内不该掉回下一挡。
+    engine.update(point * 1.05, 1, bus.context);
+    const afterShift = (engine as unknown as { gear: number }).gear;
+    expect(afterShift).toBe(1);
+
+    let flaps = 0;
+    let prev = osc.frequency.value;
+    for (let i = 0; i < 40; i++) {
+      engine.update(point * (i % 2 === 0 ? 0.99 : 1.01), 1, bus.context);
+      const freq = osc.frequency.value;
+      if (Math.abs(freq - prev) > (AUDIO.engineMaxFreq - AUDIO.engineIdleFreq) * 0.2) {
+        flaps++;
+      }
+      prev = freq;
+    }
+    expect(flaps).toBe(0);
+    expect((engine as unknown as { gear: number }).gear).toBe(1);
+  });
+
+  it('换挡瞬间音量被断油压低,过了断油窗口再恢复', () => {
+    const { bus, context } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const gain = (engine as unknown as { gain: FakeGainNode }).gain;
+    const point = AUDIO.engineUpshiftPoints[0] ?? 0.13;
+
+    // 升挡前后车速几乎一样,音量差别只可能来自断油。
+    engine.update(point * 0.99, 1, bus.context);
+    const before = gain.gain.value;
+    engine.update(point * 1.01, 1, bus.context);
+    const during = gain.gain.value;
+    expect(during).toBeLessThan(before);
+
+    // 时间推过断油窗口,同样车速下音量回来。
+    context.currentTime += AUDIO.engineShiftCutTime + 0.01;
+    engine.update(point * 1.01, 1, bus.context);
+    expect(gain.gain.value).toBeGreaterThan(during);
+  });
 });
 
 describe('WindNoise', () => {
@@ -433,7 +514,8 @@ describe('ImpactPlayer', () => {
       return before();
     };
     const impact = new ImpactPlayer(bus, new Rng(1));
-    impact.play(AUDIO.impactMinStrength - 0.01);
+    // 强度现在按法向速度归一化,不再直接吃 wallImpact 那个混合标量。
+    impact.play(AUDIO.impactRefNormalSpeed * (AUDIO.impactMinStrength - 0.01), 0);
     expect(calls).toBe(0);
   });
 
@@ -455,7 +537,7 @@ describe('ImpactPlayer', () => {
     };
 
     const impact = new ImpactPlayer(bus, new Rng(1));
-    impact.play(0.8);
+    impact.play(AUDIO.impactRefNormalSpeed * 0.8, 0);
 
     expect(oscillators.length).toBe(1);
     expect(oscillators[0]?.started).toBe(true);
@@ -469,7 +551,7 @@ describe('ImpactPlayer', () => {
    * 拿到对应的 gain。上一版测试硬编码了 gains[0]/gains[2] 的下标,两层的
    * 创建顺序一调整就会静默地断言错对象——那正是这一轮要改的东西。
    */
-  function capturePlay(strength: number): {
+  function capturePlay(normalSpeed: number, tangentSpeed = 0): {
     tone: { osc: FakeOscillatorNode; filter: FakeBiquadFilterNode; gain: FakeGainNode };
     noise: { src: FakeBufferSourceNode; filter: FakeBiquadFilterNode; gain: FakeGainNode };
   } {
@@ -497,7 +579,7 @@ describe('ImpactPlayer', () => {
       filters.push(filter);
       return filter;
     };
-    impact.play(strength);
+    impact.play(normalSpeed, tangentSpeed);
 
     const toneFilter = filters.find((f) => f.type === 'lowpass');
     const noiseFilter = filters.find((f) => f.type === 'highpass');
@@ -519,8 +601,8 @@ describe('ImpactPlayer', () => {
   }
 
   it('音高、亮度、时长、噪声音量四个维度都随强度缩放,不只是音量', () => {
-    const weak = capturePlay(0.3);
-    const hard = capturePlay(1);
+    const weak = capturePlay(AUDIO.impactRefNormalSpeed * 0.3);
+    const hard = capturePlay(AUDIO.impactRefNormalSpeed);
 
     // 音高:下滑音的落点随强度抬高。
     const weakEnd = weak.tone.osc.frequency.rampCalls[0]?.value ?? 0;
@@ -553,7 +635,7 @@ describe('ImpactPlayer', () => {
    * 根因,不是听感偏好。
    */
   it('噪声"碎裂"层是主角:峰值比车身层高,衰减比车身层快', () => {
-    const { tone, noise } = capturePlay(1);
+    const { tone, noise } = capturePlay(AUDIO.impactRefNormalSpeed);
     const tonePeak = tone.gain.gain.valueAtTimeCalls[0]?.value ?? 0;
     const noisePeak = noise.gain.gain.valueAtTimeCalls[0]?.value ?? 0;
     // 老版本这里是反的(0.5 vs 0.35),听感就是"一个闷响的球"。
@@ -566,19 +648,19 @@ describe('ImpactPlayer', () => {
   });
 
   it('噪声层走高通,不再和车身层共用一个低通', () => {
-    const { noise, tone } = capturePlay(1);
+    const { noise, tone } = capturePlay(AUDIO.impactRefNormalSpeed);
     // 老版本噪声过的是和车身同一条低通(最高 2400Hz),crack 的高频全被砍掉。
     expect(noise.filter.type).toBe('highpass');
     expect(tone.filter.type).toBe('lowpass');
   });
 
   it('车身层是锯齿波不是方波——方波只有奇次谐波,那是"空心"的来源', () => {
-    const { tone } = capturePlay(1);
+    const { tone } = capturePlay(AUDIO.impactRefNormalSpeed);
     expect(tone.osc.type).toBe('sawtooth');
   });
 
   it('车身层有一段自高向低的快速下滑,而不是定频', () => {
-    const { tone } = capturePlay(1);
+    const { tone } = capturePlay(AUDIO.impactRefNormalSpeed);
     const startFreq = tone.osc.frequency.valueAtTimeCalls[0]?.value ?? 0;
     const ramp = tone.osc.frequency.rampCalls[0];
     expect(ramp).toBeDefined();
@@ -594,6 +676,51 @@ describe('ImpactPlayer', () => {
     expect(AUDIO.impactToneFreqMax).toBeGreaterThan(85);
   });
 
+  /*
+   * 下面这组守的是"碰撞是分为好几种的"那次反馈的修法:**同样的法向速度**下,
+   * 擦过去和正面撞进去必须是两种声音,而不是一种声音调音量。
+   */
+  it('同样法向速度,擦过去和正面撞的音色性格不同', () => {
+    const n = AUDIO.impactRefNormalSpeed * 0.8;
+    const headOn = capturePlay(n, 0);
+    const graze = capturePlay(n, n * 6);
+
+    // 擦过:车身"肉"少得多。
+    const headOnBody = headOn.tone.gain.gain.valueAtTimeCalls[0]?.value ?? 0;
+    const grazeBody = graze.tone.gain.gain.valueAtTimeCalls[0]?.value ?? 0;
+    expect(grazeBody).toBeLessThan(headOnBody);
+
+    // 擦过:更高更薄。
+    const headOnPitch = headOn.tone.osc.frequency.rampCalls[0]?.value ?? 0;
+    const grazePitch = graze.tone.osc.frequency.rampCalls[0]?.value ?? 0;
+    expect(grazePitch).toBeGreaterThan(headOnPitch);
+
+    // 擦过:更亮更尖。
+    expect(graze.noise.filter.frequency.value).toBeGreaterThan(
+      headOn.noise.filter.frequency.value,
+    );
+
+    // 擦过:更短促,没有余振。
+    const headOnEnd = headOn.tone.gain.gain.rampCalls[0]?.time ?? 0;
+    const grazeEnd = graze.tone.gain.gain.rampCalls[0]?.time ?? 0;
+    expect(grazeEnd).toBeLessThan(headOnEnd);
+  });
+
+  it('强度只由法向速度决定,切向速度再大也不会把轻擦放成重撞', () => {
+    const { bus, context } = makeBus();
+    let calls = 0;
+    const before = context.createOscillator.bind(context);
+    context.createOscillator = () => {
+      calls++;
+      return before();
+    };
+    const impact = new ImpactPlayer(bus, new Rng(1));
+    // 法向在阈值以下:哪怕以 80 m/s 贴着墙飞过去也不该触发撞击事件
+    // ——那是刮擦(ScrapeNoise)的活,不是撞击的。
+    impact.play(AUDIO.impactRefNormalSpeed * (AUDIO.impactMinStrength - 0.01), 80);
+    expect(calls).toBe(0);
+  });
+
   it('同一个 seed 构造出的噪声缓冲是确定性的', () => {
     const { bus: busA } = makeBus();
     const { bus: busB } = makeBus();
@@ -602,6 +729,37 @@ describe('ImpactPlayer', () => {
     const bufferA = (a as unknown as { noiseBuffer: FakeAudioBuffer }).noiseBuffer;
     const bufferB = (b as unknown as { noiseBuffer: FakeAudioBuffer }).noiseBuffer;
     expect(Array.from(bufferA.getChannelData(0))).toEqual(Array.from(bufferB.getChannelData(0)));
+  });
+});
+
+describe('ScrapeNoise', () => {
+  it('切向速度越大,音量与带通中心频率越高;没接触时静音', () => {
+    const { bus } = makeBus();
+    const scrape = new ScrapeNoise(bus, new Rng(4));
+    const gain = (scrape as unknown as { gain: FakeGainNode }).gain;
+    const filter = (scrape as unknown as { filter: FakeBiquadFilterNode }).filter;
+
+    scrape.update(0, bus.context);
+    expect(gain.gain.value).toBeCloseTo(0, 5);
+    const idleFilter = filter.frequency.value;
+
+    scrape.update(AUDIO.scrapeRefSpeed, bus.context);
+    expect(gain.gain.value).toBeCloseTo(AUDIO.scrapeMaxGain, 5);
+    expect(filter.frequency.value).toBeGreaterThan(idleFilter);
+
+    // 离开墙面立刻回到静音——刮擦是状态不是余响。
+    scrape.update(0, bus.context);
+    expect(gain.gain.value).toBeCloseTo(0, 5);
+  });
+
+  it('用高 Q 带通,和气流那层宽频低通区分开', () => {
+    const { bus } = makeBus();
+    const scrape = new ScrapeNoise(bus, new Rng(4));
+    const filter = (scrape as unknown as { filter: FakeBiquadFilterNode }).filter;
+    expect(filter.type).toBe('bandpass');
+    expect(filter.Q.value).toBeCloseTo(AUDIO.scrapeQ, 5);
+    // 两层噪声要是同一个音色会糊成一片,刮擦必须比气流更快跟随接触通断。
+    expect(AUDIO.scrapeSmoothing).toBeLessThan(AUDIO.windSmoothing);
   });
 });
 

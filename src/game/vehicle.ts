@@ -190,6 +190,22 @@ export class Vehicle {
   lateralGripAccel = 0;
   /** 最近一次撞墙的强度,没撞是 0。 */
   wallImpact = 0;
+  /**
+   * 撞墙这一帧的**法向**闭合速度(m/s,正值,没撞是 0)——垂直撞进墙里的那一半。
+   *
+   * `wallImpact` 把「多硬」和「什么角度」乘在了一个标量里
+   * (`min(1, 法向/总速) × 法向`),音频层拿它只能放出一种声音。**擦过去和
+   * 正面撞进去在物理上是两个不同的量**,拆开才能分别驱动"刮擦"和"撞击"。
+   * 纯输出字段,不参与任何物理解算。
+   */
+  wallNormalSpeed = 0;
+  /**
+   * 贴着墙的**切向**滑行速度(m/s,正值,没接触是 0)——沿墙面蹭过去的那一半。
+   *
+   * 注意它在「接触但没有撞进去」的那一帧也是非零的(贴着护墙滑行时法向速度
+   * 接近 0),这正是刮擦声需要的信号:刮擦是持续状态,不是瞬时事件。
+   */
+  wallTangentSpeed = 0;
   /** 侧向速度,**正值 = 向驾驶员右手边滑**。漂移感就看它。 */
   lateralSpeed = 0;
   /** 当前前轮转角(弧度),正 = 左。 */
@@ -309,6 +325,8 @@ export class Vehicle {
     this.gripSaturation = 0;
     this.lateralGripAccel = 0;
     this.wallImpact = 0;
+    this.wallNormalSpeed = 0;
+    this.wallTangentSpeed = 0;
     this.grounded = true;
     this.clearance = rideHeight;
     this.onTrack = this.hit.onTrack;
@@ -914,6 +932,8 @@ export class Vehicle {
     const limit = this.hit.wallDistance - CAR.halfWidth;
     if (!Number.isFinite(limit)) {
       this.wallImpact = 0;
+      this.wallNormalSpeed = 0;
+      this.wallTangentSpeed = 0;
       return;
     }
 
@@ -924,6 +944,8 @@ export class Vehicle {
       Math.abs(lateral) > this.hit.wallDistance + 3.0
     ) {
       this.wallImpact = 0;
+      this.wallNormalSpeed = 0;
+      this.wallTangentSpeed = 0;
       return;
     }
 
@@ -945,9 +967,18 @@ export class Vehicle {
       s.qw,
     );
 
+    // 走到这里位置已经被推回墙面 = 确实在接触。切向速度在「贴着滑」和「撞进去」
+    // 两种情况下都要报,所以放在下面那个法向提前返回**之前**;墙沿赛道条带外缘
+    // 生成,切向就是赛道切线,点乘直接算,不占临时向量。
+    this.wallTangentSpeed = Math.abs(
+      this.velocity.x * this.hit.tangentX + this.velocity.z * this.hit.tangentZ,
+    );
+
     const inwardSpeed = this.velocity.dot(scratch);
     if (inwardSpeed >= 0) {
+      // 贴着墙平行滑行:没有撞击,但刮擦还在继续,所以只清法向不清切向。
       this.wallImpact = 0;
+      this.wallNormalSpeed = 0;
       return;
     }
 
@@ -978,6 +1009,7 @@ export class Vehicle {
 
     const speed = this.velocity.length() || 1;
     this.wallImpact = Math.min(1, -inwardSpeed / speed) * -inwardSpeed;
+    this.wallNormalSpeed = -inwardSpeed;
   }
 }
 
