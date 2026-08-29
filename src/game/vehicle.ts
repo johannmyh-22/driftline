@@ -210,6 +210,15 @@ export class Vehicle {
   lateralSpeed = 0;
   /** 当前前轮转角(弧度),正 = 左。 */
   steerAngle = 0;
+  /**
+   * 气动阻力缩放系数(1 = 无遮挡的干净空气)。跟在别人尾流里时由 `World`
+   * 每帧写低,见 `tuning.ts` 的 `DRAFT`。
+   *
+   * 放成公开字段而不是让 `Vehicle` 自己去找前车:场上有几辆车、谁在谁前面
+   * 是 `World` 的知识,`Vehicle` 只管把系数乘进阻力里 —— 单车场景(平地、
+   * 幽灵)压根不需要知道尾流这回事。
+   */
+  dragScale = 1;
 
   private readonly field: GroundQuery;
   private readonly physics: Physics;
@@ -886,8 +895,8 @@ export class Vehicle {
     }
     const speed = Math.sqrt(speedSq);
 
-    // 阻力与速度反向,大小正比于 v²。
-    const drag = CAR.dragArea * speedSq;
+    // 阻力与速度反向,大小正比于 v²。dragScale 是尾流折扣,默认 1。
+    const drag = CAR.dragArea * speedSq * this.dragScale;
     scratch.set(-s.vx / speed, -s.vy / speed, -s.vz / speed).multiplyScalar(drag);
 
     // 下压力沿车身向下:速度越高抓地越强,高速弯反而比低速弯稳。

@@ -27,6 +27,7 @@ import { Race } from './race';
 import { encodeGhostInput, saveRecord } from './records';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
 import { CRAFT, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED } from './tuning';
+import { applyDraft } from './draft';
 import { Vehicle } from './vehicle';
 
 const shownPosition = new Vector3();
@@ -48,6 +49,8 @@ const mapCentre = new Vector3();
  */
 /** 传给对手 AI 的「场上其他车」。复用同一个数组,每帧不分配。 */
 const rivalOpponents: Vehicle[] = [];
+/** 场上所有车(玩家 + 对手),尾流计算用。同样复用,不每帧新建。 */
+const allCars: Vehicle[] = [];
 
 /** 名次表 / 结算面板里各车的 id。0 号恒为玩家,其后是对手。 */
 function racerIds(rivalCount: number): string[] {
@@ -356,6 +359,14 @@ export class World {
      * 车间碰撞靠 Physics.createChassis() 挂的碰撞体自然发生,不用在这里
      * 额外处理。
      */
+    // 尾流要在所有车都还没施力之前算好——它读的是上一帧读回来的位置,
+    // 和「所有车先 applyForces 再统一 step」那条模式一致。
+    if (this.rivals.length > 0) {
+      allCars.length = 0;
+      allCars.push(this.vehicle, ...this.rivals);
+      applyDraft(allCars);
+    }
+
     this.vehicle.applyForces(this.input, dt);
     /*
      * 每辆对手都要看到**场上所有其他车**(玩家 + 其他对手),否则对手之间
