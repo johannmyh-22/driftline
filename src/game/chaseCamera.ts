@@ -14,6 +14,10 @@ const upAxis = new Vector3(0, 1, 0);
 const lookHit = createGroundHit();
 const AXIS_Z = new Vector3(0, 0, 1);
 const rollQuat = new Quaternion();
+/** 自由视角:相机相对车的偏移方向,以及俯仰用的水平右轴。每帧路径上,复用。 */
+const orbitOffset = new Vector3();
+const orbitRight = new Vector3();
+const carFocus = new Vector3();
 
 /**
  * 读操作系统的「减少动态效果」偏好。**不能直接写 `window.matchMedia`**——
@@ -58,6 +62,9 @@ export class ChaseCamera {
   private readonly look = new Vector3();
   private fov: number = CAMERA.fovBase;
   private roll = 0;
+  /** 鼠标自由视角的当前角度(平滑之后的,不是鼠标的瞬时目标值)。 */
+  private lookYaw = 0;
+  private lookPitch = 0;
 
   private readonly prevPosition = new Vector3();
   private readonly prevLook = new Vector3();
@@ -70,8 +77,20 @@ export class ChaseCamera {
     this.camera = new PerspectiveCamera(CAMERA.fovBase, aspect, 0.1, 3000);
   }
 
+  /**
+   * 设置鼠标自由视角的目标角度(弧度)。由 `main.ts` 每个固定步从 `MouseLook`
+   * 喂进来;`?test=1` 下没人调,相机行为和以前逐帧一致。
+   */
+  setLookAngles(yaw: number, pitch: number, dt: number): void {
+    const k = 1 - Math.exp(-CAMERA.lookFollowLambda * dt);
+    this.lookYaw += (yaw - this.lookYaw) * k;
+    this.lookPitch += (pitch - this.lookPitch) * k;
+  }
+
   /** 直接落到目标位姿。重生时用,免得镜头从上一局的位置飞过来。 */
   snapTo(vehicle: Vehicle): void {
+    this.lookYaw = 0;
+    this.lookPitch = 0;
     this.computeDesired(vehicle);
     this.position.copy(desired);
     this.look.copy(lookTarget);
@@ -145,10 +164,28 @@ export class ChaseCamera {
   private computeDesired(vehicle: Vehicle): void {
     forward.set(Math.sin(vehicle.yaw), 0, Math.cos(vehicle.yaw));
 
-    desired
-      .copy(vehicle.position)
+    /*
+     * 相机相对车的偏移。自由视角就是把这个偏移**绕着车**转:先绕世界 Y 轴
+     * 转偏航,再绕「转完之后的水平右轴」转俯仰。绕车转而不是原地转头,车才
+     * 会始终留在画面里——原地转头看到的是空地,那不是第三人称的环视。
+     */
+    orbitOffset
+      .set(0, 0, 0)
       .addScaledVector(forward, -CAMERA.offsetBack)
       .addScaledVector(upAxis, CAMERA.offsetUp);
+
+    if (this.lookYaw !== 0 || this.lookPitch !== 0) {
+      orbitOffset.applyAxisAngle(upAxis, this.lookYaw);
+      orbitRight.crossVectors(upAxis, orbitOffset);
+      if (orbitRight.lengthSq() > 1e-8) {
+        orbitRight.normalize();
+        // 取负:鼠标下移(movementY 为正 → lookPitch 为正)是「往下看」,对
+        // 第三人称环绕机位来说就是相机**抬高**去俯视车,不是把相机压进地里。
+        orbitOffset.applyAxisAngle(orbitRight, -this.lookPitch);
+      }
+    }
+
+    desired.copy(vehicle.position).add(orbitOffset);
 
     /*
      * 前馈抵消稳态滞后,否则速度一上来车就缩成画面里的一个点。
@@ -178,5 +215,19 @@ export class ChaseCamera {
     const flatLook = vehicle.position.y + CAMERA.lookUp;
     lookTarget.y =
       flatLook + clamp(groundLook - flatLook, -CAMERA.slopeLookLimit, CAMERA.slopeLookLimit);
+
+    /*
+     * 一开始环视就把注视点从「车前方的路」挪到「车本身」。不挪的话镜头绕到
+     * 侧面时仍然盯着车头前方,车会直接滑出画面——那是转头,不是环视。
+     */
+    const freeAmount = clamp(
+      (Math.abs(this.lookYaw) + Math.abs(this.lookPitch)) / CAMERA.lookFocusAngle,
+      0,
+      1,
+    );
+    if (freeAmount > 0) {
+      carFocus.copy(vehicle.position).addScaledVector(upAxis, CAMERA.lookUp);
+      lookTarget.lerp(carFocus, freeAmount);
+    }
   }
 }

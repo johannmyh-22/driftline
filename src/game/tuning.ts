@@ -214,6 +214,35 @@ export const CAMERA = {
 
   /** 相机不允许低于地面这个高度,免得钻到地里。 */
   minGroundClearance: 0.8,
+
+  /*
+   * ── 鼠标自由视角 ──────────────────────────────────────────────────────
+   * 只转镜头,不碰物理。实现见 `core/mouseLook.ts` 与 `chaseCamera.ts`。
+   */
+  /** 每像素鼠标位移对应的角度(弧度)。 */
+  lookSensitivity: 0.0024,
+  /** 偏航上限(弧度)。给到 π 就能整个转到车头前面回望自己。 */
+  lookYawLimit: Math.PI,
+  /**
+   * 俯仰范围(弧度):正 = 相机抬高俯视车(鼠标下移),负 = 压低到接近车身高度。
+   * 负向不给太多——压过头相机会怼进地面,被 `minGroundClearance` 夹住之后
+   * 再动也没有反馈,手感是"卡住了"。
+   */
+  lookPitchMin: -0.35,
+  lookPitchMax: 1.05,
+  /** 鼠标停下多久(秒)之后开始自动回正。 */
+  lookRecenterDelay: 1.1,
+  /** 回正速率。 */
+  lookRecenterLambda: 3.5,
+  /** 相机追随鼠标目标角度的速率。比位置弹簧快,手感才跟手。 */
+  lookFollowLambda: 20,
+  /**
+   * 自由视角偏离多少弧度就把注视点完全挪到车身上。
+   *
+   * 正常视角看的是车**前方**的路;一旦开始环视,要看的是车本身(绕着它转),
+   * 注视点还钉在前方的话镜头一转车就出画了。
+   */
+  lookFocusAngle: 0.3,
 } as const;
 
 export const TRACK = {

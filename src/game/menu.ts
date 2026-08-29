@@ -135,7 +135,7 @@ export class Menu {
 
     const help = document.createElement('p');
     help.className = 'menu-help';
-    help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹 · Esc 暂停';
+    help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹 · 点击画面后移动鼠标环视 · Esc 暂停';
 
     const curatedLabel = document.createElement('p');
     curatedLabel.className = 'menu-curated-label';

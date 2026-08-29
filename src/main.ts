@@ -18,6 +18,8 @@ import {
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
 import { AudioDirector } from './audio/director';
 import { Hud } from './game/hud';
+import { MouseLook } from './core/mouseLook';
+import { CAMERA } from './game/tuning';
 import { Menu } from './game/menu';
 import { initPhysics } from './game/physics';
 import { type CourseKind, World } from './game/world';
@@ -136,6 +138,21 @@ async function boot(container: HTMLDivElement): Promise<void> {
    */
   const audio = testMode ? null : new AudioDirector(rng.fork());
 
+  /*
+   * 鼠标自由视角。测试模式不构造——`?test=1` 下不该有任何监听器改动相机,
+   * 「同 seed 同输入逐帧复现」那条契约要求截图回路里的机位完全确定。
+   */
+  const mouseLook = testMode
+    ? null
+    : new MouseLook(renderer.domElement, {
+        sensitivity: CAMERA.lookSensitivity,
+        yawLimit: CAMERA.lookYawLimit,
+        pitchMin: CAMERA.lookPitchMin,
+        pitchMax: CAMERA.lookPitchMax,
+        recenterDelay: CAMERA.lookRecenterDelay,
+        recenterLambda: CAMERA.lookRecenterLambda,
+      });
+
   // 首帧画完才在 DOM 上打标记。SwiftShader 上一帧要一秒以上,「canvas 元素出现」
   // 远早于「画面上有东西」—— 冒烟测试拿前者当后者用,后处理一接上就开始拍到空白。
   let painted = false;
@@ -144,6 +161,10 @@ async function boot(container: HTMLDivElement): Promise<void> {
     update: (dt) => {
       // 每个固定步采一次输入:采样频率和物理步长绑死,回放才可能逐帧复现。
       source.sample(frame);
+      if (mouseLook !== null) {
+        mouseLook.update(dt);
+        world.chase.setLookAngles(mouseLook.yaw, mouseLook.pitch, dt);
+      }
       world.update(frame, dt);
       audio?.update(world.vehicle, frame);
     },
@@ -203,6 +224,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
           // ——按钮的处理器里如果有 stopPropagation,冒泡是收不到的。
           audio?.resume();
           audio?.triggerUiClick();
+          mouseLook?.reset();
           world.spawnAtStart();
           world.chase.snapTo(world.vehicle);
           menu?.hide();
