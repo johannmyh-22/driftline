@@ -10,6 +10,7 @@ import {
   MeshStandardMaterial,
   Vector3,
 } from 'three';
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Rng } from '../core/rng';
 import { CAR, CRAFT } from '../game/tuning';
 import type { Palette } from './palette';
@@ -58,22 +59,46 @@ export function createCraft(rng: Rng, palette: Palette): Craft {
   const lower = loftSections(BODY_SECTIONS);
   group.add(
     flatPart(lower.points, lower.faces, palette.craftHull, rng, {
-      roughness: 0.38,
-      metalness: 0.25,
-      spread: 0.05,
+      roughness: 0.34,
+      metalness: 0.28,
+      // 车身不抖色:24 边的连续曲面上再抖就是一身脏斑(见 PartOptions 注释)。
+      spread: 0,
+      smooth: true,
     }),
   );
 
-  // 座舱用 accent 色:两段配色能让车身在远处也看得出前后朝向,而这台车没有
-  // 任何贴图可以承担这件事。
+  /*
+   * 座舱走**深色玻璃**,不再用 accent 车漆色。
+   *
+   * 从车外看,真车的座舱主要就是一整片深色玻璃 —— 原来那块 accent 色的实心
+   * 盒子是「像玩具车」的第二大来源。玻璃靠低粗糙度 + 高清漆反天空,配色反而
+   * 不重要:反射出来的环境本身就在告诉你那是玻璃。
+   */
   const cabin = loftSections(CABIN_SECTIONS);
   group.add(
-    flatPart(cabin.points, cabin.faces, palette.craftAccent, rng, {
-      roughness: 0.22,
-      metalness: 0.2,
-      spread: 0.03,
+    flatPart(cabin.points, cabin.faces, GLASS_COLOR, rng, {
+      roughness: 0.06,
+      metalness: 0.1,
+      spread: 0,
+      smooth: true,
+      opacity: 0.72,
     }),
   );
+
+  // 车顶盖:玻璃是半透明的,不加这块从上面能看穿到车里,反而更假。
+  const roofShell = loftSections(ROOF_SECTIONS);
+  group.add(
+    flatPart(roofShell.points, roofShell.faces, palette.craftHull, rng, {
+      roughness: 0.34,
+      metalness: 0.28,
+      spread: 0,
+      smooth: true,
+    }),
+  );
+
+  addWheelArches(group, palette, rng);
+  addMirrors(group, palette, rng);
+  addFrontFace(group, rng);
 
   /*
    * 尾灯。**亮度机制原样保留了尾焰那一套**(见 `setThrust` 与 `CRAFT` 的注释):
@@ -123,6 +148,145 @@ export function createCraft(rng: Rng, palette: Palette): Craft {
       node.roll.rotation.x = rollAngle;
     },
   };
+}
+
+/**
+ * 轮眉。**「像玩具车」最直接的一条**:原来的车身是平直的侧板,轮子就那么从
+ * 板子底下探出来,像积木插了四个轮。真车的轮子是嵌在一圈翼子板开口里的。
+ *
+ * 用一段半环(自己放样,不引入 TorusGeometry —— 这里要的是扁的、贴着车身的
+ * 弧,不是正圆管)。四个轮位各一片,略宽于轮胎,压在车身外表面上。
+ */
+function addWheelArches(parent: Group, palette: Palette, rng: Rng): void {
+  // 只比轮胎大一点点:轮眉是贴着轮子的一圈翼子板边缘,不是罩在外面的挡泥板。
+  const radius = CAR.wheelRadius * 1.13;
+  const thickness = 0.035;
+  const halfWidth = TIRE_WIDTH * 0.5;
+  const steps = 12;
+
+  for (const zSign of [1, -1]) {
+    for (const xSign of [1, -1]) {
+      const points: Point[] = [];
+      const faces: Face[] = [];
+      // 从前往后扫过 180°,每一步给内外两圈四个点(一个扁的弧形壳)。
+      for (let i = 0; i <= steps; i++) {
+        const angle = Math.PI * (i / steps);
+        const cy = Math.sin(angle);
+        const cz = Math.cos(angle);
+        for (const r of [radius, radius + thickness]) {
+          for (const w of [-halfWidth, halfWidth]) {
+            points.push([w, cy * r, cz * r]);
+          }
+        }
+      }
+      for (let i = 0; i < steps; i++) {
+        const a0 = i * 4;
+        const b0 = (i + 1) * 4;
+        // 四个侧面各连一圈,形成一段封闭的弧形壳。
+        for (const [p, q] of [
+          [0, 1],
+          [1, 3],
+          [3, 2],
+          [2, 0],
+        ] as const) {
+          faces.push([a0 + p, a0 + q, b0 + p]);
+          faces.push([a0 + q, b0 + q, b0 + p]);
+        }
+      }
+
+      const arch = flatPart(points, faces, palette.craftHull, rng, {
+        roughness: 0.34,
+        metalness: 0.28,
+        spread: 0,
+        smooth: true,
+      });
+      // 埋进车身一点,只露出外侧那道边,才像翼子板开口而不是外挂件。
+      arch.position.set(xSign * (HALF_W - 0.07), ARCH_Y, zSign * ARCH_Z);
+      parent.add(arch);
+    }
+  }
+}
+
+/**
+ * 车头:前大灯 + 下进气口。
+ *
+ * 和后视镜同理 —— **「有没有灯、有没有进气口」是人眼判断「车 / 玩具」的强
+ * 信号**。原来的车头是一整片素色曲面,没有任何可读的面部特征,那正是"玩具车"
+ * 观感的一部分。
+ *
+ * 大灯不用 `MeshBasicMaterial`(那是尾灯为了配合 bloom 才用的自发光);白天的
+ * 前灯不亮,靠**低粗糙度的玻璃反射**读出来,和座舱玻璃是同一套逻辑。
+ */
+function addFrontFace(parent: Group, rng: Rng): void {
+  const lamp: readonly Section[] = [
+    { z: 0.06, halfWidth: 0.15, yBottom: -0.045, yTop: 0.045, chamfer: 0.03 },
+    { z: -0.06, halfWidth: 0.16, yBottom: -0.05, yTop: 0.05, chamfer: 0.03 },
+  ];
+  for (const sign of [-1, 1]) {
+    const g = loftSections(lamp);
+    const light = flatPart(g.points, g.faces, HEADLIGHT_COLOR, rng, {
+      roughness: 0.05,
+      metalness: 0.15,
+      spread: 0,
+      smooth: true,
+    });
+    light.position.set(sign * 0.44, 0.06, 1.92);
+    parent.add(light);
+  }
+
+  // 下进气口:一块压暗的横条,读作格栅。真车前脸最大的一块深色面积就是它。
+  const intake: readonly Section[] = [
+    { z: 0.05, halfWidth: 0.42, yBottom: -0.085, yTop: 0.085, chamfer: 0.04 },
+    { z: -0.05, halfWidth: 0.44, yBottom: -0.09, yTop: 0.09, chamfer: 0.04 },
+  ];
+  const g = loftSections(intake);
+  const grille = flatPart(g.points, g.faces, GRILLE_COLOR, rng, {
+    roughness: 0.55,
+    metalness: 0.1,
+    spread: 0,
+    smooth: true,
+  });
+  grille.position.set(0, -0.14, 1.94);
+  parent.add(grille);
+}
+
+/**
+ * 后视镜。两个很小的部件,但**「有没有后视镜」是人眼判断「这是车还是玩具」
+ * 的一个强信号** —— 玩具车通常省掉它。
+ */
+function addMirrors(parent: Group, palette: Palette, rng: Rng): void {
+  const shell: readonly Section[] = [
+    { z: 0.055, halfWidth: 0.045, yBottom: -0.03, yTop: 0.035, chamfer: 0.02 },
+    { z: -0.055, halfWidth: 0.05, yBottom: -0.035, yTop: 0.04, chamfer: 0.02 },
+  ];
+  const stalk: readonly Section[] = [
+    { z: 0.02, halfWidth: 0.055, yBottom: -0.012, yTop: 0.012, chamfer: 0.008 },
+    { z: -0.02, halfWidth: 0.055, yBottom: -0.012, yTop: 0.012, chamfer: 0.008 },
+  ];
+
+  for (const sign of [-1, 1]) {
+    const s = loftSections(shell);
+    const mirror = flatPart(s.points, s.faces, palette.craftHull, rng, {
+      roughness: 0.34,
+      metalness: 0.28,
+      spread: 0,
+      smooth: true,
+    });
+    mirror.position.set(sign * (HALF_W + 0.08), MIRROR_Y, MIRROR_Z);
+    parent.add(mirror);
+
+    const t = loftSections(stalk);
+    const arm = flatPart(t.points, t.faces, palette.craftHull, rng, {
+      roughness: 0.4,
+      metalness: 0.2,
+      spread: 0,
+      smooth: true,
+    });
+    // 撑杆横过来把镜子接回车身。
+    arm.rotation.y = Math.PI / 2;
+    arm.position.set(sign * (HALF_W + 0.03), MIRROR_Y, MIRROR_Z);
+    parent.add(arm);
+  }
 }
 
 /** 一个车轮的两级节点:外层管转向(绕车身 Y),内层管滚转(绕轮轴 X)。 */
@@ -214,7 +378,37 @@ interface Section {
   chamfer: number;
 }
 
-const RING = 8;
+/**
+ * 每个截面采样多少个点。
+ *
+ * 原来是 8 —— 一个八边形。**这是「像玩具车」最直接的来源**:车身横截面只有
+ * 八条边,无论怎么打光都是硬邦邦的棱柱,真车的车身是连续曲面。提到 24 之后
+ * 截面接近圆角矩形,配合平滑法线才有钣金的感觉。
+ *
+ * 代价是三角形数量涨了三倍(车身 ~1100 面)。四辆车也就四千多面,对这个
+ * 场景可以忽略 —— 地形和赛道条带比它多一个数量级。
+ */
+const RING = 24;
+
+/**
+ * 圆角矩形截面上的第 `k` 个点(0..RING-1)。
+ *
+ * 用「超椭圆」的思路而不是直角加倒角:`chamfer` 越大越接近椭圆,越小越接近
+ * 矩形,中间是连续过渡的圆角矩形。八点倒角盒子在角上只有一条斜边,而这里
+ * 角上有好几个点,高光能沿着棱线连续滚过去,那正是钣金的样子。
+ */
+function ringPoint(s: Section, k: number): Point {
+  const t = (k / RING) * Math.PI * 2;
+  const cx = Math.cos(t);
+  const cy = Math.sin(t);
+  const halfHeight = (s.yTop - s.yBottom) / 2;
+  const midY = (s.yBottom + s.yTop) / 2;
+  // n 越大越方。chamfer 归一化到截面尺寸上,再映射成指数。
+  const round = Math.min(0.95, s.chamfer / Math.max(0.001, Math.min(s.halfWidth, halfHeight)));
+  const n = 2 / Math.max(0.08, round);
+  const shape = (v: number): number => Math.sign(v) * Math.pow(Math.abs(v), 2 / n);
+  return [s.halfWidth * shape(cx), midY + halfHeight * shape(cy), s.z];
+}
 
 function loftSections(sections: readonly Section[]): {
   points: readonly Point[];
@@ -222,19 +416,9 @@ function loftSections(sections: readonly Section[]): {
 } {
   const points: Point[] = [];
   for (const s of sections) {
-    // 倒角不能吃掉整个截面,否则会自交成一个蝴蝶结。
-    const cx = Math.min(s.chamfer, s.halfWidth * 0.9);
-    const cy = Math.min(s.chamfer, (s.yTop - s.yBottom) * 0.45);
-    points.push(
-      [-s.halfWidth, s.yBottom + cy, s.z],
-      [-s.halfWidth + cx, s.yBottom, s.z],
-      [s.halfWidth - cx, s.yBottom, s.z],
-      [s.halfWidth, s.yBottom + cy, s.z],
-      [s.halfWidth, s.yTop - cy, s.z],
-      [s.halfWidth - cx, s.yTop, s.z],
-      [-s.halfWidth + cx, s.yTop, s.z],
-      [-s.halfWidth, s.yTop - cy, s.z],
-    );
+    for (let k = 0; k < RING; k++) {
+      points.push(ringPoint(s, k));
+    }
   }
 
   const faces: Face[] = [];
@@ -261,8 +445,18 @@ function loftSections(sections: readonly Section[]): {
 interface PartOptions {
   roughness: number;
   metalness: number;
-  /** 逐面明度抖动幅度,低多边形的面才不会糊成一整块。 */
+  /**
+   * 逐面明度抖动幅度。**低多边形时代的遗产** —— 那时候面少,不抖就糊成一整块。
+   * 现在截面是 24 边的连续曲面,再抖就变成一身脏斑,车身传 0。
+   */
   spread: number;
+  /**
+   * 平滑法线。车身钣金必须开:平面着色会把 24 边的截面重新变回一圈可见的
+   * 棱面,等于白提分辨率。
+   */
+  smooth?: boolean;
+  /** 透明度 —— 玻璃用。 */
+  opacity?: number;
 }
 
 function flatPart(
@@ -287,17 +481,29 @@ function flatPart(
   }
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
 
+  const smooth = options.smooth === true;
+  if (smooth) {
+    // 放样出来的是非索引几何,逐顶点法线要按位置合并之后才平滑得起来。
+    geometry.deleteAttribute('normal');
+    const merged = mergeVertices(geometry, 1e-4);
+    merged.computeVertexNormals();
+    geometry.copy(merged);
+  }
+
+  const transparent = options.opacity !== undefined && options.opacity < 1;
   const mesh = new Mesh(
     geometry,
     // 车漆是「金属漆 + 清漆」的夹层,不是裸金属:纯 metalness=1 会反射成镀铬。
     // clearcoat 那一层薄而光滑的高光,才是「车漆」区别于「塑料」和「铁皮」的地方。
     new MeshPhysicalMaterial({
       vertexColors: true,
-      flatShading: true,
+      flatShading: !smooth,
       roughness: options.roughness,
       metalness: options.metalness,
       clearcoat: 0.9,
       clearcoatRoughness: 0.06,
+      transparent,
+      opacity: options.opacity ?? 1,
     }),
   );
   // 车身投影是唯一真实的高度参照,必须投也必须接(自阴影)。
@@ -406,6 +612,23 @@ const SILL = -(CAR.suspensionRest - 0.18);
 const ROOF = CAR.suspensionRest * 0.5 + 0.555;
 
 /** 尾灯相对车身原点的位置。 */
+/** 前大灯玻璃:白天不亮,靠低粗糙度反射读出来,不是自发光。 */
+const HEADLIGHT_COLOR = new Color(0.62, 0.66, 0.72);
+/** 前格栅:前脸上最大的一块深色面积。 */
+const GRILLE_COLOR = new Color(0.02, 0.022, 0.026);
+/** 深色玻璃。座舱靠反射而不是靠颜色读出「玻璃」,所以压得很暗。 */
+const GLASS_COLOR = new Color(0.035, 0.045, 0.06);
+/**
+ * 轮眉圆心的高度,**必须和静止时的轮心同高**,弧才刚好罩住轮子上半圈。
+ *
+ * 第一版写死 0(车身局部原点),而轮心在 `wheelRadius − suspensionRest`
+ * = −0.11 —— 高了 11 厘米,加上半径给大了,截图里就是四个悬在车头车尾的
+ * 大黑箍。**这种错只有看图才发现得了**,几何本身没有任何不合法的地方。
+ */
+const ARCH_Y = CAR.wheelRadius - CAR.suspensionRest;
+const MIRROR_Y = 0.30;
+const MIRROR_Z = 0.72;
+
 const TAIL_LIGHT_X = 0.56;
 const TAIL_LIGHT_Y = 0.12;
 const TAIL_LIGHT_Z = -2.0;
@@ -434,6 +657,16 @@ const CABIN_SECTIONS: readonly Section[] = [
   { z: -0.55, halfWidth: 0.66, yBottom: 0.3, yTop: ROOF, chamfer: 0.1 },
   { z: -1.1, halfWidth: 0.62, yBottom: 0.3, yTop: ROOF - 0.12, chamfer: 0.09 },
   { z: -1.6, halfWidth: 0.52, yBottom: 0.3, yTop: 0.42, chamfer: 0.07 },
+];
+
+/**
+ * 车顶壳。座舱是半透明玻璃,不盖一层实心车顶的话从上方能看穿到车里 ——
+ * 空心的车比不透明的盒子更假。比座舱窄一圈,露出来的边就是 A/B/C 柱。
+ */
+const ROOF_SECTIONS: readonly Section[] = [
+  { z: 0.28, halfWidth: 0.5, yBottom: ROOF - 0.1, yTop: ROOF - 0.02, chamfer: 0.07 },
+  { z: -0.55, halfWidth: 0.54, yBottom: ROOF - 0.08, yTop: ROOF + 0.005, chamfer: 0.08 },
+  { z: -1.05, halfWidth: 0.5, yBottom: ROOF - 0.18, yTop: ROOF - 0.11, chamfer: 0.07 },
 ];
 
 /** 尾灯灯条。建在原点,由两个实例分别平移到左右。 */
