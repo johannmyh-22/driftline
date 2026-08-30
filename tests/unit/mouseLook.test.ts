@@ -89,8 +89,21 @@ describe('MouseLook', () => {
     const { doc, look, lock } = install();
     lock(true);
     doc.dispatch('mousemove', { movementX: 100, movementY: 50 });
-    expect(look.yaw).toBeCloseTo(100 * CAMERA.lookSensitivity, 6);
+    // yaw 取负:它是"相机绕车转多少"不是"视线转多少",两者方向相反,
+    // 见 mouseLook.ts 里的注释(人类实测反馈"左右弄反了")。
+    expect(look.yaw).toBeCloseTo(-100 * CAMERA.lookSensitivity, 6);
     expect(look.pitch).toBeCloseTo(50 * CAMERA.lookSensitivity, 6);
+    look.dispose();
+  });
+
+  it('鼠标右移 = 视线向右 = 相机绕到车的左边(负 yaw)', () => {
+    const { doc, look, lock } = install();
+    lock(true);
+    doc.dispatch('mousemove', { movementX: 200, movementY: 0 });
+    expect(look.yaw).toBeLessThan(0);
+    look.reset();
+    doc.dispatch('mousemove', { movementX: -200, movementY: 0 });
+    expect(look.yaw).toBeGreaterThan(0);
     look.dispose();
   });
 
@@ -100,13 +113,13 @@ describe('MouseLook', () => {
     for (let i = 0; i < 50; i++) {
       doc.dispatch('mousemove', { movementX: 5000, movementY: 5000 });
     }
-    expect(look.yaw).toBeCloseTo(CAMERA.lookYawLimit, 6);
+    expect(look.yaw).toBeCloseTo(-CAMERA.lookYawLimit, 6);
     expect(look.pitch).toBeCloseTo(CAMERA.lookPitchMax, 6);
 
     for (let i = 0; i < 100; i++) {
       doc.dispatch('mousemove', { movementX: -5000, movementY: -5000 });
     }
-    expect(look.yaw).toBeCloseTo(-CAMERA.lookYawLimit, 6);
+    expect(look.yaw).toBeCloseTo(CAMERA.lookYawLimit, 6);
     expect(look.pitch).toBeCloseTo(CAMERA.lookPitchMin, 6);
     look.dispose();
   });
@@ -116,7 +129,8 @@ describe('MouseLook', () => {
     lock(true);
     doc.dispatch('mousemove', { movementX: 300, movementY: 0 });
     const turned = look.yaw;
-    expect(turned).toBeGreaterThan(0);
+    // 只关心"转开了",方向由上面那条专门的测试管。
+    expect(Math.abs(turned)).toBeGreaterThan(0);
 
     // 停顿窗口之内不动。
     const dt = 1 / 60;

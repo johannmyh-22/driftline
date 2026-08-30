@@ -33,7 +33,16 @@ export class MouseLook {
       return;
     }
     this.idleTime = 0;
-    this.yaw = clampTo(this.yaw + event.movementX * this.sensitivity, this.yawLimit);
+    /*
+     * **`movementX` 取负。** 人类实测反馈"左右弄反了"。
+     *
+     * 原因是这里的 `yaw` 不是"视线转多少",而是"**相机绕车转多少**"(见
+     * `chaseCamera.ts` 的 `orbitOffset.applyAxisAngle`)。这两个方向天生相反:
+     * 想往右看,相机得绕到车的左边去 —— 就像你想看右边要把头往右转,但如果
+     * 是别人举着摄影机绕着你拍,摄影机得往你的左边走。第一版把"鼠标右移"
+     * 直接当成"相机正向旋转",少了这一次取反。
+     */
+    this.yaw = clampTo(this.yaw - event.movementX * this.sensitivity, this.yawLimit);
     this.pitch = Math.min(
       this.pitchMax,
       Math.max(this.pitchMin, this.pitch + event.movementY * this.sensitivity),
