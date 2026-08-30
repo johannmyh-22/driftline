@@ -14,6 +14,7 @@ import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Rng } from '../core/rng';
 import { CAR, CRAFT } from '../game/tuning';
 import type { Palette } from './palette';
+import { createModelCraft, isCraftModelReady } from './craftModel';
 
 type Point = readonly [number, number, number];
 type Face = readonly [number, number, number];
@@ -52,7 +53,23 @@ export interface Craft {
   setWheel(index: number, suspensionLength: number, steerAngle: number, rollAngle: number): void;
 }
 
+/**
+ * 造一辆车。
+ *
+ * **优先用 glTF 模型**(`craftModel.ts`,2026-08 由人类拍板破例引入的
+ * `src/assets/car.glb`);模型没载入成功时回退到下面这套程序化造型 ——
+ * 游戏不会因为一个素材文件读不到就挂掉,而且 `?test=1` 的截图回路里
+ * 也总有东西可画。
+ */
 export function createCraft(rng: Rng, palette: Palette): Craft {
+  if (isCraftModelReady()) {
+    return createModelCraft(palette);
+  }
+  return createProceduralCraft(rng, palette);
+}
+
+/** 程序化造型。模型引入之前唯一的实现,现在是回退路径。 */
+export function createProceduralCraft(rng: Rng, palette: Palette): Craft {
   const group = new Group();
   group.name = 'craft';
 

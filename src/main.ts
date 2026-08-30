@@ -22,6 +22,7 @@ import { MouseLook } from './core/mouseLook';
 import { CAMERA } from './game/tuning';
 import { Menu } from './game/menu';
 import { initPhysics } from './game/physics';
+import { initCraftModel } from './gfx/craftModel';
 import { type CourseKind, World } from './game/world';
 import './style.css';
 
@@ -78,7 +79,17 @@ boot(mount).catch((error: unknown) => {
 });
 
 async function boot(container: HTMLDivElement): Promise<void> {
+  /*
+   * 物理引擎与车辆模型都要在造 World 之前就绪:`createCraft()` 是同步的,
+   * 而且 `?test=1` 要求场景一造好就能逐帧步进,不能让第一帧去等异步加载。
+   * 模型加载失败不致命 —— `createCraft()` 会回退到程序化造型。
+   */
   await initPhysics();
+  try {
+    await initCraftModel();
+  } catch (error) {
+    console.warn('车辆模型加载失败,回退到程序化造型', error);
+  }
 
   const renderer = new WebGLRenderer({
     // 后处理链接上之后,canvas 自己的 MSAA 就是纯浪费:画面渲进 composer 的
