@@ -9,7 +9,7 @@ import {
 import { Loop } from './core/loop';
 import { Rng, parseSeed } from './core/rng';
 import { getCuratedTrack } from './game/curatedTracks';
-import { AUDIO, POST, SKY } from './game/tuning';
+import { AUDIO, PERF, POST, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
 import {
   readTelemetry as readVehicleTelemetry,
@@ -17,6 +17,7 @@ import {
 } from './game/diagnostics';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
 import { AudioDirector } from './audio/director';
+import { type PerfLevel, PerfGovernor } from './core/perfGovernor';
 import { Hud } from './game/hud';
 import { MouseLook } from './core/mouseLook';
 import { CAMERA } from './game/tuning';
@@ -64,6 +65,18 @@ const stages: readonly PostStage[] =
  *
  * **定稿的值仍然只住在 `tuning.ts` 里**,URL 参数不参与部署,也不进任何基准。
  */
+/**
+ * `?quality=N` 把画质锁在第 N 档,不再自动调。
+ *
+ * 两个用处:低配机器上人可以自己钉死一档(自动调是试探式的,画面会来回变,
+ * 有人更愿意一直低画质);以及**拍一张降档之后的图**来核这条路是通的 ——
+ * SwiftShader 上每帧一秒多,间隔全被 `PERF.outlierMs` 当异常丢掉,自动调
+ * 在无头环境里根本触发不了。
+ */
+const qualityParam = params.get('quality');
+const forcedQuality =
+  qualityParam === null ? null : Math.min(PERF.levels.length - 1, Math.max(0, Number(qualityParam) | 0));
+
 const exposure = parseKnob(params.get('exposure'), SKY.exposure);
 const bloomStrength = parseKnob(params.get('bloom'), POST.bloomStrength);
 
@@ -98,8 +111,12 @@ async function boot(container: HTMLDivElement): Promise<void> {
     antialias: false,
     powerPreference: 'high-performance',
   });
-  // 测试模式锁死 DPR,否则不同机器的 devicePixelRatio 会让截图分辨率漂移。
-  renderer.setPixelRatio(testMode ? 1 : Math.min(window.devicePixelRatio, 2));
+  /*
+   * 测试模式锁死 DPR,否则不同机器的 devicePixelRatio 会让截图分辨率漂移。
+   * 实时模式下这个值会被动态画质调节继续乘一个倍率,见下面的 `governor`。
+   */
+  const basePixelRatio = testMode ? 1 : Math.min(window.devicePixelRatio, PERF.maxPixelRatio);
+  renderer.setPixelRatio(basePixelRatio);
   // ACES:把高动态范围压进屏幕能显示的范围。没有它,亮部会直接切平成一片死白,
   // 那是「电脑画的」最明显的特征之一。
   // 实际做这一步的是链末的 OutputPass,它从 renderer 上读这两个设置。
@@ -180,6 +197,13 @@ async function boot(container: HTMLDivElement): Promise<void> {
       audio?.update(world.vehicle, frame);
     },
     render: (alpha) => {
+      if (governor !== null) {
+        const now = performance.now();
+        if (lastFrameMs !== null && governor.sample(now - lastFrameMs)) {
+          applyLevel(governor.level);
+        }
+        lastFrameMs = now;
+      }
       world.present(alpha);
       readout?.update(
       world.vehicle.groundSpeed,
@@ -207,6 +231,25 @@ async function boot(container: HTMLDivElement): Promise<void> {
   };
   resize();
   window.addEventListener('resize', resize);
+
+  /*
+   * 动态画质调节(M6)。**测试模式不构造** —— 分辨率会变,截图就不可复现了,
+   * 和 `Hud`/`AudioDirector` 同一条处理方式。
+   *
+   * 判据喂的是两次渲染之间的墙钟间隔;为什么用「显示器周期的倍数」而不是
+   * 绝对毫秒,见 `PerfGovernor` 的类注释。
+   */
+  const governor = testMode || forcedQuality !== null ? null : new PerfGovernor();
+  let lastFrameMs: number | null = null;
+  const applyLevel = (level: PerfLevel): void => {
+    renderer.setPixelRatio(basePixelRatio * level.scale);
+    post.setEffectsEnabled(level.post);
+    // setPixelRatio 只改倍率,不会重建渲染目标 —— 尺寸要再走一遍。
+    resize();
+  };
+  if (forcedQuality !== null) {
+    applyLevel(PERF.levels[forcedQuality] as PerfLevel);
+  }
 
   document.documentElement.dataset['seed'] = String(seed);
 

@@ -1,5 +1,6 @@
 import { type PerspectiveCamera, type Scene, Vector2, type WebGLRenderer } from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import type { Pass } from 'three/examples/jsm/postprocessing/Pass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -55,8 +56,13 @@ export class Postprocess {
   private readonly renderPass: RenderPass;
   private readonly gtao: GTAOPass | null = null;
   private readonly bloom: UnrealBloomPass | null = null;
+  /** 除 RenderPass / OutputPass 之外的所有 pass,给 `setEffectsEnabled()` 整批开关。 */
+  private readonly effects: Pass[] = [];
   private readonly aoScale: number;
   private readonly bloomScale: number;
+  private readonly renderer: WebGLRenderer;
+  private width = 1;
+  private height = 1;
 
   constructor(
     renderer: WebGLRenderer,
@@ -65,6 +71,7 @@ export class Postprocess {
     stages: readonly PostStage[] = DEFAULT_STAGES,
   ) {
     const enabled = new Set(stages);
+    this.renderer = renderer;
     this.aoScale = POST.aoResolutionScale;
     this.bloomScale = POST.bloomResolutionScale;
     this.composer = new EffectComposer(renderer);
@@ -83,6 +90,7 @@ export class Postprocess {
         samples: POST.aoSamples,
       });
       this.composer.addPass(gtao);
+      this.effects.push(gtao);
       this.gtao = gtao;
     }
 
@@ -96,13 +104,16 @@ export class Postprocess {
       );
       clampBloomInput(bloom);
       this.composer.addPass(bloom);
+      this.effects.push(bloom);
       this.bloom = bloom;
     }
 
     this.composer.addPass(new OutputPass());
 
     if (enabled.has('smaa')) {
-      this.composer.addPass(new SMAAPass());
+      const smaa = new SMAAPass();
+      this.composer.addPass(smaa);
+      this.effects.push(smaa);
     }
 
     if (enabled.has('vignette')) {
@@ -110,6 +121,7 @@ export class Postprocess {
       setNumberUniform(vignette, 'offset', POST.vignetteOffset);
       setNumberUniform(vignette, 'darkness', POST.vignetteDarkness);
       this.composer.addPass(vignette);
+      this.effects.push(vignette);
     }
   }
 
@@ -131,6 +143,19 @@ export class Postprocess {
     }
   }
 
+  /**
+   * 整批开关后处理效果。**给动态画质调节用(`core/perfGovernor.ts`)**,
+   * 是最后一档才动的杠杆 —— 前面几档先降分辨率,理由见 `PERF.levels`。
+   *
+   * `RenderPass` 和 `OutputPass` 不在里面:前者是画面本身,后者做 ACES +
+   * sRGB,关掉画面会直接变成一片过曝的线性值,那不是"省一点",是坏掉。
+   */
+  setEffectsEnabled(on: boolean): void {
+    for (const pass of this.effects) {
+      pass.enabled = on;
+    }
+  }
+
   render(camera: PerspectiveCamera): void {
     this.renderPass.camera = camera;
     if (this.gtao !== null) {
@@ -140,18 +165,45 @@ export class Postprocess {
   }
 
   setSize(width: number, height: number): void {
+    this.width = width;
+    this.height = height;
+    /*
+     * **必须显式转告 composer 当前的 pixelRatio。**
+     *
+     * `EffectComposer` 在**构造时**把 `renderer.getPixelRatio()` 抄进
+     * `_pixelRatio` 就再也不看了,`setSize()` 只按这个抄下来的值算渲染目标。
+     * 所以动态画质调节改 `renderer.setPixelRatio()` 之后,如果不补这一句,
+     * 渲染目标**尺寸一点没变** —— 省下的只有最后那一次贴到画布的 blit。
+     *
+     * 这个坑是量出来的:降到最低档实测只快了 17%,而按像素数算应该快得多;
+     * 那 17% 全是"关掉后处理"带来的,分辨率那一档完全没生效。
+     */
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(width, height);
-    // composer.setSize 会把每个 pass 都拉到全分辨率,所以缩放必须在它之后补。
-    // AO 和 bloom 都是低频信号,半分辨率肉眼看不出来,省下的却是全屏的一半 fill ——
-    // SwiftShader 上 fill 就是全部成本。
-    this.gtao?.setSize(
-      Math.max(1, Math.round(width * this.aoScale)),
-      Math.max(1, Math.round(height * this.aoScale)),
-    );
-    this.bloom?.setSize(
-      Math.max(1, Math.round(width * this.bloomScale)),
-      Math.max(1, Math.round(height * this.bloomScale)),
-    );
+    this.applyEffectResolution();
+  }
+
+  /**
+   * AO 和 bloom 的自有渲染目标。**composer.setSize 会把每个 pass 都拉到全
+   * 分辨率,所以缩放必须在它之后补。**
+   *
+   * 两者都是低频信号,半分辨率肉眼看不出来,省下的却是全屏的一半 fill ——
+   * SwiftShader 上 fill 就是全部成本。
+   *
+   * 基准刻意用的是 **CSS 像素**而不是渲染像素:DPR 2 的屏上这等于 1/4 渲染
+   * 分辨率,更省,而且照样看不出来。但要夹住上限 —— 动态画质把 pixelRatio
+   * 降到 1 以下时,不夹的话这两个目标会比主目标还大,白花钱。
+   */
+  private applyEffectResolution(): void {
+    const ratio = this.renderer.getPixelRatio();
+    const maxW = Math.max(1, Math.round(this.width * ratio));
+    const maxH = Math.max(1, Math.round(this.height * ratio));
+    const sized = (scale: number): [number, number] => [
+      Math.min(maxW, Math.max(1, Math.round(this.width * scale))),
+      Math.min(maxH, Math.max(1, Math.round(this.height * scale))),
+    ];
+    this.gtao?.setSize(...sized(this.aoScale));
+    this.bloom?.setSize(...sized(this.bloomScale));
   }
 
 
