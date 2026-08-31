@@ -60,6 +60,15 @@ export interface WheelView {
   readonly length: number;
   /** 累计滚转角(弧度)。 */
   readonly rollAngle: number;
+  /**
+   * 车轮角速度(弧度/秒),正 = 往前滚。
+   *
+   * 渲染层要它来插值滚转角:`rollAngle` 每个物理步能跳 60° 以上,直接拿
+   * 当前值渲染,在刷新率高于 60 Hz 的屏幕上轮子会明显比车身一顿一顿的
+   * (见 `World.present()`)。按角速度外推比按角度插值更对 —— 角度是对
+   * 2π 取过模的,插值会在跨越 0 的那一步走反方向。
+   */
+  readonly spin: number;
 }
 
 /** 一个车轮。位置在车身局部系:**+X 是驾驶员左侧,+Z 是车头**。 */

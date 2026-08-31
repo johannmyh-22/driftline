@@ -1,7 +1,7 @@
 import type { InputFrame } from '../core/input';
 import { normalize01 } from '../core/mathx';
 import type { Rng } from '../core/rng';
-import { REFERENCE_TOP_SPEED } from '../game/tuning';
+import { GEARBOX, REFERENCE_TOP_SPEED } from '../game/tuning';
 import type { Vehicle } from '../game/vehicle';
 import { AudioBus } from './context';
 import { EngineSound } from './engine';
@@ -59,7 +59,14 @@ export class AudioDirector {
   /** 每个固定步调一次,和物理同频率——引擎/气流的参数平滑内建在节点自己的 setTargetAtTime 里。 */
   update(vehicle: Vehicle, input: InputFrame): void {
     const speed01 = normalize01(vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED);
-    this.engine.update(speed01, input.throttle, this.bus.context);
+    /*
+     * 引擎音读**物理变速箱**的真转速与真挡位,不再按车速自己编一套。
+     * `speed01` 会在 217 km/h 以上饱和(参考极速 60.3 m/s,实际能跑到 68.9),
+     * 拿它当转速代理的话一大半时间音调是冻住的 —— 见 `engine.ts` 的类注释。
+     * 气流和地面噪声仍然用 `speed01`:它们本来就该跟车速走,饱和了也无所谓。
+     */
+    const rpm01 = normalize01(vehicle.gearbox.rpm, GEARBOX.idleRpm, GEARBOX.redlineRpm);
+    this.engine.update(rpm01, vehicle.gearbox.gear, input.throttle, this.bus.context);
     this.wind.update(speed01, this.bus.context);
     // 撞击是事件、刮擦是状态,两条独立喂:正面撞进去只出 crack,贴着墙磨过去
     // 只出刮擦,斜着撞两个都有——这正是"碰撞分好几种"要的效果。

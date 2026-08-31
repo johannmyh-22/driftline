@@ -9,7 +9,8 @@ import { SurfaceNoise } from '../../src/audio/surface';
 import { createNoiseBuffer } from '../../src/audio/noise';
 import { playUiClick } from '../../src/audio/ui';
 import { WindNoise } from '../../src/audio/wind';
-import { AUDIO } from '../../src/game/tuning';
+import { AUDIO, GEARBOX, REFERENCE_TOP_SPEED } from '../../src/game/tuning';
+import { normalize01 } from '../../src/core/mathx';
 
 /*
  * ══════════════════════════════════════════════════════════════════════════
@@ -287,11 +288,11 @@ describe('EngineSound', () => {
     const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
     const gain = (engine as unknown as { gain: FakeGainNode }).gain;
 
-    engine.update(0, 0, bus.context);
+    engine.update(0, 0, 0, bus.context);
     const idleFreq = osc.frequency.value;
     const idleGain = gain.gain.value;
 
-    engine.update(1, 1, bus.context);
+    engine.update(1, 0, 1, bus.context);
     const maxFreq = osc.frequency.value;
     const maxGain = gain.gain.value;
 
@@ -306,9 +307,9 @@ describe('EngineSound', () => {
     const engine = new EngineSound(bus, new Rng(5));
     const gain = (engine as unknown as { gain: FakeGainNode }).gain;
 
-    engine.update(0.6, 0, bus.context);
+    engine.update(0.6, 0, 0, bus.context);
     const coastGain = gain.gain.value;
-    engine.update(0.6, 1, bus.context);
+    engine.update(0.6, 0, 1, bus.context);
     const fullGain = gain.gain.value;
 
     expect(coastGain).toBeGreaterThan(0);
@@ -320,9 +321,9 @@ describe('EngineSound', () => {
     const engine = new EngineSound(bus, new Rng(5));
     const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
 
-    engine.update(0.4, 0, bus.context);
+    engine.update(0.4, 0, 0, bus.context);
     const coastFreq = osc.frequency.value;
-    engine.update(0.4, 1, bus.context);
+    engine.update(0.4, 0, 1, bus.context);
     const throttleFreq = osc.frequency.value;
 
     expect(throttleFreq).toBeGreaterThan(coastFreq);
@@ -333,9 +334,9 @@ describe('EngineSound', () => {
     const engine = new EngineSound(bus, new Rng(5));
     const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
 
-    engine.update(1, 0, bus.context);
+    engine.update(1, 0, 0, bus.context);
     const coastFreq = osc.frequency.value;
-    engine.update(1, 1, bus.context);
+    engine.update(1, 0, 1, bus.context);
     const fullFreq = osc.frequency.value;
 
     expect(coastFreq).toBeLessThan(fullFreq);
@@ -397,11 +398,11 @@ describe('EngineSound', () => {
     expect(noiseFilter.type).toBe('bandpass');
     expect(noiseFilter.Q.value).toBeCloseTo(AUDIO.engineNoiseQ, 5);
 
-    engine.update(0, 0, bus.context);
+    engine.update(0, 0, 0, bus.context);
     const idleNoise = noiseGain.gain.value;
     const idleFilter = noiseFilter.frequency.value;
 
-    engine.update(1, 1, bus.context);
+    engine.update(1, 0, 1, bus.context);
     expect(noiseGain.gain.value).toBeGreaterThan(idleNoise);
     expect(noiseFilter.frequency.value).toBeGreaterThan(idleFilter);
     // 噪声只是质感,盖过音调就变成嘶嘶声了。
@@ -409,83 +410,103 @@ describe('EngineSound', () => {
   });
 
   /*
-   * 下面这组守的是"没有换挡的声音,感觉有点假"那次反馈的修法。核心断言是
-   * **频率对车速非单调**——单调上升就是无级变速的电动机,不是有变速箱的车。
+   * ── 变速箱 ──────────────────────────────────────────────────────────────
+   *
+   * 这一组原来测的是**音频自己那套假变速箱**(读归一化车速算挡位)。那套
+   * 已经删了 —— 实测它 86% 的时间卡在六挡不动,因为 `speed01` 在 217 km/h
+   * 以上就饱和了,而车能跑到 248。现在挡位和转速都由物理变速箱给,音频只
+   * 负责跟随,所以这组改成测「跟随得对不对」。
    */
-  it('地板油从静止加到满速,音高会掉下来若干次(每次升挡一次)', () => {
-    const { bus } = makeBus();
-    const engine = new EngineSound(bus, new Rng(5));
-    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
-
-    let drops = 0;
-    let prev = -Infinity;
-    for (let i = 0; i <= 400; i++) {
-      engine.update(i / 400, 1, bus.context);
-      const freq = osc.frequency.value;
-      if (freq < prev - 1e-9) {
-        drops++;
-      }
-      prev = freq;
-    }
-    // 6 个挡位 = 5 次升挡。允许多算不允许少算(浮点边界可能在同一挡内抖一下)。
-    expect(drops).toBeGreaterThanOrEqual(AUDIO.engineUpshiftPoints.length - 1);
-  });
-
-  it('挡内音高仍然随车速上升——锯齿的"齿"必须是斜的不是平的', () => {
-    const { bus } = makeBus();
-    const engine = new EngineSound(bus, new Rng(5));
-    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
-
-    // 取一挡中段的两个点,中间不跨越任何升挡点。
-    const first = AUDIO.engineUpshiftPoints[0] ?? 0.13;
-    engine.update(first * 0.4, 1, bus.context);
-    const low = osc.frequency.value;
-    engine.update(first * 0.9, 1, bus.context);
-    expect(osc.frequency.value).toBeGreaterThan(low);
-  });
-
-  it('在升挡点附近来回巡航不会每帧换挡(降挡回滞)', () => {
-    const { bus } = makeBus();
-    const engine = new EngineSound(bus, new Rng(5));
-    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
-    const point = AUDIO.engineUpshiftPoints[0] ?? 0.13;
-
-    // 先升上去,再在升挡点下方一点点反复摆动——回滞窗口内不该掉回下一挡。
-    engine.update(point * 1.05, 1, bus.context);
-    const afterShift = (engine as unknown as { gear: number }).gear;
-    expect(afterShift).toBe(1);
-
-    let flaps = 0;
-    let prev = osc.frequency.value;
-    for (let i = 0; i < 40; i++) {
-      engine.update(point * (i % 2 === 0 ? 0.99 : 1.01), 1, bus.context);
-      const freq = osc.frequency.value;
-      if (Math.abs(freq - prev) > (AUDIO.engineMaxFreq - AUDIO.engineIdleFreq) * 0.2) {
-        flaps++;
-      }
-      prev = freq;
-    }
-    expect(flaps).toBe(0);
-    expect((engine as unknown as { gear: number }).gear).toBe(1);
-  });
-
-  it('换挡瞬间音量被断油压低,过了断油窗口再恢复', () => {
+  it('升挡那一瞬音量被断油压低,过了断油窗口再恢复', () => {
     const { bus, context } = makeBus();
     const engine = new EngineSound(bus, new Rng(5));
     const gain = (engine as unknown as { gain: FakeGainNode }).gain;
-    const point = AUDIO.engineUpshiftPoints[0] ?? 0.13;
 
-    // 升挡前后车速几乎一样,音量差别只可能来自断油。
-    engine.update(point * 0.99, 1, bus.context);
+    // 先喂一帧建立 lastGear,否则第一帧无从判断"换挡了"。
+    engine.update(0.9, 0, 1, bus.context);
     const before = gain.gain.value;
-    engine.update(point * 1.01, 1, bus.context);
+    // 转速不变、只换挡:音量差别只可能来自断油。
+    engine.update(0.9, 1, 1, bus.context);
     const during = gain.gain.value;
     expect(during).toBeLessThan(before);
 
-    // 时间推过断油窗口,同样车速下音量回来。
     context.currentTime += AUDIO.engineShiftCutTime + 0.01;
-    engine.update(point * 1.01, 1, bus.context);
+    engine.update(0.9, 1, 1, bus.context);
     expect(gain.gain.value).toBeGreaterThan(during);
+  });
+
+  it('第一帧不断油 —— 刚进游戏不该无端塌一下音量', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const gain = (engine as unknown as { gain: FakeGainNode }).gain;
+
+    engine.update(0.9, 3, 1, bus.context);
+    const first = gain.gain.value;
+    engine.update(0.9, 3, 1, bus.context);
+    expect(gain.gain.value).toBeCloseTo(first, 9);
+  });
+
+  it('降挡不断油 —— 真车降挡是补油,断一下听起来像卡顿', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const gain = (engine as unknown as { gain: FakeGainNode }).gain;
+
+    engine.update(0.5, 3, 1, bus.context);
+    const before = gain.gain.value;
+    engine.update(0.5, 2, 1, bus.context);
+    expect(gain.gain.value).toBeCloseTo(before, 9);
+  });
+
+  it('音高跟着转速走 —— 锯齿由物理给,音频只负责跟随', () => {
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+
+    // 挡内爬升 → 升挡后转速掉下来 → 再爬。这条锯齿现在来自 gearbox.ts。
+    engine.update(0.5, 2, 1, bus.context);
+    const low = osc.frequency.value;
+    engine.update(0.95, 2, 1, bus.context);
+    const redline = osc.frequency.value;
+    engine.update(0.36, 3, 1, bus.context);
+    const afterShift = osc.frequency.value;
+
+    expect(redline).toBeGreaterThan(low);
+    expect(afterShift).toBeLessThan(redline);
+  });
+
+  /*
+   * ↓ 这条是**回归守卫**,守的是人类反馈「听不出转速变化」那个 bug 本身。
+   *
+   * 老代码把 `speed01 = groundSpeed / REFERENCE_TOP_SPEED` 当转速代理,而
+   * `REFERENCE_TOP_SPEED` 只是**参考**极速:`vehicle.ts` 的轮速上限是它的
+   * 1.15 倍,车真能跑到 68.9 m/s。于是超过 60.3 之后 speed01 恒等于 1,
+   * 音调、挡位、换挡声全部冻住 —— 实测常规驾驶车速中位数就是 65.9 m/s,
+   * 一大半时间都在饱和区里。
+   *
+   * 现在的输入是物理转速,同样这段车速区间里它是**在动的**。
+   */
+  it('车速饱和的那一段里,转速仍然在动(这正是老代码的 bug)', () => {
+    const saturated = [60.3, 63, 65.9, 68.9];
+    const speed01 = saturated.map((v) => normalize01(v, 0, REFERENCE_TOP_SPEED));
+    // 老的输入:整段都是 1,一点变化都没有。
+    expect(new Set(speed01)).toEqual(new Set([1]));
+
+    // 新的输入:同一段车速对应的转速跨越怠速到红线之间的一大片。实测常规
+    // 驾驶 rpm 在 4400~6950 之间来回走。
+    const rpm01 = [4404, 5600, 6521, 6952].map((r) =>
+      normalize01(r, GEARBOX.idleRpm, GEARBOX.redlineRpm),
+    );
+    const spread = Math.max(...rpm01) - Math.min(...rpm01);
+    expect(spread).toBeGreaterThan(0.35);
+
+    // 落到频率上要跨过一个八度以上才算"听得出转速"。
+    const { bus } = makeBus();
+    const engine = new EngineSound(bus, new Rng(5));
+    const osc = (engine as unknown as { osc: FakeOscillatorNode }).osc;
+    engine.update(Math.min(...rpm01), 4, 1, bus.context);
+    const lowFreq = osc.frequency.value;
+    engine.update(Math.max(...rpm01), 4, 1, bus.context);
+    expect(osc.frequency.value / lowFreq).toBeGreaterThan(1.15);
   });
 });
 

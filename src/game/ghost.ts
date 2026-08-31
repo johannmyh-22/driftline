@@ -9,6 +9,7 @@ import { Physics } from './physics';
 import { Race } from './race';
 import type { TrackLayout } from './trackLayout';
 import { CRAFT, GHOST, REFERENCE_TOP_SPEED } from './tuning';
+import { rollAt } from './wheelView';
 import { Vehicle } from './vehicle';
 
 /**
@@ -138,7 +139,7 @@ export class Ghost {
       if (wheel === undefined) {
         continue;
       }
-      this.craft.setWheel(i, wheel.length, wheel.steered ? this.vehicle.steerAngle : 0, wheel.rollAngle);
+      this.craft.setWheel(i, wheel.length, wheel.steered ? this.vehicle.steerAngle : 0, rollAt(wheel, alpha));
     }
   }
 }

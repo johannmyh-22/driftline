@@ -6,11 +6,12 @@ import {
   Mesh,
   MeshPhysicalMaterial,
   MeshStandardMaterial,
+  Object3D,
   Vector3,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
-import { CAR, CRAFT } from '../game/tuning';
+import { CAR, CRAFT, MODEL_MATERIAL } from '../game/tuning';
 import modelUrl from '../assets/car.glb?url';
 import type { Palette } from './palette';
 import type { Craft } from './craft';
@@ -44,18 +45,22 @@ import type { Craft } from './craft';
  * (`scripts/buildCarModel.mjs`)把 `Tireside` 材质的 baseColor 贴图摘掉换成
  * 纯深色。这不是"顺手优化",是授权要求。
  *
- * ## 坐标系
+ * ## 素材是展厅件,不是游戏件 —— 这决定了下面两组处理
  *
- * 模型是 **Z 轴朝上、车头朝 −Y**(Blender 约定),这个项目是 Y 轴朝上、
- * 车头朝 +Z。所以载入时要绕 X 轴转 −90°。另外模型的轴距 2.80 m / 轮距
- * 1.95 m 都比物理用的(2.60 / 1.60)大,X 与 Y 分别按各自的比例缩放,
- * 让**轮子正好落在物理算出来的位置上** —— 否则轮子会浮在轮眉外面。
+ * CarConcept 是 Khronos 3D Commerce 的**展厅/电商**素材:按摄影棚打光调的
+ * 材质、按渲染器整棵树变换的层级。两件事都不能直接拿进实时赛车里用:
+ *
+ * 1. **材质**要压亮(见 `MODEL_MATERIAL` 与 `tuneMaterial()`)。
+ * 2. **轮子**要按真轮轴重新分组(见 `initCraftModel()` 里的 pass 1)。
  */
 
-/** 载入并烘焙好的模板。四个轮子的几何已经各自移到原点,方便绕自己的轴转。 */
+/** 载入并烘焙好的模板。四个轮子的几何已经各自移到轮轴上,方便绕自己的轴转。 */
 interface Template {
   readonly body: Mesh[];
+  /** 跟着轮子一起滚的部分:轮辋、轮胎、刹车盘。 */
   readonly wheels: Mesh[][];
+  /** 只跟着转向、**不**跟着滚的部分:刹车卡钳。 */
+  readonly uprights: Mesh[][];
   readonly tailLights: Mesh[];
 }
 
@@ -98,20 +103,58 @@ export async function initCraftModel(): Promise<void> {
   const trackScale = CAR.trackWidth / MODEL_TRACK;
   const toWorld = new Matrix4().makeScale(trackScale, wheelBaseScale, wheelBaseScale);
 
-  // 模型原点在地面,本项目原点在轮心平面 —— 差值就是车身要下移的量。
-  const bodyDrop = CAR.wheelRadius - CAR.suspensionRest - MODEL_WHEEL_CENTRE * wheelBaseScale;
+  /*
+   * ## pass 1:拿四个轮子的**真轮轴**位置
+   *
+   * 上一版是把「一个轮子组里所有网格的并集包围盒中心」当轮轴用的,这假设
+   * 组里的东西都绕轮轴对称。**实测不成立**:每个轮子节点下面挂着四个网格 ——
+   * 轮辋、轮胎、刹车盘、**刹车卡钳**,而卡钳本来就是偏心的(它抱在刹车盘
+   * 边缘上,不在轴心)。并集中心因此偏离轮轴,`roll.rotation.x` 一转,整个
+   * 轮子就绕着一个偏心点公转 —— 人类看到的「前面的轮胎完全在放飞状态」。
+   *
+   * 现在直接用轮子根节点自己的世界坐标:那**就是**轮轴,不需要从几何反推。
+   */
+  const pivots: (Vector3 | null)[] = [null, null, null, null];
+  scene.traverse((child) => {
+    const index = wheelRootIndex(child.name);
+    if (index >= 0) {
+      pivots[index] = child.getWorldPosition(new Vector3()).applyMatrix4(toWorld);
+    }
+  });
+  const axles = pivots.map((p) => {
+    if (p === null) {
+      // 抛出去而不是凑合:`main.ts` 会 catch 并回退到程序化造型,出一辆
+      // 轮子乱飞的车比回退难查得多。
+      throw new Error('craftModel: 模型里找不到四个轮子的根节点');
+    }
+    return p;
+  });
+
+  /*
+   * 模型的轮距中点**不在原点上**:实测前轴 z=+1.486、后轴 z=−1.314(模型
+   * 单位),中点偏了 0.086 m。而本项目的悬挂点是对称的 ±wheelBase/2。不补
+   * 这个偏移,四个轮子会整体相对车身前移 8 cm —— 轮子不居中在轮眉里。
+   * 上一版同样有这个偏差,只是被更显眼的「放飞」盖过去了。
+   */
+  const bodyOffset = new Vector3()
+    .addVectors(axles[0] as Vector3, axles[3] as Vector3)
+    .add(axles[1] as Vector3)
+    .add(axles[2] as Vector3)
+    .multiplyScalar(0.25);
+  // 模型原点在地面,本项目原点在轮心平面 —— 高度差单独算,不用四轮平均的 x/z 那套。
+  bodyOffset.y = (axles[0] as Vector3).y - (CAR.wheelRadius - CAR.suspensionRest);
 
   const body: Mesh[] = [];
   const wheels: Mesh[][] = [[], [], [], []];
+  const uprights: Mesh[][] = [[], [], [], []];
   const tailLights: Mesh[] = [];
-  const centre = new Vector3();
   const bake = new Matrix4();
 
   scene.traverse((child) => {
     if (!(child instanceof Mesh)) {
       return;
     }
-    const wheelIndex = wheelIndexOf(child);
+    const slot = wheelSlotOf(child);
     const mesh = new Mesh(child.geometry.clone(), child.material);
     // 把节点的世界变换和「模型 → 本项目」一起烘进几何,之后整棵树就是平的,
     // 轮子可以随便重新分组而不用担心嵌套变换。
@@ -120,11 +163,13 @@ export async function initCraftModel(): Promise<void> {
     mesh.castShadow = true;
     mesh.receiveShadow = true;
 
-    if (wheelIndex >= 0) {
-      wheels[wheelIndex]?.push(mesh);
+    if (slot !== null) {
+      // 移到轮轴上,这样绕自己的轴转就是转向/滚转,而不是绕车身转。
+      const axle = axles[slot.index] as Vector3;
+      mesh.geometry.translate(-axle.x, -axle.y, -axle.z);
+      (slot.rolls ? wheels : uprights)[slot.index]?.push(mesh);
     } else {
-      // 车身整体下移,让模型的轮心平面对上本项目的轮心高度。
-      mesh.geometry.translate(0, bodyDrop, 0);
+      mesh.geometry.translate(-bodyOffset.x, -bodyOffset.y, -bodyOffset.z);
       body.push(mesh);
       if (/taillight/i.test(child.name)) {
         tailLights.push(mesh);
@@ -132,62 +177,88 @@ export async function initCraftModel(): Promise<void> {
     }
   });
 
-  // 每个轮子的几何移到原点,这样绕自己的轴转就是转向/滚转,而不是绕车身转。
-  for (const group of wheels) {
-    if (group.length === 0) {
-      continue;
-    }
-    const box = new Box3();
-    for (const mesh of group) {
-      mesh.geometry.computeBoundingBox();
-      const b = mesh.geometry.boundingBox;
-      if (b !== null) {
-        box.union(b);
-      }
-    }
-    box.getCenter(centre);
-    for (const mesh of group) {
-      mesh.geometry.translate(-centre.x, -centre.y, -centre.z);
-    }
-  }
-
-  template = { body, wheels, tailLights };
+  template = { body, wheels, uprights, tailLights };
 }
 
 /** 模型自带的轴距/轮距(米),量自节点位置,用来反解缩放比例。 */
 const MODEL_WHEEL_BASE = 2.8;
 const MODEL_TRACK = 1.952;
-/**
- * 模型里轮心离地的高度(模型空间的 Z,也就是本项目的 Y)。
- *
- * 模型的原点在**地面**上,而本项目的车身局部原点在**轮心平面**上
- * (`setWheel` 把轮心放到 `wheelRadius − suspensionLength` = −0.11)。不做这
- * 个对齐,车身会整整浮在轮子上方半米 —— 第一次截图就是这个样子。
- */
-const MODEL_WHEEL_CENTRE = 0.384;
 
 /**
- * 网格属于哪个轮子。索引顺序和 `vehicle.ts` 的 `makeWheel` 一致:
+ * 轮子根节点的名字 → 索引。索引顺序和 `vehicle.ts` 的 `makeWheel` 一致:
  * 0=前 +X,1=前 −X,2=后 +X,3=后 −X。
  *
  * 模型里 L/R 的命名对应 ±X:`WheelFrontL` 在 +X 侧(实测节点坐标 x=+0.975)。
+ * 只认**根节点**(`WheelFrontL` 这一层),下面的 `WheelFrontLRim` 之类由
+ * `wheelSlotOf()` 沿父链找回来。
  */
-function wheelIndexOf(mesh: Mesh): number {
-  let node: { name: string; parent: unknown } | null = mesh as unknown as {
-    name: string;
-    parent: unknown;
-  };
-  while (node !== null && typeof node.name === 'string') {
-    const name = node.name;
-    if (/^WheelFront/i.test(name)) {
-      return /L/i.test(name.slice(10)) ? 0 : 1;
-    }
-    if (/^WheelRear/i.test(name)) {
-      return /L/i.test(name.slice(9)) ? 2 : 3;
-    }
-    node = node.parent as { name: string; parent: unknown } | null;
+function wheelRootIndex(name: string): number {
+  if (/^WheelFront[LR]$/i.test(name)) {
+    return /L$/i.test(name) ? 0 : 1;
+  }
+  if (/^WheelRear[LR]$/i.test(name)) {
+    return /L$/i.test(name) ? 2 : 3;
   }
   return -1;
+}
+
+/**
+ * 网格属于哪个轮子、以及它跟不跟着轮子滚。
+ *
+ * **刹车卡钳(`BrakePad`)不滚。** 真车上卡钳是固定在转向节上的,只有刹车盘
+ * 和轮辋在转;跟着滚会看见卡钳绕着轮心飞。上一版把它和轮辋一起塞进滚转节点,
+ * 既转错了、又(通过并集包围盒)把整个轮子的旋转轴带偏。
+ */
+function wheelSlotOf(mesh: Mesh): { index: number; rolls: boolean } | null {
+  let node: Object3D | null = mesh;
+  let rolls = true;
+  while (node !== null) {
+    if (/BrakePad/i.test(node.name)) {
+      rolls = false;
+    }
+    const index = wheelRootIndex(node.name);
+    if (index >= 0) {
+      return { index, rolls };
+    }
+    node = node.parent;
+  }
+  return null;
+}
+
+/**
+ * 把展厅材质压成户外材质。
+ *
+ * 人类反馈「这个车有点过于闪亮了」。实测模型自带的参数就是一台镜面车:
+ * 主车漆 `Paint 1 Carmine` 是 **clearcoat=1.0、clearcoatRoughness=0.0**
+ * 叠在 metalness=1.0 / roughness=0.25 上;`Mirror` 的 roughness 干脆是 0,
+ * `Rim2` 是 0.049。这些值在摄影棚里是对的 —— 光源可控、只有一两个柔光箱;
+ * 放进整片天空的 IBL 里,每一处都在镜面反射天光,于是整台车在发光。
+ *
+ * 处理分两层,都在 `MODEL_MATERIAL` 里可调:
+ *
+ * - **所有**材质吃一个粗糙度下限,把 0 和 0.049 这种镜面值抬起来。
+ * - 车漆额外单独设一套:清漆压到有光泽但不照人,金属度从 1.0 降下来 ——
+ *   真实车漆是**介质**漆膜里掺金属片,不是一整块金属。
+ *
+ * **玻璃排除在外**:它靠 transmission 出效果,抬粗糙度会变成毛玻璃。
+ */
+function tuneMaterial(material: MeshStandardMaterial | MeshPhysicalMaterial): void {
+  const isGlass =
+    material instanceof MeshPhysicalMaterial && (material.transmission > 0 || material.opacity < 1);
+  if (isGlass) {
+    return;
+  }
+  material.roughness = Math.max(material.roughness, MODEL_MATERIAL.minRoughness);
+  material.envMapIntensity = MODEL_MATERIAL.envMapIntensity;
+
+  if (/^Paint/i.test(material.name)) {
+    material.roughness = MODEL_MATERIAL.paintRoughness;
+    material.metalness = MODEL_MATERIAL.paintMetalness;
+    if (material instanceof MeshPhysicalMaterial) {
+      material.clearcoat = MODEL_MATERIAL.paintClearcoat;
+      material.clearcoatRoughness = MODEL_MATERIAL.paintClearcoatRoughness;
+    }
+  }
 }
 
 /** 用载入好的模型造一辆车。调用前必须 `isCraftModelReady()`。 */
@@ -208,6 +279,7 @@ export function createModelCraft(palette: Palette): Craft {
       return hit;
     }
     const material = (source as MeshStandardMaterial).clone();
+    tuneMaterial(material);
     // 车漆按调色板上色;其余材质(轮胎/玻璃/卡钳)保持模型原样。
     if (/^Paint/i.test(material.name)) {
       material.color.copy(palette.craftHull);
@@ -256,6 +328,9 @@ export function createModelCraft(palette: Palette): Craft {
     for (const mesh of built.wheels[i] ?? []) {
       attach(mesh, roll);
     }
+    for (const mesh of built.uprights[i] ?? []) {
+      attach(mesh, steer);
+    }
   }
 
   const glow = new Color();
@@ -282,4 +357,30 @@ export function createModelCraft(palette: Palette): Craft {
       roll.rotation.x = rollAngle;
     },
   };
+}
+
+/**
+ * 四个轮子组的包围盒,只给测试用。
+ *
+ * **这一层验收是这次修 bug 补出来的。**「轮子绕偏心点公转」在静态截图里
+ * 看不出来(轮子停在哪一帧都像是对的),第四十五节的教训「截图拦不住模型
+ * 路径的问题」在这里第二次应验。所以改成量:每个轮子组烘焙完之后,包围盒
+ * 中心必须落在原点(= 轮轴)上,尺寸必须接近 `2 × wheelRadius`。
+ */
+export function measureWheelBounds(): { centre: Vector3; size: Vector3 }[] {
+  const built = template;
+  if (built === null) {
+    throw new Error('measureWheelBounds: 模型还没载入');
+  }
+  return built.wheels.map((group) => {
+    const box = new Box3();
+    for (const mesh of group) {
+      mesh.geometry.computeBoundingBox();
+      const b = mesh.geometry.boundingBox;
+      if (b !== null) {
+        box.union(b);
+      }
+    }
+    return { centre: box.getCenter(new Vector3()), size: box.getSize(new Vector3()) };
+  });
 }

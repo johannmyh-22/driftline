@@ -5,6 +5,7 @@ import {
   Vector3,
 } from 'three';
 import { type InputFrame, InputRecorder, createInputFrame } from '../core/input';
+import { rollAt } from './wheelView';
 import type { Rng } from '../core/rng';
 import { type Craft, createCraft } from '../gfx/craft';
 import { createGround } from '../gfx/ground';
@@ -472,11 +473,6 @@ export class World {
       this.input.throttle * CRAFT.thrustThrottleWeight +
         normalize01(this.vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
     );
-    /*
-     * 摆四个轮子。**用当前帧的值,不做插值** —— 悬挂行程和转向角的变化幅度
-     * 是厘米/几度的量级,插不插值看不出来;而为了插值再存一份上一帧的四轮状态,
-     * 是每帧四次拷贝换一个看不见的差别。
-     */
     const wheels = this.vehicle.wheelViews;
     for (let i = 0; i < wheels.length; i++) {
       const wheel = wheels[i];
@@ -487,7 +483,7 @@ export class World {
         i,
         wheel.length,
         wheel.steered ? this.vehicle.steerAngle : 0,
-        wheel.rollAngle,
+        rollAt(wheel, alpha),
       );
     }
 
@@ -520,7 +516,7 @@ export class World {
         if (wheel === undefined) {
           continue;
         }
-        craft.setWheel(w, wheel.length, wheel.steered ? rival.steerAngle : 0, wheel.rollAngle);
+        craft.setWheel(w, wheel.length, wheel.steered ? rival.steerAngle : 0, rollAt(wheel, alpha));
       }
     }
 
