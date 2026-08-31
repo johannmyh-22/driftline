@@ -3,6 +3,7 @@ import { decodeGhostInput, loadRecord, setStorageEnabled } from './game/records'
 import {
   type InputFrame,
   KeyboardInput,
+  MergedInput,
   ScriptedInput,
   createInputFrame,
 } from './core/input';
@@ -17,6 +18,7 @@ import {
 } from './game/diagnostics';
 import { ALL_STAGES, DEFAULT_STAGES, type PostStage, Postprocess } from './gfx/postprocess';
 import { AudioDirector } from './audio/director';
+import { TouchOverlay, shouldShowTouchControls } from './game/touchOverlay';
 import { type PerfLevel, PerfGovernor } from './core/perfGovernor';
 import { Hud } from './game/hud';
 import { MouseLook } from './core/mouseLook';
@@ -73,6 +75,12 @@ const stages: readonly PostStage[] =
  * SwiftShader 上每帧一秒多,间隔全被 `PERF.outlierMs` 当异常丢掉,自动调
  * 在无头环境里根本触发不了。
  */
+/**
+ * `?touch=1` 强制打开触屏控件。桌面上调试、以及无头测试都靠它 —— 无头
+ * Chromium 默认 `maxTouchPoints` 是 0,不强制的话这层永远出不来。
+ */
+const forceTouch = params.get('touch') === '1';
+
 const qualityParam = params.get('quality');
 const forcedQuality =
   qualityParam === null ? null : Math.min(PERF.levels.length - 1, Math.max(0, Number(qualityParam) | 0));
@@ -163,7 +171,20 @@ async function boot(container: HTMLDivElement): Promise<void> {
 
   const scripted = new ScriptedInput();
   const keyboard = testMode ? null : new KeyboardInput();
-  const source = keyboard ?? scripted;
+  /*
+   * 触屏控件(M6)。**和键盘并存**,不是二选一:平板可以接键盘,桌面也可能
+   * 有触屏。合并规则是"绝对值大的赢",见 `MergedInput` 的注释 —— 后者覆盖
+   * 前者的话,没在用的那一路每帧都会把另一路清零。
+   */
+  const touch = shouldShowTouchControls(forceTouch) ? new TouchOverlay(container) : null;
+  const base = keyboard ?? scripted;
+  /*
+   * **测试模式也建**,只要 `?touch=1`。无头 Chromium 的 `maxTouchPoints` 是 0,
+   * 所以不带那个参数的回归截图一张都不会多出控件来;而带上它之后,触屏这条
+   * 路就能用 `advance()` 确定性地步进验证 —— 否则只能在实时模式下等,
+   * SwiftShader 上一帧一秒多,四秒钟连发车倒计时都走不完。
+   */
+  const source = touch === null ? base : new MergedInput([base, touch.input]);
   const frame: InputFrame = createInputFrame();
   const readout = testMode
     ? null
@@ -224,6 +245,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
       world.session,
     );
       post.render(world.camera);
+      touch?.present();
       if (!painted) {
         painted = true;
         document.documentElement.dataset['painted'] = '1';
@@ -237,6 +259,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
     renderer.setSize(width, height, false);
     world.resize(width, height);
     post.setSize(width, height);
+    touch?.layout();
   };
   resize();
   window.addEventListener('resize', resize);

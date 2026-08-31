@@ -488,3 +488,60 @@ body {
   font-size: 0.72rem;
   color: #64748b;
 }
+
+/*
+ * ── 触屏控件(M6)──────────────────────────────────────────────────────────
+ *
+ * 位置和大小全部由 `touchOverlay.ts` 按 `TOUCH` 那张表写成内联样式,这里只
+ * 管长相。别在这里再写一套坐标 —— 两处坐标迟早对不上,而且错法是"看起来在
+ * 这儿、按下去没反应"。
+ */
+.touch {
+  position: absolute;
+  inset: 0;
+  /* 不设的话浏览器会把拖动当成滚动/下拉刷新,pointermove 收到一半被 pointercancel
+     抢走,表现是"方向打到一半自己回正了"。 */
+  touch-action: none;
+  /* 这一层只在控件自己身上收事件,空白处的点击照旧穿透到画布(鼠标视角要用)。 */
+  pointer-events: none;
+  z-index: 5;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.touch-stick,
+.touch-button {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: auto;
+  box-sizing: border-box;
+  border: 1.5px solid rgb(255 255 255 / 30%);
+  background: rgb(12 16 22 / 28%);
+  backdrop-filter: blur(2px);
+  display: grid;
+  place-items: center;
+  font: 500 13px/1 system-ui, sans-serif;
+  color: rgb(255 255 255 / 72%);
+  letter-spacing: 0.08em;
+  /* 控件是给拇指用的,不该抢走视线。按住时才提亮(.is-held)。 */
+  opacity: 0.55;
+  transition: opacity 120ms ease, background-color 80ms ease;
+}
+
+.touch-button.is-held {
+  opacity: 1;
+  background: rgb(120 200 255 / 32%);
+  border-color: rgb(160 220 255 / 70%);
+}
+
+.touch-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 38%;
+  height: 38%;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 42%);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}

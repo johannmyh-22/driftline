@@ -498,6 +498,66 @@ test('首屏不等车辆模型:先画出程序化造型,模型到货后自己换
   expect(problems).toEqual([]);
 });
 
+test.describe('触屏控件', () => {
+  // 无头 Chromium 默认 maxTouchPoints=0,不开这个连 pointer 事件都不是触摸。
+  test.use({ hasTouch: true });
+
+  test('控件出得来,按住油门车就走', async ({ page }) => {
+    const problems = watchForProblems(page);
+
+    /*
+     * 走 `?test=1` 而不是实时模式:SwiftShader 上一帧一秒多,实时等四秒连
+     * 发车倒计时都走不完,根本看不出车动没动。测试模式下 `advance()` 确定性
+     * 步进,几十帧就够。`?touch=1` 强制打开控件 —— 无头 Chromium 的
+     * `maxTouchPoints` 是 0,所以其余回归截图不会多出这一层来。
+     *
+     * 这条测的是**接线**:控件画在哪、按下去有没有转成 `InputFrame`。判据
+     * 细节(死区、多指、命中)在 tests/unit/touchInput.test.ts,那边跑纯逻辑。
+     */
+    await page.goto(`${BASE_URL}?test=1&touch=1&seed=42`, { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+    await page.evaluate(async () => {
+      await window.__DRIFTLINE_TEST__!.ready;
+    });
+
+    const throttle = page.locator('.touch-button', { hasText: '油门' });
+    await expect(throttle).toBeVisible();
+    await expect(page.locator('.touch-stick')).toBeVisible();
+
+    const box = await throttle.boundingBox();
+    expect(box).not.toBeNull();
+    const cx = (box?.x ?? 0) + (box?.width ?? 0) / 2;
+    const cy = (box?.y ?? 0) + (box?.height ?? 0) / 2;
+
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+
+    const moving = await page.evaluate(() => {
+      const api = window.__DRIFTLINE_TEST__!;
+      api.advance(180);
+      return api.snapshot();
+    });
+    expect(moving['groundSpeed'] ?? 0).toBeGreaterThan(5);
+    /*
+     * 按钮高亮是在 `render()` 里刷的,所以这条断言必须排在 `advance()`
+     * **之后** —— `?test=1` 下没有 rAF,不推帧就永远不刷。
+     */
+    await expect(throttle).toHaveClass(/is-held/);
+
+    await page.mouse.up();
+    // 松手之后再推同样多帧,车必须在减速,不能"油门粘住"。
+    const coasting = await page.evaluate(() => {
+      const api = window.__DRIFTLINE_TEST__!;
+      api.advance(180);
+      return api.snapshot();
+    });
+    expect(coasting['groundSpeed'] ?? 0).toBeLessThan(moving['groundSpeed'] ?? 0);
+    await expect(throttle).not.toHaveClass(/is-held/);
+
+    expect(problems).toEqual([]);
+  });
+});
+
 for (const s of [1, 42, 1337]) {
   test(`实时模式下 seed ${s} 正常渲染 HUD 与小地图`, async ({ page }) => {
     const problems = watchForProblems(page);

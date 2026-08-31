@@ -488,6 +488,40 @@ export const CRAFT = {
  * 在 `craftModel.ts` 的 `tuneMaterial()` 里。
  */
 /**
+ * 触屏操作的控件布局(M6)。坐标是**归一化视口**(0..1),半径以视口**较短边**
+ * 为基准 —— 横竖屏切换时控件大小才一致,不然竖屏上按钮会大得离谱。
+ *
+ * 判据逻辑在 `core/touchInput.ts`(不碰 DOM,可单测),画控件在
+ * `game/touchOverlay.ts`,两边读的是这同一张表。
+ */
+export const TOUCH = {
+  /** 摇杆提示圈的中心与半径。真正的可按区域比这个大,见 `stickZoneWidth`。 */
+  stickCentre: [0.17, 0.74] as readonly [number, number],
+  stickRadius: 0.115,
+  /**
+   * 摇杆的可按区域宽度(占屏宽的比例)。
+   *
+   * 比画出来的圈大得多是**故意的**:手机上看不见自己的拇指,要求精确命中一个
+   * 圈不现实。圈只是"拇指大概放这儿"的提示,按在左半屏任何地方都该能打方向。
+   */
+  stickZoneWidth: 0.5,
+  /**
+   * 死区。触屏没有物理回中,拇指静止时也会有几像素的抖动,不留死区的话直线
+   * 段会一直在微调方向。出死区之后重新归一化,免得跨过死区时方向跳一下。
+   */
+  deadZone: 0.12,
+  /*
+   * 按钮。油门最大且最靠外 —— 它是按住时间最长的那个,拇指要能松松地搭着。
+   * 倒车最小、位置最靠上:误触它的代价(行进中挂倒挡)比误触另外两个大。
+   */
+  buttons: [
+    { action: 'throttle', centre: [0.87, 0.76] as readonly [number, number], radius: 0.095 },
+    { action: 'airBrake', centre: [0.68, 0.84] as readonly [number, number], radius: 0.07 },
+    { action: 'reverse', centre: [0.83, 0.55] as readonly [number, number], radius: 0.05 },
+  ],
+} as const;
+
+/**
  * 动态画质调节(M6)。判据与状态机在 `core/perfGovernor.ts`,这里只放数值。
  *
  * **所有阈值都是「显示器周期的倍数」,不是绝对毫秒。** 唯一能测到的信号是

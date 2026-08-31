@@ -38,6 +38,39 @@ export interface InputSource {
   sample(out: InputFrame): void;
 }
 
+/**
+ * 把几个输入源合成一个。**「绝对值大的赢」,不是后者覆盖前者。**
+ *
+ * 键盘和触屏会同时存在(平板接键盘、桌面开着触屏调试),后者覆盖前者的话
+ * 没在用的那一路每帧都会把另一路清零 —— 表现是"两个都插着就都不好使",
+ * 而且只在同时接的机器上出现。
+ */
+export class MergedInput implements InputSource {
+  private readonly sources: readonly InputSource[];
+  /** 复用的临时帧。每帧路径上不许分配对象。 */
+  private readonly scratch: InputFrame = createInputFrame();
+
+  constructor(sources: readonly InputSource[]) {
+    this.sources = sources;
+  }
+
+  sample(out: InputFrame): void {
+    out.throttle = 0;
+    out.reverse = 0;
+    out.steer = 0;
+    out.airBrake = 0;
+    for (const source of this.sources) {
+      source.sample(this.scratch);
+      out.throttle = Math.max(out.throttle, this.scratch.throttle);
+      out.reverse = Math.max(out.reverse, this.scratch.reverse);
+      out.airBrake = Math.max(out.airBrake, this.scratch.airBrake);
+      if (Math.abs(this.scratch.steer) > Math.abs(out.steer)) {
+        out.steer = this.scratch.steer;
+      }
+    }
+  }
+}
+
 const KEY_BINDINGS: Readonly<Record<string, keyof InputFrame | 'steerLeft' | 'steerRight'>> = {
   KeyW: 'throttle',
   ArrowUp: 'throttle',
