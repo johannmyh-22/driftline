@@ -93,15 +93,24 @@ boot(mount).catch((error: unknown) => {
 
 async function boot(container: HTMLDivElement): Promise<void> {
   /*
-   * 物理引擎与车辆模型都要在造 World 之前就绪:`createCraft()` 是同步的,
-   * 而且 `?test=1` 要求场景一造好就能逐帧步进,不能让第一帧去等异步加载。
-   * 模型加载失败不致命 —— `createCraft()` 会回退到程序化造型。
+   * 物理引擎必须在造 World 之前就绪:`Vehicle` 构造时就要 Rapier 的世界。
+   * 这个等不掉,wasm 也没法回退。
    */
   await initPhysics();
-  try {
-    await initCraftModel();
-  } catch (error) {
-    console.warn('车辆模型加载失败,回退到程序化造型', error);
+
+  /*
+   * **车辆模型不挡首屏。** `car.glb` gzip 约 990 KB,等它等于让所有人多盯
+   * 一秒白屏,而 `craft.ts` 的程序化造型一直作为回退路径留着 —— 直接拿它
+   * 开局,模型到货之后 `World.upgradeCrafts()` 整批换掉(M6「首屏加载 < 3s」)。
+   *
+   * **`?test=1` 例外,仍然 await。** 截图回路要求「场景一造好就能逐帧步进」,
+   * 异步换车壳会让同一个 frame 数拍出两种车,回归截图直接失去意义。
+   */
+  const modelReady = initCraftModel().catch((error: unknown) => {
+    console.warn('车辆模型加载失败,继续用程序化造型', error);
+  });
+  if (testMode) {
+    await modelReady;
   }
 
   const renderer = new WebGLRenderer({
@@ -250,6 +259,18 @@ async function boot(container: HTMLDivElement): Promise<void> {
   if (forcedQuality !== null) {
     applyLevel(PERF.levels[forcedQuality] as PerfLevel);
   }
+
+  // 模型到货就换车壳。`upgradeCrafts()` 自己会判 `isCraftModelReady()`,
+  // 载入失败时是空操作,不需要在这里再判一次。
+  void modelReady.then(() => {
+    world.upgradeCrafts();
+    /*
+     * 和 `data-painted` 同一类:把一个内部状态挂到 DOM 上,好让无头测试能
+     * 断言它。没有这个标记就只能靠肉眼看车长什么样 —— 而「模型没换上来」
+     * 恰恰是那种截图里很难认出来的失败(程序化造型也是一辆蓝色的车)。
+     */
+    document.documentElement.dataset['craft'] = world.craftSource;
+  });
 
   document.documentElement.dataset['seed'] = String(seed);
 

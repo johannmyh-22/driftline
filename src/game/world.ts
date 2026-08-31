@@ -6,10 +6,11 @@ import {
 } from 'three';
 import { type InputFrame, InputRecorder, createInputFrame } from '../core/input';
 import { rollAt } from './wheelView';
-import type { Rng } from '../core/rng';
+import { Rng } from '../core/rng';
 import { type Craft, createCraft } from '../gfx/craft';
+import { isCraftModelReady } from '../gfx/craftModel';
 import { createGround } from '../gfx/ground';
-import { createPalette, rivalCraftColors } from '../gfx/palette';
+import { type Palette, createPalette, rivalCraftColors } from '../gfx/palette';
 import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
@@ -142,20 +143,33 @@ export class World {
    */
   readonly session: RaceSession | null;
 
-  private readonly craft: Craft;
+  /** **不是 readonly**:glTF 模型异步到货之后整辆换掉,见 `upgradeCrafts()`。 */
+  private craft: Craft;
+  /** 造车壳用的配色,换车壳时要按原样再造一遍。 */
+  private readonly palette: Palette;
+  private readonly rivalPalettes: Palette[] = [];
   private readonly rivalPilots: RacingPilot[] = [];
   /**
    * 对手车的出界回收。**没有它对手被撞出赛道就再也回不来了**——出界重置本来
    * 长在 `Race` 里,而 `Race` 只伺候玩家(见 `trackRecovery.ts` 的类注释)。
    */
   private readonly rivalRecoveries: TrackRecovery[] = [];
-  private readonly rivalCrafts: Craft[] = [];
+  private rivalCrafts: Craft[] = [];
   private readonly rivalInputs: InputFrame[] = [];
   private readonly rivalPrevPositions: Vector3[] = [];
   private readonly rivalPrevOrientations: Quaternion[] = [];
   private readonly prevPosition = new Vector3();
   private readonly prevOrientation = new Quaternion();
   private preset = 'chase';
+  /**
+   * 车壳是否已经是 glTF 模型的版本。
+   *
+   * 构造时就置位而不是恒 false:`?test=1` 下 `main.ts` 会**先 await 模型再造
+   * World**,那时候四辆车一造出来就是模型版的,再"升级"一次是白白重建一遍。
+   */
+  private craftsUpgraded = false;
+  /** 真的执行过一次换壳(而不是构造时就已经是模型版)。 */
+  private craftsSwapped = false;
   private readonly fixedCamera: PerspectiveCamera;
   private readonly input: InputFrame = createInputFrame();
   /**
@@ -170,6 +184,7 @@ export class World {
   constructor(rng: Rng, kind: CourseKind = 'race', options: { skipCountdown?: boolean } = {}) {
     this.skipCountdown = options.skipCountdown === true;
     const palette = createPalette(rng.fork());
+    this.palette = palette;
 
     this.atmosphere = new Atmosphere(rng.fork());
     this.scene.add(this.atmosphere.sky);
@@ -225,10 +240,14 @@ export class World {
     this.fixedCamera = this.chase.camera.clone();
     this.spawnAtStart();
 
+    // 构造时模型就绪的话,造出来的已经是模型版,没有"升级"可做(见字段注释)。
+    this.craftsUpgraded = isCraftModelReady();
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft.group);
     for (let i = 0; i < this.rivals.length; i++) {
-      const craft = createCraft(rng.fork(), rivalCraftColors(palette, i, this.rivals.length));
+      const colors = rivalCraftColors(palette, i, this.rivals.length);
+      this.rivalPalettes.push(colors);
+      const craft = createCraft(rng.fork(), colors);
       this.rivalCrafts.push(craft);
       this.scene.add(craft.group);
     }
@@ -459,6 +478,68 @@ export class World {
 
     this.ghost?.update(dt);
     this.chase.update(this.vehicle, dt);
+  }
+
+  /**
+   * 把所有车壳换成 glTF 模型的版本。**首屏不等模型**(见 `main.ts`):
+   * 开局先用程序化造型,`car.glb`(gzip 约 990 KB)到货之后再整批换掉。
+   *
+   * 这条路径本来就是免费的 —— `craft.ts` 的程序化实现一直作为回退保留着,
+   * 这里只是把「回退」变成「先上场」。
+   *
+   * **只往一个方向换**,调用前 `isCraftModelReady()` 必须为真;重复调用是
+   * 空操作。新车壳沿用构造时那份配色,所以外观和换之前是同一套色,不会在
+   * 玩家眼前变个颜色。
+   *
+   * 位置/朝向从旧车壳抄过来,下一帧 `present()` 会立刻覆盖掉 —— 抄一下是
+   * 为了「换的那一帧」不闪到原点。
+   */
+  /**
+   * 车壳是哪来的。给无头测试断言用(见 `main.ts` 和冒烟测试)。
+   *
+   * 三态而不是两态,因为 `model` 和 `model-preloaded` 走的是**不同的代码
+   * 路径**:前者是异步到货之后整批换掉(首屏那条),后者是造 World 之前
+   * 模型就已经在了(`?test=1` 走这条,本地预览服务器快到来不及也可能走)。
+   * 只报"是不是模型"的话,换车壳这段就永远测不到 —— 它会被"其实压根没换,
+   * 一开始就是模型"悄悄冒充过去。
+   */
+  get craftSource(): 'procedural' | 'model' | 'model-preloaded' {
+    if (!this.craftsUpgraded) {
+      return 'procedural';
+    }
+    return this.craftsSwapped ? 'model' : 'model-preloaded';
+  }
+
+  upgradeCrafts(): void {
+    if (!isCraftModelReady() || this.craftsUpgraded) {
+      return;
+    }
+    this.craftsUpgraded = true;
+    this.craftsSwapped = true;
+    // 造型不消耗随机数(模型路径根本不看 rng),所以这里给一个独立的 Rng,
+    // 不去动世界那条随机数流 —— 动了地形和配色都会跟着变。
+    const rng = new Rng(0);
+    const swap = (previous: Craft, palette: Palette): Craft => {
+      const next = createCraft(rng.fork(), palette);
+      next.group.position.copy(previous.group.position);
+      next.group.quaternion.copy(previous.group.quaternion);
+      this.scene.remove(previous.group);
+      this.scene.add(next.group);
+      previous.dispose();
+      return next;
+    };
+
+    this.craft = swap(this.craft, this.palette);
+    this.rivalCrafts = this.rivalCrafts.map((craft, i) =>
+      swap(craft, this.rivalPalettes[i] ?? this.palette),
+    );
+    if (this.ghost !== null) {
+      const next = createCraft(rng.fork(), this.palette);
+      this.scene.add(next.group);
+      const previous = this.ghost.upgradeCraft(next);
+      this.scene.remove(previous.group);
+      previous.dispose();
+    }
   }
 
   present(alpha: number): void {

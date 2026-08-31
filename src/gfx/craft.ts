@@ -51,6 +51,16 @@ export interface Craft {
    * @param rollAngle 累计滚转角(弧度)
    */
   setWheel(index: number, suspensionLength: number, steerAngle: number, rollAngle: number): void;
+  /**
+   * 释放这辆车独占的 GPU 资源。**换车壳时调**(程序化开局 → glTF 模型到货,
+   * 见 `World.upgradeCrafts()`)。
+   *
+   * 两条路径该释放的东西不一样,所以由各自实现而不是统一 traverse:程序化
+   * 造型的几何是每辆车现造的,可以放心 dispose;模型路径的几何是**四辆车
+   * 共用同一份模板**,dispose 掉会把还在场上的其他车一起弄坏,那里只能释放
+   * 逐车克隆出来的材质。
+   */
+  dispose(): void;
 }
 
 /**
@@ -163,6 +173,19 @@ export function createProceduralCraft(rng: Rng, palette: Palette): Craft {
       node.steer.position.y = CAR.wheelRadius - suspensionLength;
       node.steer.rotation.y = steerAngle;
       node.roll.rotation.x = rollAngle;
+    },
+    dispose(): void {
+      // 程序化造型的每一份几何/材质都是这辆车现造的(全部在 createWheels /
+      // flatPart / geometryFrom 里 new 出来),没有跨车共享,可以整棵树扫掉。
+      group.traverse((child) => {
+        if (!(child instanceof Mesh)) {
+          return;
+        }
+        child.geometry.dispose();
+        for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
+          material.dispose();
+        }
+      });
     },
   };
 }

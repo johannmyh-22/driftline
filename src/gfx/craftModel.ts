@@ -356,6 +356,17 @@ export function createModelCraft(palette: Palette): Craft {
       steer.rotation.y = steerAngle;
       roll.rotation.x = rollAngle;
     },
+    dispose(): void {
+      /*
+       * **只释放材质,不碰几何。** 几何是 `template` 里那份烘焙好的模板,
+       * 四辆车加幽灵共用同一批 `BufferGeometry`(`attach()` 传的就是
+       * `source.geometry` 本身);在这里 dispose 掉,场上其他车会一起变成
+       * 空网格。材质则是逐车 `clone()` 出来的(对手要各自换色),独占。
+       */
+      for (const material of cloned.values()) {
+        material.dispose();
+      }
+    },
   };
 }
 

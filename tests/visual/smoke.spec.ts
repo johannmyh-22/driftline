@@ -456,6 +456,48 @@ test('不带 test=1 时自行跑主循环,且不暴露测试接口', async ({ pa
   expect(problems).toEqual([]);
 });
 
+test('首屏不等车辆模型:先画出程序化造型,模型到货后自己换上来', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  /*
+   * M6「首屏加载 < 3s」那一格:`car.glb` gzip 约 990 KB,等它等于让所有人多
+   * 盯一秒白屏。现在开局直接用 `craft.ts` 的程序化造型(它本来就是回退路径),
+   * 模型到货之后 `World.upgradeCrafts()` 整批换掉。
+   *
+   * **这条断的是「首帧早于模型」这个先后关系**,不是"能不能画出来"——
+   * 换车壳失败的样子是「一直是程序化的那辆车」,而两辆都是蓝色的车,
+   * 截图根本认不出差别。所以靠 `data-craft` 这个标记,不靠看图。
+   */
+  /*
+   * 把 `car.glb` 的响应压慢三秒。**不压的话这条测不出东西**:本地预览服务器
+   * 上 1.7 MB 是瞬间的事,而 SwiftShader 画第一帧要一秒多,模型反而先到 ——
+   * 于是"首屏没等模型"和"首屏等了模型"看起来一模一样。真实用户的网络才是
+   * 慢的那一头,这里用延迟把那个次序还原出来。
+   */
+  await page.route('**/*.glb', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await route.continue();
+  });
+
+  await page.goto(BASE_URL, { waitUntil: 'commit' });
+  await page.waitForFunction(() => document.documentElement.dataset['painted'] === '1', null, {
+    timeout: 60_000,
+  });
+  // 首帧画完的那一刻模型还在路上,车壳只能是程序化的那套。
+  expect(await page.getAttribute('html', 'data-craft')).toBeNull();
+
+  await page.waitForFunction(() => document.documentElement.dataset['craft'] !== undefined, null, {
+    timeout: 60_000,
+  });
+  // 'model' 而不是 'model-preloaded':确实**换**过,不是一开始就是模型版。
+  expect(await page.getAttribute('html', 'data-craft')).toBe('model');
+
+  // 换完之后画面仍然是活的 —— 换车壳会动 scene graph,弄坏了就是黑屏或缺车。
+  const stats = await shoot(page, 'smoke-craft-upgrade.png');
+  expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+  expect(problems).toEqual([]);
+});
+
 for (const s of [1, 42, 1337]) {
   test(`实时模式下 seed ${s} 正常渲染 HUD 与小地图`, async ({ page }) => {
     const problems = watchForProblems(page);

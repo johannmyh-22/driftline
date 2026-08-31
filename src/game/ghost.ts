@@ -33,7 +33,8 @@ import { Vehicle } from './vehicle';
  * 的原因之一(见 physics.ts 类注释)。
  */
 export class Ghost {
-  readonly craft: Craft;
+  /** **不是 readonly**:模型到货之后整辆换掉,见 `upgradeCraft()`。 */
+  craft: Craft;
 
   private readonly physics: Physics;
   private readonly vehicle: Vehicle;
@@ -53,24 +54,23 @@ export class Ghost {
     this.race = new Race(layout);
 
     this.craft = createCraft(rng.fork(), palette);
-    this.craft.group.visible = false;
-    // 幽灵是「半透明的自己」,不是新造型:复用玩家那套车壳/轮子材质,
-    // 只调不透明度、关掉阴影(半透明物体投实心阴影看着像穿模)。
-    this.craft.group.traverse((child) => {
-      if (child instanceof Mesh) {
-        child.castShadow = false;
-        child.receiveShadow = false;
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        for (const material of materials) {
-          material.transparent = true;
-          material.opacity = GHOST.opacity;
-          material.depthWrite = false;
-        }
-      }
-    });
+    applyGhostLook(this.craft, this.active);
 
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
+  }
+
+  /**
+   * 换一辆新造好的车壳(glTF 模型异步到货之后)。**返回旧的那辆**,由调用方
+   * 负责从场景里摘掉并 `dispose()` —— `Ghost` 不持有 `Scene`,不该替它做主。
+   */
+  upgradeCraft(craft: Craft): Craft {
+    const previous = this.craft;
+    craft.group.position.copy(previous.group.position);
+    craft.group.quaternion.copy(previous.group.quaternion);
+    this.craft = craft;
+    applyGhostLook(craft, this.active);
+    return previous;
   }
 
   /** 是否已经有可回放的录制。没有录制时 `update`/`present` 都是空操作。 */
@@ -142,6 +142,30 @@ export class Ghost {
       this.craft.setWheel(i, wheel.length, wheel.steered ? this.vehicle.steerAngle : 0, rollAt(wheel, alpha));
     }
   }
+}
+
+/**
+ * 幽灵是「半透明的自己」,不是新造型:复用玩家那套车壳/轮子材质,只调不
+ * 透明度、关掉阴影(半透明物体投实心阴影看着像穿模)。
+ *
+ * **材质必须是这辆车独占的**,否则会把玩家和对手的车一起改成半透明。程序化
+ * 路径每辆车现造材质;模型路径在 `createModelCraft()` 里逐车 `clone()`,
+ * 理由那里写的是"对手要各自换色",这里是第二个理由。
+ */
+function applyGhostLook(craft: Craft, visible: boolean): void {
+  craft.group.visible = visible;
+  craft.group.traverse((child) => {
+    if (child instanceof Mesh) {
+      child.castShadow = false;
+      child.receiveShadow = false;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        material.transparent = true;
+        material.opacity = GHOST.opacity;
+        material.depthWrite = false;
+      }
+    }
+  });
 }
 
 const shownPosition = new Vector3();
