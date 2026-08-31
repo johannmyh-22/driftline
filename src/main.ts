@@ -295,6 +295,13 @@ async function boot(container: HTMLDivElement): Promise<void> {
     document.documentElement.dataset['craft'] = world.craftSource;
   });
 
+  /*
+   * 「能开始画了」这个时刻。**和 `data-painted` 分开量**:后者还包含第一帧的
+   * 渲染,而在 SwiftShader 上编译着色器就要一秒多,把两件事混在一个数里,
+   * 首屏优化到底有没有效果就看不出来了。这一个只包含下载 + 解析 + wasm 起
+   * 来 + 建世界,也就是**首屏优化真正能动的那一段**(见 `scripts/loadtime.ts`)。
+   */
+  document.documentElement.dataset['booted'] = String(Math.round(performance.now()));
   document.documentElement.dataset['seed'] = String(seed);
 
   /*
