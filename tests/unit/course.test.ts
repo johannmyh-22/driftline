@@ -184,13 +184,41 @@ describe('Course 确定性与性能', () => {
     const hit = createGroundHit();
     const rng = new Rng(5);
 
-    const started = Date.now();
-    for (let i = 0; i < 200_000; i++) {
-      course.sample(rng.range(-700, 700), rng.range(-700, 700), hit);
+    /*
+     * **判据是「相对一段基准算术的倍数」,不是绝对毫秒。**
+     *
+     * 挂钟断言在共享的 CI 机器上会被别的进程干扰:实测人为压 8 个满载进程
+     * 之后,同一段代码的耗时涨到 2.3 倍 —— 一测就红,而代码根本没变。
+     * **放宽预算是错的解法**,那等于把这条断言真正想守的东西一起放掉。
+     *
+     * 办法是在同一次运行里量一段固定的基准算术,拿比值当判据:CPU 被抢走时
+     * 两边一起变慢,比值基本不动。实测同一台机器上——
+     *
+     * | | 查询 | 基准 | 比值 |
+     * |---|---|---|---|
+     * | 空载 | 322 ms | 19 ms | 16.9 |
+     * | 8 进程满载 | 739 ms | 36 ms | 20.5 |
+     *
+     * 挂钟摆了 2.3 倍,比值只摆了 1.2 倍。真的写慢了的话查询那一侧单独涨,
+     * 比值照样会红。
+     *
+     * 两边都取多轮里**最快**的一轮:干扰只会让测量变慢不会变快,最快的那轮
+     * 最接近没被打扰时的真实成本。
+     */
+    let queryMs = Number.POSITIVE_INFINITY;
+    let referenceMs = Number.POSITIVE_INFINITY;
+    for (let round = 0; round < 3; round++) {
+      const started = Date.now();
+      for (let i = 0; i < 200_000; i++) {
+        course.sample(rng.range(-700, 700), rng.range(-700, 700), hit);
+      }
+      queryMs = Math.min(queryMs, Date.now() - started);
+      referenceMs = Math.min(referenceMs, referenceWorkMs());
     }
-    const perQuery = (Date.now() - started) / 200_000;
-    // 一帧几十次查询,单次必须远低于微秒级预算。
-    expect(perQuery).toBeLessThan(0.005);
+
+    // 一帧几十次查询,单次必须远低于微秒级预算。这个机器上 200k 次查询约
+    // 300 ms(1.6 µs/次),基准约 19 ms —— 阈值取到实测的近两倍,留足余量。
+    expect(queryMs / Math.max(1, referenceMs)).toBeLessThan(32);
   });
 
   it('任意位置都不产生 NaN', () => {
@@ -283,3 +311,21 @@ describe('Course 弧长边界与起跑线环回保护', () => {
     expect(hit.arc).toBeCloseTo(0.05, 2);
   });
 });
+
+/**
+ * 一段固定的基准算术,用来把机器快慢和 CPU 争抢从上面那条性能断言里除掉。
+ *
+ * 故意用纯浮点运算而不是空循环:空循环会被 JIT 整个消掉。返回耗时(毫秒)。
+ */
+function referenceWorkMs(): number {
+  const started = Date.now();
+  let acc = 0;
+  for (let i = 0; i < 2_000_000; i++) {
+    acc += Math.sqrt(i * 1.000001) + Math.sin(i * 0.0001);
+  }
+  // 结果要被"用掉",否则整段循环会被优化掉,基准就永远是 0。
+  if (acc === 12345.6789) {
+    throw new Error('基准循环被优化掉了');
+  }
+  return Date.now() - started;
+}

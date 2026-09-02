@@ -87,7 +87,14 @@ function runLap(seed: number, pilot: 'auto' | 'race', aggression?: number): LapR
  * 而且结果和浏览器逐位一致(见 CLAUDE.md 的无头验证契约)。
  */
 describe('RacingPilot vs Autopilot', () => {
-  it('每条精选赛道都跑得完,而且明显快过当验收工具用的 Autopilot', () => {
+  /*
+   * 这一组每条用例都要把好几条精选赛道各跑满一圈(两个 pilot × 每条赛道
+   * 上万个物理步),空载约两三秒,**但机器一忙就会超过 vitest 默认的 5 秒**。
+   * 实测人为压满 CPU 之后必红,而它测的根本不是速度。给足超时,不是放宽断言。
+   */
+  const SLOW = 120_000;
+
+  it('每条精选赛道都跑得完,而且明显快过当验收工具用的 Autopilot', { timeout: SLOW }, () => {
     for (const track of CURATED_TRACKS) {
       const auto = runLap(track.seed, 'auto');
       const race = runLap(track.seed, 'race');
@@ -102,7 +109,7 @@ describe('RacingPilot vs Autopilot', () => {
     }
   });
 
-  it('单圈明显快过目标时间——人类反馈"对手还是太弱",难度已经拉到收益拐点', () => {
+  it('单圈明显快过目标时间——人类反馈"对手还是太弱",难度已经拉到收益拐点', { timeout: SLOW }, () => {
     for (const track of CURATED_TRACKS) {
       const race = runLap(track.seed, 'race');
       expect(race).not.toBeNull();
