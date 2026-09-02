@@ -703,6 +703,18 @@ export const POST = {
   motionFocusRadius: 0.12,
   /** 每像素采样数。8 是"看不出断层"和"全屏 fill 成本"之间的平衡点。 */
   motionSamples: 8,
+  /**
+   * 开了 `prefers-reduced-motion` 时的强度倍率。**0 = 直接关掉。**
+   *
+   * 这一条和相机那边刻意**不一样**:`CAMERA.reducedMotionFovScale` 只把 FOV
+   * 拉伸收窄到 0.3 而不清零,理由是"仍要看得出快了"。动态模糊不能照搬 ——
+   * FOV 变化是**取景**上的线索,而全屏径向涂抹恰恰是前庭不适最直接的诱因,
+   * 减到 0.3 仍然是整幅画面在动。开了这个偏好的人已经有 FOV 和风噪两条速度
+   * 线索,这一条整个拿掉才是对的。
+   *
+   * 留成旋钮而不是写死,是因为"要不要留一点"归人类判断(CLAUDE.md 的验收点)。
+   */
+  motionReducedScale: 0,
 } as const;
 
 /**

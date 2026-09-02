@@ -10,6 +10,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { VignetteShader } from 'three/examples/jsm/shaders/VignetteShader.js';
 import { POST } from '../game/tuning';
 import { MotionBlurShader, motionBlurStrength } from './motionBlur';
+import { prefersReducedMotion } from '../core/reducedMotion';
 
 /** 可单独开关的环节。`?post=` 按名字启用,量各级成本、诊断画面问题都靠它。 */
 export type PostStage = 'ao' | 'motion' | 'bloom' | 'smaa' | 'vignette';
@@ -64,6 +65,7 @@ export class Postprocess {
   private readonly bloomScale: number;
   private readonly renderer: WebGLRenderer;
   private effectsOn = true;
+  private readonly reducedMotion = prefersReducedMotion();
   private width = 1;
   private height = 1;
 
@@ -181,7 +183,7 @@ export class Postprocess {
     if (pass === null || !this.effectsOn) {
       return;
     }
-    const strength = motionBlurStrength(speed01);
+    const strength = motionBlurStrength(speed01, this.reducedMotion);
     pass.enabled = strength > 0;
     if (!pass.enabled) {
       return;

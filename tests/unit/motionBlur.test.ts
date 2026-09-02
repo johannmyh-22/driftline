@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MotionBlurShader, motionBlurStrength } from '../../src/gfx/motionBlur';
-import { POST, REFERENCE_TOP_SPEED } from '../../src/game/tuning';
+import { CAMERA, POST, REFERENCE_TOP_SPEED } from '../../src/game/tuning';
 
 /*
  * ══════════════════════════════════════════════════════════════════════════
@@ -50,6 +50,31 @@ describe('motionBlurStrength', () => {
     const startKmh = POST.motionMinSpeed01 * REFERENCE_TOP_SPEED * 3.6;
     expect(startKmh).toBeGreaterThan(40);
     expect(startKmh).toBeLessThan(120);
+  });
+});
+
+describe('motionBlurStrength 与 prefers-reduced-motion', () => {
+  /*
+   * 这一条是**新加动态模糊时顺带补的洞**:项目本来就尊重
+   * `prefers-reduced-motion`(相机的滚转清零、FOV 收窄),而全屏径向涂抹
+   * 恰恰是前庭不适最直接的诱因 —— 加了这个效果却不接那条偏好,等于把已经
+   * 做好的无障碍处理又戳一个洞。
+   */
+  it('开了偏好之后按 motionReducedScale 收 —— 默认是整个关掉', () => {
+    expect(motionBlurStrength(1, true)).toBe(POST.motionReducedScale);
+    expect(POST.motionReducedScale).toBe(0);
+  });
+
+  it('比相机那条更狠是刻意的,不是抄漏了', () => {
+    // FOV 是取景线索,收窄到 0.3 仍然看得出快;模糊减到 0.3 仍然是整幅画面
+    // 在动。所以这两个数不该一样,而且模糊这条必须更小。
+    expect(POST.motionReducedScale).toBeLessThan(CAMERA.reducedMotionFovScale);
+  });
+
+  it('没开偏好的人一个像素都不受影响', () => {
+    for (const speed of [0, 0.4, 0.7, 1]) {
+      expect(motionBlurStrength(speed, false)).toBe(motionBlurStrength(speed));
+    }
   });
 });
 

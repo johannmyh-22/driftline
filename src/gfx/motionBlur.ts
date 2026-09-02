@@ -20,6 +20,13 @@ import { POST } from '../game/tuning';
  * 「过来」的,尾巴应该拖在后面,前缘保持清晰。对称模糊会让物体的前缘也糊掉,
  * 看着像失焦而不是像快。
  *
+ * ## 尊重 `prefers-reduced-motion`
+ *
+ * 全屏径向涂抹是前庭不适最直接的诱因,开了那个偏好就整个关掉
+ * (`POST.motionReducedScale`)。**这一条比相机那边更狠是故意的**:
+ * `CAMERA.reducedMotionFovScale` 只把 FOV 收窄不清零,因为 FOV 是取景线索;
+ * 而模糊减到三成仍然是整幅画面在动。理由写在那个常量的注释里。
+ *
  * ## 为什么中心留一块不糊
  *
  * 光流大小 ∝ 离焦点的距离,焦点处本来就是 0。而追尾机位下车正好在焦点附近 ——
@@ -90,10 +97,11 @@ export const MotionBlurShader = {
  * 表现是"停着不动画面也是糊的"或者"跑到极速才刚开始糊",两种都只有人盯着
  * 玩才发现得了。
  */
-export function motionBlurStrength(speed01: number): number {
+export function motionBlurStrength(speed01: number, reducedMotion = false): number {
   const span = POST.motionFullSpeed01 - POST.motionMinSpeed01;
   if (span <= 0) {
     return 0;
   }
-  return Math.min(1, Math.max(0, (speed01 - POST.motionMinSpeed01) / span));
+  const raw = Math.min(1, Math.max(0, (speed01 - POST.motionMinSpeed01) / span));
+  return reducedMotion ? raw * POST.motionReducedScale : raw;
 }

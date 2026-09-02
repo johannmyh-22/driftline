@@ -1,5 +1,6 @@
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import { clamp, damp, lerp, normalize01 } from '../core/mathx';
+import { prefersReducedMotion } from '../core/reducedMotion';
 import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
 import { CAMERA, REFERENCE_TOP_SPEED } from './tuning';
 import type { Vehicle } from './vehicle';
@@ -18,22 +19,6 @@ const rollQuat = new Quaternion();
 const orbitOffset = new Vector3();
 const orbitRight = new Vector3();
 const carFocus = new Vector3();
-
-/**
- * 读操作系统的「减少动态效果」偏好。**不能直接写 `window.matchMedia`**——
- * 单测跑在 Node 环境下没有 `window`,直接引用会抛 `ReferenceError`;仿照
- * `records.ts`/`audio/context.ts` 的 `getStorage()` 写法防御式处理。
- */
-function prefersReducedMotion(): boolean {
-  try {
-    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-      return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
 
 /**
  * 跟随相机。
