@@ -8,6 +8,7 @@ import {
   createInputFrame,
 } from './core/input';
 import { Loop } from './core/loop';
+import { fatalMessage } from './core/fatalMessage';
 import { clamp, normalize01 } from './core/mathx';
 import { Rng, parseSeed } from './core/rng';
 import { getCuratedTrack } from './game/curatedTracks';
@@ -533,10 +534,17 @@ function parseKnob(raw: string | null, fallback: number): number {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+/**
+ * 启动失败时把原因糊到屏幕上,比留一块黑屏好排查。
+ *
+ * **WebGL 那一类单独给一句人话。** 跑 Lighthouse 时发现的:它那台 Chrome 拿
+ * 不到 GPU,three 抛的是「Error creating WebGL context.」——对开发者够用,对
+ * 用户等于没说。而这一类失败恰恰最可能落在真实用户头上(老显卡、驱动、
+ * 浏览器里关掉了硬件加速、虚拟机),不是开发环境里的怪事。
+ */
 function showFatal(error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
   const node = document.createElement('div');
   node.id = 'fatal';
-  node.textContent = `driftline 启动失败\n\n${message}`;
+  node.textContent = fatalMessage(error);
   document.body.append(node);
 }
