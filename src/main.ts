@@ -1,4 +1,4 @@
-import { ACESFilmicToneMapping, PCFSoftShadowMap, WebGLRenderer } from 'three';
+import { ACESFilmicToneMapping, PCFSoftShadowMap, Vector3, WebGLRenderer } from 'three';
 import { decodeGhostInput, loadRecord, setStorageEnabled } from './game/records';
 import {
   type InputFrame,
@@ -8,9 +8,10 @@ import {
   createInputFrame,
 } from './core/input';
 import { Loop } from './core/loop';
+import { clamp, normalize01 } from './core/mathx';
 import { Rng, parseSeed } from './core/rng';
 import { getCuratedTrack } from './game/curatedTracks';
-import { AUDIO, PERF, POST, SKY } from './game/tuning';
+import { AUDIO, PERF, POST, REFERENCE_TOP_SPEED, SKY } from './game/tuning';
 import { installTestApi } from './core/testApi';
 import {
   readTelemetry as readVehicleTelemetry,
@@ -244,6 +245,32 @@ async function boot(container: HTMLDivElement): Promise<void> {
       world.standings?.rows.length,
       world.session,
     );
+      /*
+       * 动态模糊的扩张焦点 = **速度方向在画面上的投影**,每帧现算。
+       *
+       * 钉死在屏幕中心是常见的偷懒做法,但过弯时明显不对:那时候光流是绕着
+       * 弯心走的,焦点会挪到弯内一侧。这里取「相机位置沿速度方向前面一点」
+       * 那个点投影下来,直线段它自然落在画面中心附近。
+       *
+       * 车几乎不动时速度方向是没有意义的(归一化会出 NaN),那时候强度本来
+       * 就是 0,焦点给回中心即可。
+       */
+      const velocity = world.vehicle.velocity;
+      const speed = Math.hypot(velocity.x, velocity.y, velocity.z);
+      let focusX = 0.5;
+      let focusY = 0.5;
+      if (speed > 0.5) {
+        focusPoint
+          .copy(velocity)
+          .multiplyScalar(1 / speed)
+          .add(world.camera.position)
+          .project(world.camera);
+        // 速度方向在相机背后时投影会翻到画面外,夹一下免得焦点跑到很远的地方
+        // 把整幅画都算成"离焦点很远"。
+        focusX = clamp(focusPoint.x * 0.5 + 0.5, -0.5, 1.5);
+        focusY = clamp(focusPoint.y * 0.5 + 0.5, -0.5, 1.5);
+      }
+      post.setMotionBlur(normalize01(speed, 0, REFERENCE_TOP_SPEED), focusX, focusY);
       post.render(world.camera);
       touch?.present();
       if (!painted) {
@@ -282,6 +309,9 @@ async function boot(container: HTMLDivElement): Promise<void> {
   if (forcedQuality !== null) {
     applyLevel(PERF.levels[forcedQuality] as PerfLevel);
   }
+
+  // 每帧复用,不在渲染路径上分配对象。
+  const focusPoint = new Vector3();
 
   // 模型到货就换车壳。`upgradeCrafts()` 自己会判 `isCraftModelReady()`,
   // 载入失败时是空操作,不需要在这里再判一次。

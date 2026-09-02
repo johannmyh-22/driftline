@@ -9,11 +9,12 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { VignetteShader } from 'three/examples/jsm/shaders/VignetteShader.js';
 import { POST } from '../game/tuning';
+import { MotionBlurShader, motionBlurStrength } from './motionBlur';
 
 /** 可单独开关的环节。`?post=` 按名字启用,量各级成本、诊断画面问题都靠它。 */
-export type PostStage = 'ao' | 'bloom' | 'smaa' | 'vignette';
+export type PostStage = 'ao' | 'motion' | 'bloom' | 'smaa' | 'vignette';
 
-export const ALL_STAGES: readonly PostStage[] = ['ao', 'bloom', 'smaa', 'vignette'];
+export const ALL_STAGES: readonly PostStage[] = ['ao', 'motion', 'bloom', 'smaa', 'vignette'];
 
 /**
  * 默认启用的环节。**AO 故意不在里面。**
@@ -33,7 +34,7 @@ export const ALL_STAGES: readonly PostStage[] = ['ao', 'bloom', 'smaa', 'vignett
  *
  * 代码留着不删:M5 的隧道段一进来,遮蔽关系就有了,那时把 'ao' 加回默认即可。
  */
-export const DEFAULT_STAGES: readonly PostStage[] = ['bloom', 'smaa', 'vignette'];
+export const DEFAULT_STAGES: readonly PostStage[] = ['motion', 'bloom', 'smaa', 'vignette'];
 
 /**
  * 后处理链。
@@ -56,11 +57,13 @@ export class Postprocess {
   private readonly renderPass: RenderPass;
   private readonly gtao: GTAOPass | null = null;
   private readonly bloom: UnrealBloomPass | null = null;
+  private readonly motion: ShaderPass | null = null;
   /** 除 RenderPass / OutputPass 之外的所有 pass,给 `setEffectsEnabled()` 整批开关。 */
   private readonly effects: Pass[] = [];
   private readonly aoScale: number;
   private readonly bloomScale: number;
   private readonly renderer: WebGLRenderer;
+  private effectsOn = true;
   private width = 1;
   private height = 1;
 
@@ -92,6 +95,26 @@ export class Postprocess {
       this.composer.addPass(gtao);
       this.effects.push(gtao);
       this.gtao = gtao;
+    }
+
+    /*
+     * 动态模糊排在 AO 之后、bloom 之前。
+     *
+     * AO 是**着色**阶段的效果,先算完再谈曝光;动态模糊和 bloom 都是相机在
+     * 「拍下这一帧」时发生的事,而真实相机里是先有曝光时间内的位移(模糊),
+     * 光才在镜头/传感器里散开(bloom)—— 所以模糊在前。反过来的话,尾灯的
+     * 辉光会被拉成一条明显是后期加的光带。
+     *
+     * 两者都必须在 `OutputPass` 之前,也就是在**线性 HDR** 空间里做,理由和
+     * bloom 那条一样(见类注释)。
+     */
+    if (enabled.has('motion')) {
+      const motion = new ShaderPass(MotionBlurShader);
+      // 默认不出力:`setMotionBlur()` 每帧按车速给值,慢速时整级会被关掉。
+      motion.enabled = false;
+      this.composer.addPass(motion);
+      this.effects.push(motion);
+      this.motion = motion;
     }
 
     if (enabled.has('bloom')) {
@@ -144,6 +167,31 @@ export class Postprocess {
   }
 
   /**
+   * 每帧喂一次动态模糊的强度与扩张焦点。
+   *
+   * `speed01` 是归一化车速;`focusX/focusY` 是**速度方向在画面上的投影**
+   * (uv,0..1),由 `main.ts` 用相机把它投出来 —— 钉死在屏幕中心的话过弯时
+   * 模糊方向会明显不对(推导见 `gfx/motionBlur.ts`)。
+   *
+   * **强度为 0 时整级 pass 直接关掉**,而不是喂一个 0 进去:后者照样要跑一遍
+   * 全屏采样,而慢速行驶和停车恰恰是最不该花这笔钱的时候。
+   */
+  setMotionBlur(speed01: number, focusX: number, focusY: number): void {
+    const pass = this.motion;
+    if (pass === null || !this.effectsOn) {
+      return;
+    }
+    const strength = motionBlurStrength(speed01);
+    pass.enabled = strength > 0;
+    if (!pass.enabled) {
+      return;
+    }
+    setNumberUniform(pass, 'strength', strength);
+    const focus = pass.uniforms['focus']?.value as Vector2 | undefined;
+    focus?.set(focusX, focusY);
+  }
+
+  /**
    * 整批开关后处理效果。**给动态画质调节用(`core/perfGovernor.ts`)**,
    * 是最后一档才动的杠杆 —— 前面几档先降分辨率,理由见 `PERF.levels`。
    *
@@ -151,6 +199,7 @@ export class Postprocess {
    * sRGB,关掉画面会直接变成一片过曝的线性值,那不是"省一点",是坏掉。
    */
   setEffectsEnabled(on: boolean): void {
+    this.effectsOn = on;
     for (const pass of this.effects) {
       pass.enabled = on;
     }
