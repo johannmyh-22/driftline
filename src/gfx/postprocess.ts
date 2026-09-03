@@ -1,4 +1,10 @@
-import { type PerspectiveCamera, type Scene, Vector2, type WebGLRenderer } from 'three';
+import {
+  type Object3D,
+  type PerspectiveCamera,
+  type Scene,
+  Vector2,
+  type WebGLRenderer,
+} from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import type { Pass } from 'three/examples/jsm/postprocessing/Pass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
@@ -10,12 +16,24 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { VignetteShader } from 'three/examples/jsm/shaders/VignetteShader.js';
 import { POST } from '../game/tuning';
 import { MotionBlurShader, motionBlurStrength } from './motionBlur';
+import {
+  ObjectMotionBlurShader,
+  VelocityBuffer,
+  objectMotionStrength,
+} from './objectMotionBlur';
 import { prefersReducedMotion } from '../core/reducedMotion';
 
 /** 可单独开关的环节。`?post=` 按名字启用,量各级成本、诊断画面问题都靠它。 */
-export type PostStage = 'ao' | 'motion' | 'bloom' | 'smaa' | 'vignette';
+export type PostStage = 'ao' | 'motion' | 'objmotion' | 'bloom' | 'smaa' | 'vignette';
 
-export const ALL_STAGES: readonly PostStage[] = ['ao', 'motion', 'bloom', 'smaa', 'vignette'];
+export const ALL_STAGES: readonly PostStage[] = [
+  'ao',
+  'motion',
+  'objmotion',
+  'bloom',
+  'smaa',
+  'vignette',
+];
 
 /**
  * 默认启用的环节。**AO 故意不在里面。**
@@ -35,7 +53,13 @@ export const ALL_STAGES: readonly PostStage[] = ['ao', 'motion', 'bloom', 'smaa'
  *
  * 代码留着不删:M5 的隧道段一进来,遮蔽关系就有了,那时把 'ao' 加回默认即可。
  */
-export const DEFAULT_STAGES: readonly PostStage[] = ['motion', 'bloom', 'smaa', 'vignette'];
+export const DEFAULT_STAGES: readonly PostStage[] = [
+  'motion',
+  'objmotion',
+  'bloom',
+  'smaa',
+  'vignette',
+];
 
 /**
  * 后处理链。
@@ -59,11 +83,14 @@ export class Postprocess {
   private readonly gtao: GTAOPass | null = null;
   private readonly bloom: UnrealBloomPass | null = null;
   private readonly motion: ShaderPass | null = null;
+  private readonly objectMotion: ShaderPass | null = null;
+  private readonly velocity: VelocityBuffer | null = null;
   /** 除 RenderPass / OutputPass 之外的所有 pass,给 `setEffectsEnabled()` 整批开关。 */
   private readonly effects: Pass[] = [];
   private readonly aoScale: number;
   private readonly bloomScale: number;
   private readonly renderer: WebGLRenderer;
+  private readonly scene: Scene;
   private effectsOn = true;
   private readonly reducedMotion = prefersReducedMotion();
   private width = 1;
@@ -77,6 +104,7 @@ export class Postprocess {
   ) {
     const enabled = new Set(stages);
     this.renderer = renderer;
+    this.scene = scene;
     this.aoScale = POST.aoResolutionScale;
     this.bloomScale = POST.bloomResolutionScale;
     this.composer = new EffectComposer(renderer);
@@ -117,6 +145,27 @@ export class Postprocess {
       this.composer.addPass(motion);
       this.effects.push(motion);
       this.motion = motion;
+    }
+
+    /*
+     * 逐物体模糊紧跟在径向之后:两者都是"相机在曝光期间发生的事",而它们的
+     * 分工是相机运动 vs 物体相对运动(见 `objectMotionBlur.ts`)。谁先谁后
+     * 差别很小,排在一起是为了让"曝光"这一段在链上是连续的,后面才是
+     * bloom(镜头/传感器的散射)。
+     */
+    if (enabled.has('objmotion')) {
+      const velocity = new VelocityBuffer();
+      const pass = new ShaderPass(ObjectMotionBlurShader);
+      const slot = pass.uniforms['tVelocity'];
+      if (slot === undefined) {
+        throw new Error('ObjectMotionBlurShader 没有 tVelocity uniform');
+      }
+      slot.value = velocity.target.texture;
+      pass.enabled = false;
+      this.composer.addPass(pass);
+      this.effects.push(pass);
+      this.objectMotion = pass;
+      this.velocity = velocity;
     }
 
     if (enabled.has('bloom')) {
@@ -194,6 +243,32 @@ export class Postprocess {
   }
 
   /**
+   * 把一棵子树标成「会动的」,它才会进速度缓冲。**换车壳之后要再调一次**
+   * (`World.upgradeCrafts()` 会把整批网格换掉)。重复调是空操作。
+   */
+  markMoving(roots: readonly Object3D[]): void {
+    for (const root of roots) {
+      this.velocity?.mark(root);
+    }
+  }
+
+  /**
+   * 每帧喂一次逐物体模糊的强度。和径向那一级一样,强度为 0 时整级关掉 ——
+   * 这一级更值得关,因为它还连着一次额外的场景渲染。
+   */
+  setObjectMotionBlur(speed01: number): void {
+    const pass = this.objectMotion;
+    if (pass === null || !this.effectsOn) {
+      return;
+    }
+    const strength = objectMotionStrength(speed01);
+    pass.enabled = strength > 0;
+    if (pass.enabled) {
+      setNumberUniform(pass, 'strength', strength * POST.objectMotionShutter);
+    }
+  }
+
+  /**
    * 整批开关后处理效果。**给动态画质调节用(`core/perfGovernor.ts`)**,
    * 是最后一档才动的杠杆 —— 前面几档先降分辨率,理由见 `PERF.levels`。
    *
@@ -211,6 +286,11 @@ export class Postprocess {
     this.renderPass.camera = camera;
     if (this.gtao !== null) {
       this.gtao.camera = camera;
+    }
+    // 速度缓冲要在主渲染之前画:模糊那一级读的是这一帧的速度。
+    // pass 关着的时候连这一遍都不画 —— 它是这一级真正的成本所在。
+    if (this.objectMotion?.enabled === true) {
+      this.velocity?.render(this.renderer, this.scene, camera);
     }
     this.composer.render();
   }
@@ -232,6 +312,11 @@ export class Postprocess {
     this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(width, height);
     this.applyEffectResolution();
+    const ratio = this.renderer.getPixelRatio();
+    this.velocity?.setSize(
+      Math.round(width * ratio * POST.objectMotionResolutionScale),
+      Math.round(height * ratio * POST.objectMotionResolutionScale),
+    );
   }
 
   /**
@@ -259,6 +344,7 @@ export class Postprocess {
 
 
   dispose(): void {
+    this.velocity?.dispose();
     this.composer.dispose();
   }
 }

@@ -8,6 +8,7 @@ import { type InputFrame, InputRecorder, createInputFrame } from '../core/input'
 import { rollAt } from './wheelView';
 import { Rng } from '../core/rng';
 import { type Craft, createCraft } from '../gfx/craft';
+import type { Object3D } from 'three';
 import { isCraftModelReady } from '../gfx/craftModel';
 import { createGround } from '../gfx/ground';
 import { type Palette, createPalette, rivalCraftColors } from '../gfx/palette';
@@ -494,6 +495,24 @@ export class World {
    * 位置/朝向从旧车壳抄过来,下一帧 `present()` 会立刻覆盖掉 —— 抄一下是
    * 为了「换的那一帧」不闪到原点。
    */
+  /**
+   * 会动的那些子树:玩家、三辆对手、幽灵。
+   *
+   * 给逐物体运动模糊的速度缓冲用(`Postprocess.markMoving()`)。**换车壳之后
+   * 内容会变**,所以每次现拼一个数组而不是缓存一份 —— 调用方(`main.ts`)
+   * 在模型到货那一刻会重新取一遍。
+   */
+  get movingGroups(): readonly Object3D[] {
+    const groups: Object3D[] = [this.craft.group];
+    for (const craft of this.rivalCrafts) {
+      groups.push(craft.group);
+    }
+    if (this.ghost !== null) {
+      groups.push(this.ghost.craft.group);
+    }
+    return groups;
+  }
+
   /**
    * 车壳是哪来的。给无头测试断言用(见 `main.ts` 和冒烟测试)。
    *

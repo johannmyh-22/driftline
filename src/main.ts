@@ -271,7 +271,9 @@ async function boot(container: HTMLDivElement): Promise<void> {
         focusX = clamp(focusPoint.x * 0.5 + 0.5, -0.5, 1.5);
         focusY = clamp(focusPoint.y * 0.5 + 0.5, -0.5, 1.5);
       }
-      post.setMotionBlur(normalize01(speed, 0, REFERENCE_TOP_SPEED), focusX, focusY);
+      const speed01 = normalize01(speed, 0, REFERENCE_TOP_SPEED);
+      post.setMotionBlur(speed01, focusX, focusY);
+      post.setObjectMotionBlur(speed01);
       post.render(world.camera);
       touch?.present();
       if (!painted) {
@@ -316,8 +318,12 @@ async function boot(container: HTMLDivElement): Promise<void> {
 
   // 模型到货就换车壳。`upgradeCrafts()` 自己会判 `isCraftModelReady()`,
   // 载入失败时是空操作,不需要在这里再判一次。
+  // 速度缓冲只画标记过的子树,换车壳会把整批网格换掉,所以两处都要标。
+  post.markMoving(world.movingGroups);
+
   void modelReady.then(() => {
     world.upgradeCrafts();
+    post.markMoving(world.movingGroups);
     /*
      * 和 `data-painted` 同一类:把一个内部状态挂到 DOM 上,好让无头测试能
      * 断言它。没有这个标记就只能靠肉眼看车长什么样 —— 而「模型没换上来」
