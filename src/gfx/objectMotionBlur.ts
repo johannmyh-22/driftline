@@ -57,24 +57,46 @@ export const MOVING_LAYER = 1;
  * 渲速度,那是拿地基换一个看不太出来的边角。
  */
 
-/** 速度缓冲的材质。前后两个位置都用**当前帧**的相机矩阵,理由见类注释。 */
+/**
+ * 速度缓冲的材质。算的是**这个点在屏幕上真正移动了多少**,也就是光流本身。
+ *
+ * ## 上一帧的位置必须用**上一帧的相机矩阵**
+ *
+ * 第一版两边都用当前帧的相机矩阵,注释里还写着"这样相机自己的运动就被约掉
+ * 了" —— **完全写反了**。两边同一个相机 = 算的是物体在**世界里**的位移,
+ * 而车在世界里每帧要跑 0.83 米(50 m/s)。于是跟着相机一起走、在画面上纹丝
+ * 不动的车身,被算出一大截速度,开快了整台车就糊了。人类的原话是
+ * 「开快起来的时候车怎么是糊的」。
+ *
+ * 正确的是 `s_now − s_prev`,两边各用各的相机:
+ *
+ * - 车身跟着相机走 → 两个屏幕坐标几乎重合 → **不糊**。
+ * - 车轮在自转,那份旋转不在相机里 → 有速度 → **糊**。这正是要治的频闪。
+ * - 对手横向错身 → 有速度 → 糊。
+ *
+ * 世界(地形/赛道)不在这张缓冲里(只画 `MOVING_LAYER`),相机运动那一份由
+ * `motionBlur.ts` 的径向近似负责,两级仍然不重复。
+ */
 function createVelocityMaterial(): ShaderMaterial {
   return new ShaderMaterial({
     uniforms: {
       /** 这个物体**上一帧**的世界变换。逐物体在 `onBeforeRender` 里换。 */
       prevModelMatrix: { value: new Matrix4() },
+      /** **上一帧**的 projection × view。每帧换一次,不是逐物体。 */
+      prevViewProjection: { value: new Matrix4() },
     },
     vertexShader: /* glsl */ `
       uniform mat4 prevModelMatrix;
+      uniform mat4 prevViewProjection;
       varying vec4 vCurrent;
       varying vec4 vPrevious;
       void main() {
         vec4 world = modelMatrix * vec4(position, 1.0);
         vec4 prevWorld = prevModelMatrix * vec4(position, 1.0);
-        // 两边都用当前帧的 viewMatrix:相机自己的运动被约掉,剩下的是
-        // 物体相对相机的运动(径向那一级负责相机运动,两级不重复)。
+        // 各用各的相机 —— 这才是"这个点在屏幕上移动了多少"。用同一个相机
+        // 算出来的是世界位移,跟着相机走的车身会被判成在高速移动。
         vCurrent = projectionMatrix * viewMatrix * world;
-        vPrevious = projectionMatrix * viewMatrix * prevWorld;
+        vPrevious = prevViewProjection * prevWorld;
         gl_Position = vCurrent;
       }
     `,
@@ -164,6 +186,13 @@ export class VelocityBuffer {
   private readonly marked = new Set<Object3D>();
   private readonly savedViewport = new Vector4();
   private readonly savedClearColor = new Color();
+  /** 上一帧的 projection × view。 */
+  private readonly prevViewProjection = new Matrix4();
+  /**
+   * 上一帧用的是哪个相机。**切机位要当第一帧处理** —— 追尾和固定机位之间
+   * 一换,两帧的屏幕坐标毫无关系,不重置的话会闪一帧糊得看不清的画面。
+   */
+  private lastCamera: Camera | null = null;
 
   constructor(width = 1, height = 1) {
     this.target = new WebGLRenderTarget(width, height, {
@@ -230,6 +259,21 @@ export class VelocityBuffer {
     renderer.getClearColor(this.savedClearColor);
     const savedClearAlpha = renderer.getClearAlpha();
 
+    /*
+     * 第一帧、以及刚切过机位的那一帧,没有可用的"上一帧相机" —— 直接用当前
+     * 的,速度自然算成 0,比闪一帧糊掉的画面好。
+     */
+    if (this.lastCamera !== camera) {
+      this.prevViewProjection
+        .copy(camera.projectionMatrix)
+        .multiply(camera.matrixWorldInverse);
+      this.lastCamera = camera;
+    }
+    const slot = this.material.uniforms['prevViewProjection'];
+    if (slot !== undefined) {
+      (slot.value as Matrix4).copy(this.prevViewProjection);
+    }
+
     camera.layers.set(MOVING_LAYER);
     scene.overrideMaterial = this.material;
     renderer.setRenderTarget(this.target);
@@ -246,6 +290,7 @@ export class VelocityBuffer {
     renderer.setClearColor(this.savedClearColor, savedClearAlpha);
 
     // 这一帧画完才更新「上一帧」,否则同一帧里前后两个位置会是同一个。
+    this.prevViewProjection.copy(camera.projectionMatrix).multiply(camera.matrixWorldInverse);
     for (const mesh of this.marked) {
       let stored = this.previous.get(mesh);
       if (stored === undefined) {

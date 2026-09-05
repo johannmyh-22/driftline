@@ -27,6 +27,21 @@ import { POST } from '../game/tuning';
  * `CAMERA.reducedMotionFovScale` 只把 FOV 收窄不清零,因为 FOV 是取景线索;
  * 而模糊减到三成仍然是整幅画面在动。理由写在那个常量的注释里。
  *
+ * ## 两级分区:会动的物体交给逐物体那一级
+ *
+ * 这一级的模型是「静止的世界在相机运动下的光流」,**它对跟着相机一起走的
+ * 车身根本不成立**。而追尾机位是俯视着车的,扩张焦点落在车的**上方** ——
+ * 车离焦点有 0.3 uv,算出来约 9 个像素的涂抹。人类反馈「开快起来的时候车
+ * 怎么是糊的」,主要就是这一份。
+ *
+ * 修法不是把不糊的半径调大(那会连车周围的路面一起解糊),而是让两级真正
+ * **按像素分区**:`objectMotionBlur.ts` 的速度缓冲里,alpha 已经精确标出
+ * 「这个像素属于会动的物体」。这一级跳过它们,交给那一级按各自真实的速度
+ * 去涂。世界归径向,物体归逐物体,不重叠也不漏。
+ *
+ * 逐物体那一级被关掉时(`?post=` 里没有 `objmotion`)掩码不可用,
+ * `useMask` 为 0,这一级退回原来的"全屏都涂"。
+ *
  * ## 为什么中心留一块不糊
  *
  * 光流大小 ∝ 离焦点的距离,焦点处本来就是 0。而追尾机位下车正好在焦点附近 ——
@@ -46,6 +61,10 @@ export const MotionBlurShader = {
     focusRadius: { value: POST.motionFocusRadius },
     /** 满强度时最远采样偏移,占「像素到焦点距离」的比例。 */
     maxShift: { value: POST.motionMaxShift },
+    /** 逐物体那一级的速度缓冲,当掩码用(见下面「两级分区」)。 */
+    tVelocity: { value: null },
+    /** 掩码可不可用。逐物体那一级被关掉时是 0,这一级退回"全屏都涂"。 */
+    useMask: { value: 0 },
   },
 
   vertexShader: /* glsl */ `
@@ -62,9 +81,17 @@ export const MotionBlurShader = {
     uniform float strength;
     uniform float focusRadius;
     uniform float maxShift;
+    uniform sampler2D tVelocity;
+    uniform float useMask;
     varying vec2 vUv;
 
     void main() {
+      // 会动的物体交给逐物体那一级 —— 这一级的模型对它们不成立(见类注释)。
+      if (useMask > 0.5 && texture2D(tVelocity, vUv).a > 0.5) {
+        gl_FragColor = texture2D(tDiffuse, vUv);
+        return;
+      }
+
       vec2 toFocus = focus - vUv;
       float r = length(toFocus);
       // 焦点附近不糊,往外线性长起来。smoothstep 而不是 step:硬边界会在

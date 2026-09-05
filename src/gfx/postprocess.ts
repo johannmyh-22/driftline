@@ -168,6 +168,18 @@ export class Postprocess {
       this.velocity = velocity;
     }
 
+    /*
+     * 两级分区:径向那一级要读逐物体的速度缓冲当掩码,跳过会动的物体
+     * (理由见 `motionBlur.ts` 的「两级分区」)。两级都在的时候才接上。
+     */
+    if (this.motion !== null && this.velocity !== null) {
+      const mask = this.motion.uniforms['tVelocity'];
+      if (mask !== undefined) {
+        mask.value = this.velocity.target.texture;
+      }
+      setNumberUniform(this.motion, 'useMask', 1);
+    }
+
     if (enabled.has('bloom')) {
       // 分辨率由 setSize 接管,构造时给什么都会被覆盖。
       const bloom = new UnrealBloomPass(
@@ -294,6 +306,18 @@ export class Postprocess {
     }
   }
 
+  /**
+   * 径向那一级这一帧要不要掩码。
+   *
+   * 逐物体那一级在低速时会被整个关掉(省一次场景渲染),但径向那一级的开启
+   * 门槛更高(`motionMinSpeed01` > `objectMotionMinSpeed01`),所以正常情况
+   * 下不会出现"径向开着而掩码没画"。**这个判断是防御性的**:两个门槛哪天
+   * 被调反了,不加这条就会拿上一帧的陈旧掩码去挖当前帧的画面。
+   */
+  private motionNeedsMask(): boolean {
+    return this.motion?.enabled === true && this.velocity !== null;
+  }
+
   render(camera: PerspectiveCamera): void {
     this.renderPass.camera = camera;
     if (this.gtao !== null) {
@@ -301,7 +325,7 @@ export class Postprocess {
     }
     // 速度缓冲要在主渲染之前画:模糊那一级读的是这一帧的速度。
     // pass 关着的时候连这一遍都不画 —— 它是这一级真正的成本所在。
-    if (this.objectMotion?.enabled === true) {
+    if (this.objectMotion?.enabled === true || this.motionNeedsMask()) {
       this.velocity?.render(this.renderer, this.scene, camera);
     }
     this.composer.render();

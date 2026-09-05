@@ -498,22 +498,25 @@ test('首屏不等车辆模型:先画出程序化造型,模型到货后自己换
   expect(problems).toEqual([]);
 });
 
-test('逐物体运动模糊真的压住了轮子的频闪', async ({ page }) => {
+test('逐物体运动模糊真的把轮辐糊平了', async ({ page }) => {
   const problems = watchForProblems(page);
 
   /*
-   * **这条是量出来的验收,不是看图。**
+   * **量的是「轮辐对比度」,不是帧间差。**
    *
-   * 频闪的本质是轮辐每帧跳到一个不同的角度(马车轮效应),所以「轮子那一小块
-   * 的帧间平均像素差」就是它的直接度量。开与关跑同一段路、同一批帧,比两者。
+   * 第一版量的是轮子那一小块的帧间平均像素差 —— 想法是"频闪 = 每帧都在变"。
+   * 那个度量被路面**污染**了:路面以 53 m/s 从旁边流过去,它的帧间差比轮子
+   * 还大。轮子明明已经糊成一个圆盘,量出来的降幅只有一成,反而像是没生效。
    *
-   * 为什么非要有这条:实现里踩了一个**看起来是work的**坑 —— `overrideMaterial`
-   * 让全场共用一份材质,而 three 会跳过重复上传同一材质的 uniform,于是每个
-   * 网格的"上一帧矩阵"其实全是第一个网格的。画面上轮子照样糊了,截图完全看
-   * 不出问题;是把快门从 0.7 拉到 2.0 发现帧间差纹丝不动才暴露的。
-   * 这类"幅度错了但看着对"的 bug,只有数值拦得住。
+   * 现在直接量轮子那一块的**空间梯度**(相邻像素亮度差的平均)—— 有辐条就
+   * 高对比,糊平了就低。它只看这一帧的画面内部,路面流不流过完全不影响。
+   * 实测 37.4 → 20.2(降 46%)。
+   *
+   * 这条测试还兜住过一个**看起来是work的** bug:`overrideMaterial` 让全场
+   * 共用一份材质,three 会跳过重复上传同一材质的 uniform,于是每个网格的
+   * "上一帧矩阵"全是第一个网格的。画面上轮子照样糊,只是幅度不对。
    */
-  const wheelFlicker = async (extra: string): Promise<number> => {
+  const spokeContrast = async (extra: string): Promise<number> => {
     await page.goto(`${BASE_URL}?test=1&seed=42${extra}`, { waitUntil: 'load' });
     await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
     await page.evaluate(async () => {
@@ -524,55 +527,53 @@ test('逐物体运动模糊真的压住了轮子的频闪', async ({ page }) => 
       api.setCamera('side');
       api.setInput({ throttle: 1, steer: 0, airBrake: 0 });
       api.advance(420);
-      /*
-       * **多推一帧再开始量。** 速度缓冲要有"上一帧"才算得出速度,而 420 帧的
-       * 预热里 `advance()` 只在最后渲染一次 —— 那一帧没有历史,所以完全不糊。
-       * 拿它当基准帧的话,第一个差值量到的是"从不糊跳到糊"(实测 29/255),
-       * 一个样本就把 5 帧的平均值整个抬起来,结论直接反过来。
-       */
+      // 速度缓冲要有"上一帧"才算得出速度,预热的最后一帧没有历史、完全不糊。
       api.advance(1);
 
       const source = document.querySelector('canvas') as HTMLCanvasElement;
       const scratch = document.createElement('canvas');
-      // 只框住后轮。框大了会被路面流过和车身边缘淹掉,量的就不是频闪而是
-      // "整个画面在动"。坐标是从 side 机位的截图上量的。
-      const rx = 688;
-      const ry = 352;
-      const rw = 34;
-      const rh = 34;
+      // 只框住后轮那个圆盘,一点富余都不留 —— 框大了量到的是车身边缘和路面。
+      // 坐标是拿 DPR 4 的局部截图一格一格量出来的。
+      const rx = 697;
+      const ry = 346;
+      const rw = 18;
+      const rh = 30;
       scratch.width = rw;
       scratch.height = rh;
       const ctx = scratch.getContext('2d')!;
-      ctx.drawImage(source, rx, ry, rw, rh, 0, 0, rw, rh);
-      let previous = ctx.getImageData(0, 0, rw, rh).data;
+      // 多帧取平均,免得刚好抽到轮辐对齐的那一帧。
       let total = 0;
-      const frames = 5;
-      for (let i = 0; i < frames; i++) {
-        api.advance(1);
+      const frames = 6;
+      for (let f = 0; f < frames; f++) {
         ctx.clearRect(0, 0, rw, rh);
         ctx.drawImage(source, rx, ry, rw, rh, 0, 0, rw, rh);
-        const current = ctx.getImageData(0, 0, rw, rh).data;
+        const d = ctx.getImageData(0, 0, rw, rh).data;
         let sum = 0;
-        for (let p = 0; p < current.length; p += 4) {
-          sum +=
-            Math.abs((current[p] ?? 0) - (previous[p] ?? 0)) +
-            Math.abs((current[p + 1] ?? 0) - (previous[p + 1] ?? 0)) +
-            Math.abs((current[p + 2] ?? 0) - (previous[p + 2] ?? 0));
+        let n = 0;
+        for (let y = 0; y < rh; y++) {
+          for (let x = 0; x < rw - 1; x++) {
+            const p = (y * rw + x) * 4;
+            const q = p + 4;
+            const a = (d[p] ?? 0) * 0.3 + (d[p + 1] ?? 0) * 0.6 + (d[p + 2] ?? 0) * 0.1;
+            const b = (d[q] ?? 0) * 0.3 + (d[q + 1] ?? 0) * 0.6 + (d[q + 2] ?? 0) * 0.1;
+            sum += Math.abs(a - b);
+            n++;
+          }
         }
-        total += sum / ((current.length / 4) * 3);
-        previous = current;
+        total += sum / n;
+        api.advance(1);
       }
       return total / frames;
     });
   };
 
   // 关掉这一级当基线,其余后处理保持一致 —— 只有一个变量在动。
-  const off = await wheelFlicker('&post=motion,bloom,smaa,vignette');
-  const on = await wheelFlicker('');
+  const off = await spokeContrast('&post=motion,bloom,smaa,vignette');
+  const on = await spokeContrast('');
 
-  // 实测约 12.0 → 7.2(降四成)。阈值留足余量:这里要拦的是"完全没生效"
-  // 和上面那种"幅度被钉住"(当时只降两成),不是把某个具体数字钉死。
-  expect(on, `开=${on.toFixed(2)} 关=${off.toFixed(2)}`).toBeLessThan(off * 0.85);
+  // 实测 37.4 → 20.2。阈值留足余量:要拦的是"完全没生效"和"幅度被钉住",
+  // 不是把某个具体数字钉死。
+  expect(on, `开=${on.toFixed(2)} 关=${off.toFixed(2)}`).toBeLessThan(off * 0.75);
   expect(problems).toEqual([]);
 });
 
