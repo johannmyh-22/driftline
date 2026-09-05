@@ -13,10 +13,12 @@ import { isCraftModelReady } from '../gfx/craftModel';
 import { createGround } from '../gfx/ground';
 import { type Palette, createPalette, rivalCraftColors } from '../gfx/palette';
 import { Atmosphere } from '../gfx/atmosphere';
+import type { Group } from 'three';
 import { createTerrainMesh } from '../gfx/terrainMesh';
-import { createTrackMesh } from '../gfx/trackMesh';
+import { applyTrackDamp, createTrackMesh } from '../gfx/trackMesh';
 import { clamp, normalize01 } from '../core/mathx';
 import { raceFuelLitres } from './fuel';
+import { type Weather, createWeather } from './weather';
 import { RacingPilot } from './racingPilot';
 import { TrackRecovery } from './trackRecovery';
 import { RaceSession } from './raceSession';
@@ -145,6 +147,9 @@ export class World {
    */
   readonly session: RaceSession | null;
 
+  /** 这一局的赛道状态(气温/路温/湿度)。由 seed 决定,一局之内不变。 */
+  readonly weather: Weather;
+
   /** **不是 readonly**:glTF 模型异步到货之后整辆换掉,见 `upgradeCrafts()`。 */
   private craft: Craft;
   /** 造车壳用的配色,换车壳时要按原样再造一遍。 */
@@ -187,6 +192,7 @@ export class World {
     this.skipCountdown = options.skipCountdown === true;
     const palette = createPalette(rng.fork());
     this.palette = palette;
+    let trackMesh: Group | null = null;
 
     this.atmosphere = new Atmosphere(rng.fork());
     this.scene.add(this.atmosphere.sky);
@@ -204,7 +210,8 @@ export class World {
       this.track = layout;
       this.field = course;
       this.scene.add(createTerrainMesh(course, rng.fork(), palette));
-      this.scene.add(createTrackMesh(course, rng.fork(), palette));
+      trackMesh = createTrackMesh(course, rng.fork(), palette);
+      this.scene.add(trackMesh);
     } else {
       const field = new Heightfield(rng.fork());
       this.track = null;
@@ -261,6 +268,23 @@ export class World {
 
     // 背光面不再靠半球光去补,改由 IBL 提供 —— 环境反射来自真实的大气散射,
     // 明暗过渡和天空是一致的,而不是人为塞一个补光。
+    /*
+     * **赛道状态的随机数必须排在最后取。**
+     *
+     * 它跟着太阳仰角走(低角度的太阳晒不热路面),所以逻辑上属于
+     * `Atmosphere` 之后;但只要 `rng.fork()` 插在赛道生成之前,同一个 seed
+     * 就会生成出**另一条赛道** —— 精选赛道的目标时间、玩家存的最佳圈全部
+     * 作废。所以取数排在这里,车辆和路面材质回过头来补。
+     */
+    this.weather = createWeather(rng.fork(), this.atmosphere.sunElevation);
+    this.vehicle.setWeather(this.weather);
+    for (const rival of this.rivals) {
+      rival.setWeather(this.weather);
+    }
+    if (trackMesh !== null) {
+      applyTrackDamp(trackMesh, this.weather.damp);
+    }
+
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
     this.saveRivalPrevious();

@@ -333,6 +333,9 @@ async function boot(container: HTMLDivElement): Promise<void> {
 
   // 模型到货就换车壳。`upgradeCrafts()` 自己会判 `isCraftModelReady()`,
   // 载入失败时是空操作,不需要在这里再判一次。
+  // 路面状态一局之内不变,开局写一次就行(见 `Hud.setTrackState()`)。
+  readout?.setTrackState(world.weather);
+
   // 速度缓冲只画标记过的子树,换车壳会把整批网格换掉,所以两处都要标。
   post.markMoving(world.movingGroups);
 

@@ -11,6 +11,8 @@ import type { Course } from '../game/course';
 import type { Rng } from '../core/rng';
 import type { Palette } from './palette';
 import { createSurfaceTextures } from './textures';
+import { clamp, lerp } from '../core/mathx';
+import { WEATHER } from '../game/tuning';
 
 /** 边线条纹的宽度,占外缘半宽的比例。 */
 const EDGE_STRIPE = 0.06;
@@ -304,4 +306,29 @@ function createGuardrails(course: Course, rng: Rng, palette: Palette): Mesh {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;
+}
+
+/**
+ * 把路面改成潮湿的样子。`damp` 是 0..1(见 `game/weather.ts`)。
+ *
+ * 湿沥青**又暗又亮** —— 水膜填平了表面的孔隙,反射变强而漫反射变弱。这两件
+ * 事必须一起做:只调暗会变成"脏路面",只调亮会变成"塑料路面"。
+ *
+ * 做成**事后调用**而不是造网格时传参,是为了不动 `World` 里随机数的取用
+ * 顺序:天气本身要消耗一次 `rng.fork()`,如果排在赛道生成之前,同一个 seed
+ * 会生成出**另一条赛道** —— 精选赛道的目标时间、玩家存的最佳圈全部作废。
+ * 所以天气那次取数排在构造函数最后,路面湿度只能回过头来抹。
+ */
+export function applyTrackDamp(track: Group, damp: number): void {
+  const wet = clamp(damp, 0, 1);
+  if (wet <= 0) {
+    return;
+  }
+  const ribbon = track.getObjectByName('track-ribbon');
+  if (!(ribbon instanceof Mesh)) {
+    return;
+  }
+  const material = ribbon.material as MeshStandardMaterial;
+  material.color.setScalar(1 - WEATHER.dampDarken * wet);
+  material.roughness = lerp(1, WEATHER.dampRoughness, wet);
 }

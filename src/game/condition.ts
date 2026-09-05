@@ -47,10 +47,18 @@ export class CarCondition {
   }
 
   /** 每个固定步调一次。 */
-  update(dt: number, gripSaturation: number, speed: number, brakeInput: number): void {
+  update(
+    dt: number,
+    gripSaturation: number,
+    speed: number,
+    brakeInput: number,
+    wearScale = 1,
+  ): void {
     const slipPower =
       clamp(gripSaturation, 0, 1) * clamp(speed / CONDITION.tireWearRefSpeed, 0, 1);
-    this.tireWear = clamp(this.tireWear + CONDITION.tireWearRate * slipPower * dt, 0, 1);
+    // `wearScale` 是路面过热带来的加速磨损(见 `weather.ts`)。默认 1,所以
+    // 不传的调用点行为逐位不变。
+    this.tireWear = clamp(this.tireWear + CONDITION.tireWearRate * wearScale * slipPower * dt, 0, 1);
 
     const heating =
       clamp(brakeInput, 0, 1) * clamp(speed / CONDITION.brakeHeatRefSpeed, 0, 1);

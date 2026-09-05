@@ -5,6 +5,7 @@ import type { Race } from './race';
 import type { TrackLayout, TrackSample } from './trackLayout';
 import type { StandingRow } from './standings';
 import type { RaceSession } from './raceSession';
+import type { Weather } from './weather';
 
 interface VectorLike {
   x: number;
@@ -43,6 +44,7 @@ export class Hud {
   private readonly speedNum: HTMLSpanElement;
   private readonly fuelBar: HTMLDivElement;
   private readonly fuelFill: HTMLDivElement;
+  private readonly trackState: HTMLParagraphElement;
   private lastShownFuel = -1;
 
   // 计时与 Delta 组件
@@ -228,6 +230,17 @@ export class Hud {
     this.fuelBar.append(this.fuelFill);
     speedCard.append(this.fuelBar);
 
+    /*
+     * 路面状态。**一局之内不变,所以只写一次、不进每帧路径。**
+     *
+     * 显示的是路温不是气温:真实转播里念的也是路温,因为抓地挂在它上面
+     * (见 `game/weather.ts`)。湿路面时多一个标记 —— 那时候画面本身也会
+     * 变暗变亮,读数只是把"为什么今天这么滑"说清楚。
+     */
+    this.trackState = document.createElement('p');
+    this.trackState.className = 'hud-track-state';
+    speedCard.append(this.trackState);
+
     // ── 4. 左下角操作提示与构建号 ──
     const infoCard = document.createElement('div');
     infoCard.className = 'hud-info-card';
@@ -271,6 +284,16 @@ export class Hud {
       this.resultsEl,
     );
     parent.append(this.root);
+  }
+
+  /**
+   * 写一次路面状态。**不在每帧路径上** —— 它一局之内不变,每帧去改 DOM
+   * 是白白让浏览器重排。由 `main.ts` 在开局调一次。
+   */
+  setTrackState(weather: Weather): void {
+    const temp = `路面 ${Math.round(weather.trackTempC)}°C`;
+    this.trackState.textContent = weather.damp > 0 ? `${temp} · 潮湿` : temp;
+    this.trackState.classList.toggle('is-damp', weather.damp > 0);
   }
 
   update(

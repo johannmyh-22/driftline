@@ -1,6 +1,6 @@
 import { clamp } from '../core/mathx';
 import type { InputFrame } from '../core/input';
-import { RACING_AI } from './tuning';
+import { CAR, RACING_AI } from './tuning';
 import type { TrackLayout } from './trackLayout';
 import type { Vehicle } from './vehicle';
 
@@ -74,7 +74,9 @@ export class RacingPilot {
      * 58.9s 掉到 77.3s —— 不是"慢了 10%",是一路滑出赛道再修正。真实车手
      * 感觉到胎不行了会自己收着开,这里把同一件事显式建模。
      */
-    const grip = vehicle.condition.tireGripScale;
+    // 用整车的总抓地缩放,不是只看磨损 —— 它还含路面温度与湿度(见
+    // `Vehicle.gripScale` 的注释)。
+    const grip = vehicle.gripScale;
     const latAccel = RACING_AI.lateralAccel * this.aggression * grip;
     const brakeAccel = RACING_AI.brakeAccel * this.aggression * grip * vehicle.condition.brakeScale;
     const steps = Math.max(1, Math.round(RACING_AI.scanDistance / spacing));
@@ -135,7 +137,8 @@ export class RacingPilot {
     out.reverse = 0;
     if (speed < targetSpeed * RACING_AI.throttleBand) {
       // 转向越多留给纵向的摩擦圆越少,给油要收着点,否则后轴空转反而更慢。
-      out.throttle = clamp((1 - RACING_AI.tractionCut * Math.abs(out.steer)) * lift, 0, 1);
+      const geometric = 1 - RACING_AI.tractionCut * Math.abs(out.steer);
+      out.throttle = clamp(geometric * lift * this.tractionLimit(vehicle), 0, 1);
       out.airBrake = 0;
     } else if (speed > targetSpeed * RACING_AI.brakeBand) {
       out.throttle = 0;
@@ -148,6 +151,46 @@ export class RacingPilot {
   }
 
   /** 无符号曲率(1/m)。用一段基线上的切线转角除以弧长,比逐点差分抗噪。 */
+  /**
+   * 牵引力控制:后轴真的在空转就收油。返回 0..1 的油门上限。
+   *
+   * ## 为什么按转向角收油不够
+   *
+   * 上面那条 `tractionCut` 是**几何**上的:转得越多、留给纵向的摩擦圆越少。
+   * 但它是个常数,不知道路面到底有多滑。CLAUDE.md 里写明这台车的驱动力矩
+   * 是**为了保甩尾手感刻意留大的**(真实 A110 那种量级不会超后轴预算),
+   * 所以 μ 一降,同样的油门就直接把后轮拧空转。
+   *
+   * 实测:抓地掉到 0.84(凉路面)时,只有几何收油的 AI 单圈从 58.9 s 崩到
+   * 130.6 s 并且撞墙 —— **那不是"慢了 16%",是一路打滑加修正**。
+   *
+   * ## 量的是滑移率,不是"我猜路面滑不滑"
+   *
+   * 后轮线速度比车速快多少就是滑移率。这个量对路面状况、轮胎磨损、挡位、
+   * 坡度全都天然免疫 —— 不需要 AI 去推断任何外部条件,滑了就是滑了。
+   * 真车的 TCS 也是这么干的。
+   */
+  private tractionLimit(vehicle: Vehicle): number {
+    const wheels = vehicle.wheelViews;
+    const rearLeft = wheels[2];
+    const rearRight = wheels[3];
+    if (rearLeft === undefined || rearRight === undefined) {
+      return 1;
+    }
+    const spin = (Math.abs(rearLeft.spin) + Math.abs(rearRight.spin)) / 2;
+    const surface = spin * CAR.wheelRadius;
+    // 低速时分母太小会让滑移率炸掉(起步瞬间车速接近 0),给一个下限。
+    const reference = Math.max(vehicle.groundSpeed, RACING_AI.tractionRefSpeed);
+    const slip = (surface - vehicle.groundSpeed) / reference;
+    if (slip <= RACING_AI.tractionSlipTarget) {
+      return 1;
+    }
+    // 超出目标滑移率之后线性收,收到 `tractionMinThrottle` 为止 —— 收到 0
+    // 会变成"一打滑就完全松油",那样车会在打滑和加速之间来回抖。
+    const excess = (slip - RACING_AI.tractionSlipTarget) / RACING_AI.tractionSlipRange;
+    return clamp(1 - excess, RACING_AI.tractionMinThrottle, 1);
+  }
+
   private curvatureAt(index: number): number {
     return Math.abs(this.signedCurvatureAt(index));
   }

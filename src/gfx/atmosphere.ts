@@ -25,12 +25,19 @@ import { SKY } from '../game/tuning';
 export class Atmosphere {
   readonly sky: Mesh;
   readonly sunDirection = new Vector3();
+  /**
+   * 太阳仰角(度)。给 `game/weather.ts` 推路面温度用 —— 低角度的太阳单位
+   * 面积得到的能量少,清晨/黄昏的路面就是凉的。暴露出来是为了让画面里
+   * 「太阳很低」和读数上「路面很凉」是同一回事,而不是各说各话。
+   */
+  readonly sunElevation: number;
   readonly sunLight: DirectionalLight;
 
   private environmentTexture: Texture | null = null;
 
   constructor(rng: Rng) {
     const elevation = rng.range(SKY.elevationMin, SKY.elevationMax);
+    this.sunElevation = elevation;
     const azimuth = rng.range(SKY.azimuthMin, SKY.azimuthMax);
 
     const sky = new Sky();

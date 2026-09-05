@@ -569,3 +569,19 @@ body {
 .hud-fuel-bar.is-low .hud-fuel-fill {
   background: rgb(255 120 100 / 90%);
 }
+
+/*
+ * 路面状态。挂在时速表底下,和油量条同一档"偶尔瞄一眼"的信息 —— 做得比
+ * 时速小得多,潮湿时才提亮跳出来。
+ */
+.hud-track-state {
+  margin: 6px 0 0;
+  font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  color: rgb(255 255 255 / 45%);
+  text-align: right;
+}
+
+.hud-track-state.is-damp {
+  color: rgb(120 200 255 / 85%);
+}

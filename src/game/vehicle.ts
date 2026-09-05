@@ -15,6 +15,12 @@ import {
 } from './diagnostics';
 import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
 import { FuelTank } from './fuel';
+import {
+  NEUTRAL_WEATHER,
+  type Weather,
+  weatherGripScale,
+  weatherWearScale,
+} from './weather';
 import { CarCondition } from './condition';
 import { Gearbox } from './gearbox';
 
@@ -255,6 +261,17 @@ export class Vehicle {
   private readonly hit: GroundHit = createGroundHit();
   private readonly wheels: Wheel[];
   private readonly chassisSpec: ChassisSpec;
+  /** 路面状态对抓地/磨损的缩放。一局之内不变(见 `weather.ts`)。 */
+  private weatherGrip: number;
+
+  /**
+   * 侧向抓地的总缩放:轮胎磨损 × 路面状态。**1 = 新胎 + 理想路温 + 干燥。**
+   *
+   * `RacingPilot` 必须用这个而不是 `condition.tireGripScale` —— 后者只算磨损,
+   * 湿冷路面上照着干地的过弯速度进弯就是直接撞墙。第四十三节已经在"磨损之后
+   * 还用新胎预算"上踩过一次同样的坑,这里是同一条。
+   */
+  private weatherWear: number;
   /** 上一次写进物理的总质量,用来避免每帧都去动刚体。 */
   private appliedMass = 0;
 
@@ -264,9 +281,16 @@ export class Vehicle {
    */
   readonly fuel = new FuelTank();
 
-  constructor(field: GroundQuery, physics: Physics) {
+  /**
+   * `weather` 默认中性 —— 抓地与磨损的缩放都恰好是 1,**所以加这套系统之前
+   * 和之后,不传天气的那些调用点(全部单测、`?course=flat`)逐位一样**。
+   * CLAUDE.md 里已验收的手感是在中性条件下验的,那条基线不受影响。
+   */
+  constructor(field: GroundQuery, physics: Physics, weather: Weather = NEUTRAL_WEATHER) {
     this.field = field;
     this.physics = physics;
+    this.weatherGrip = weatherGripScale(weather);
+    this.weatherWear = weatherWearScale(weather);
     this.chassisSpec = {
       mass: CAR.mass,
       width: CAR.bodyWidth,
@@ -295,8 +319,22 @@ export class Vehicle {
   }
 
   /** 当前轮胎摩擦系数 = 基准 μ × 磨损缩放。磨损为 0 时就是 `TIRE.mu0`。 */
+  /**
+   * 换赛道状态。**`World` 在构造函数最后才调**:天气本身要消耗一次
+   * `rng.fork()`,排在车辆/赛道之前的话同一个 seed 会生成出另一条赛道
+   * (见 `gfx/trackMesh.ts` 的 `applyTrackDamp()`)。
+   */
+  setWeather(weather: Weather): void {
+    this.weatherGrip = weatherGripScale(weather);
+    this.weatherWear = weatherWearScale(weather);
+  }
+
+  get gripScale(): number {
+    return this.condition.tireGripScale * this.weatherGrip;
+  }
+
   private get mu(): number {
-    return TIRE.mu0 * this.condition.tireGripScale;
+    return TIRE.mu0 * this.condition.tireGripScale * this.weatherGrip;
   }
 
   get speed(): number {
@@ -921,7 +959,13 @@ export class Vehicle {
      * 车况放在 `resolveWall()` **之后**:损伤要读这一帧的 `wallNormalSpeed`,
      * 而那个值正是墙解算算出来的。磨损/热衰用的是刚写回的饱和度与车速。
      */
-    this.condition.update(dt, this.gripSaturation, this.groundSpeed, this.lastBrakeInput);
+    this.condition.update(
+      dt,
+      this.gripSaturation,
+      this.groundSpeed,
+      this.lastBrakeInput,
+      this.weatherWear,
+    );
     this.fuel.burn(dt, this.lastThrottleInput, this.gearbox.rpm);
     this.syncMass();
     this.condition.addImpact(this.wallNormalSpeed);
