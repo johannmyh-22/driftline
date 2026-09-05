@@ -7,6 +7,13 @@ import type { StandingRow } from './standings';
 import type { RaceSession } from './raceSession';
 import type { Weather } from './weather';
 
+/** HUD 要显示的进站状态。用一个窄接口而不是整个 `PitStop`,HUD 不该知道状态机。 */
+export interface PitStatus {
+  readonly phase: 'idle' | 'servicing' | 'released';
+  readonly remaining: number;
+  readonly inside: boolean;
+}
+
 interface VectorLike {
   x: number;
   y: number;
@@ -45,6 +52,8 @@ export class Hud {
   private readonly fuelBar: HTMLDivElement;
   private readonly fuelFill: HTMLDivElement;
   private readonly trackState: HTMLParagraphElement;
+  private readonly pitBanner: HTMLDivElement;
+  private lastPitText = '';
   private lastShownFuel = -1;
 
   // 计时与 Delta 组件
@@ -241,6 +250,16 @@ export class Hud {
     this.trackState.className = 'hud-track-state';
     speedCard.append(this.trackState);
 
+    /*
+     * 进站提示。压在维修区里但还没停稳时提示"停车维修",作业中显示进度。
+     * 放在画面中央偏下 —— 这是需要**立刻看到**的信息,和右下角那两条"偶尔
+     * 瞄一眼"的不是一个量级。
+     */
+    this.pitBanner = document.createElement('div');
+    this.pitBanner.className = 'hud-pit-banner';
+    this.pitBanner.hidden = true;
+    this.root.append(this.pitBanner);
+
     // ── 4. 左下角操作提示与构建号 ──
     const infoCard = document.createElement('div');
     infoCard.className = 'hud-info-card';
@@ -305,6 +324,7 @@ export class Hud {
     fieldSize?: number,
     session?: RaceSession | null,
     fuelFraction?: number,
+    pit?: PitStatus,
   ): void {
     // 1. 速度更新
     const kmh = Math.round(metersPerSecond * 3.6);
@@ -320,6 +340,22 @@ export class Hud {
         this.lastShownFuel = percent;
         this.fuelFill.style.width = `${percent}%`;
         this.fuelBar.classList.toggle('is-low', percent <= HUD_FUEL_LOW_PERCENT);
+      }
+    }
+
+    // 1c. 进站提示。按文本去重 —— 每帧改 DOM 是白白让浏览器重排。
+    if (pit !== undefined) {
+      const text =
+        pit.phase === 'servicing'
+          ? `维修中 ${Math.ceil(pit.remaining)}s`
+          : pit.inside && pit.phase === 'idle'
+            ? '停车维修'
+            : '';
+      if (text !== this.lastPitText) {
+        this.lastPitText = text;
+        this.pitBanner.textContent = text;
+        this.pitBanner.hidden = text === '';
+        this.pitBanner.classList.toggle('is-working', pit.phase === 'servicing');
       }
     }
 

@@ -23,6 +23,12 @@ export interface Palette {
   roadEdge: Color;
   wallCap: Color;
   startLine: Color;
+  /**
+   * 维修区地标。**故意用一个赛道上不会出现的颜色**(偏蓝的冷色)——
+   * 它是功能标识不是装饰,玩家要能一眼在路肩上认出来,而路肩、标线、起跑线
+   * 已经把中性灰白那一档占满了。
+   */
+  pitBox: Color;
 
   /** 载具。 */
   craftHull: Color;
@@ -95,6 +101,7 @@ export function createPalette(rng: Rng): Palette {
     // 护墙的压顶。比墙身深一档:顶面积灰、被雨水冲刷,现实里从来不是最亮的那块。
     wallCap: linear(0.62, 0.61, 0.585),
     startLine: linear(0.5, 0.49, 0.46),
+    pitBox: linear(0.24, 0.42, 0.62),
 
     // 金属材质下基色是**反射的色调**而不是亮度,所以要比直觉暗:
     // 上一版取 0.34 亮度,配上高强度太阳和 IBL 直接过曝成一片惨白。

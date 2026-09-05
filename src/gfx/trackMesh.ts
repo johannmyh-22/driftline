@@ -10,6 +10,7 @@ import {
 import type { Course } from '../game/course';
 import type { Rng } from '../core/rng';
 import type { Palette } from './palette';
+import type { PitBox } from '../game/pitLane';
 import { createSurfaceTextures } from './textures';
 import { clamp, lerp } from '../core/mathx';
 import { WEATHER } from '../game/tuning';
@@ -51,15 +52,25 @@ const START_LINE_ROWS = 3;
  * 几何体全部来自 `Course.buildRibbonTriangles()`,和物理查询共用同一份顶点表 ——
  * 一旦这里自己算一套,车就会浮在路面上方或者陷进侧倾里。
  */
-export function createTrackMesh(course: Course, rng: Rng, palette: Palette): Group {
+/**
+ * `pitBox` 会在路肩上涂出维修区的地标。传 null 就没有(`flat` 那块平地)。
+ * 用顶点色涂而不是加一块贴片:路面本来就是靠顶点色区分标线/路肩/起跑线的,
+ * 多一块几何体既要对齐赛道侧倾又会 z-fighting。
+ */
+export function createTrackMesh(
+  course: Course,
+  rng: Rng,
+  palette: Palette,
+  pitBox: PitBox | null = null,
+): Group {
   const group = new Group();
   group.name = 'track';
-  group.add(createRibbon(course, rng, palette));
+  group.add(createRibbon(course, rng, palette, pitBox));
   group.add(createGuardrails(course, rng, palette));
   return group;
 }
 
-function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
+function createRibbon(course: Course, rng: Rng, palette: Palette, pitBox: PitBox | null): Mesh {
   const { positions, normals, uvs, lateral } = course.buildRibbonTriangles();
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(positions, 3));
@@ -74,7 +85,15 @@ function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
 
   // 归一化的路面/路肩分界。lateral 是 -1..1,覆盖含路肩的外缘半宽。
   const roadEdge = course.halfWidth / course.outerHalfWidth;
-  const rowTriangles = triangles / course.layout.samples.length;
+  const rowCount = course.layout.samples.length;
+  const rowTriangles = triangles / rowCount;
+
+  // 维修区的地标:把弧长/横向范围换算成「第几行」和「归一化横向」。
+  const spacing = course.layout.totalLength / rowCount;
+  const pitRowStart = pitBox === null ? -1 : Math.floor(pitBox.arcStart / spacing);
+  const pitRowEnd = pitBox === null ? -1 : Math.ceil(pitBox.arcEnd / spacing);
+  const pitInner = pitBox === null ? 0 : pitBox.lateralMin / course.outerHalfWidth;
+  const pitOuter = pitBox === null ? 0 : pitBox.lateralMax / course.outerHalfWidth;
 
   for (let t = 0; t < triangles; t++) {
     const side = Math.abs(lateral[t] ?? 0);
@@ -82,7 +101,16 @@ function createRibbon(course: Course, rng: Rng, palette: Palette): Mesh {
 
     // 顶点色在这里是**贴图的乘数**:路面本身由沥青贴图决定,顶点色只负责
     // 区分标线、路肩和起跑线。所以基准值是 1 而不是某个颜色。
-    if (row < START_LINE_ROWS && side < roadEdge) {
+    const signed = lateral[t] ?? 0;
+    if (
+      pitBox !== null &&
+      row >= pitRowStart &&
+      row <= pitRowEnd &&
+      signed >= pitInner &&
+      signed <= pitOuter
+    ) {
+      tint.copy(palette.pitBox);
+    } else if (row < START_LINE_ROWS && side < roadEdge) {
       tint.copy(palette.startLine);
     } else if (side > roadEdge + EDGE_STRIPE) {
       tint.copy(palette.shoulder);

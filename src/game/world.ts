@@ -18,6 +18,13 @@ import { createTerrainMesh } from '../gfx/terrainMesh';
 import { applyTrackDamp, createTrackMesh } from '../gfx/trackMesh';
 import { clamp, normalize01 } from '../core/mathx';
 import { raceFuelLitres } from './fuel';
+import {
+  type PitBox,
+  PitStop,
+  createPitBox,
+  insidePitBox,
+  planService,
+} from './pitLane';
 import { type Weather, createWeather } from './weather';
 import { RacingPilot } from './racingPilot';
 import { TrackRecovery } from './trackRecovery';
@@ -26,13 +33,14 @@ import { Standings } from './standings';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
 import { Ghost } from './ghost';
+import type { PitStatus } from './hud';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
 import { Physics } from './physics';
 import { Race } from './race';
 import { encodeGhostInput, saveRecord } from './records';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
-import { CRAFT, FUEL, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED } from './tuning';
+import { CRAFT, FUEL, PIT, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED } from './tuning';
 import { applyDraft } from './draft';
 import { Vehicle } from './vehicle';
 
@@ -150,6 +158,11 @@ export class World {
   /** 这一局的赛道状态(气温/路温/湿度)。由 seed 决定,一局之内不变。 */
   readonly weather: Weather;
 
+  /** 维修区。`flat` 那块没有赛道的平地上是 null。 */
+  readonly pitBox: PitBox | null = null;
+  /** 玩家的进站状态机。 */
+  readonly pit = new PitStop();
+
   /** **不是 readonly**:glTF 模型异步到货之后整辆换掉,见 `upgradeCrafts()`。 */
   private craft: Craft;
   /** 造车壳用的配色,换车壳时要按原样再造一遍。 */
@@ -209,8 +222,11 @@ export class World {
       const course = new Course(layout, rng.fork());
       this.track = layout;
       this.field = course;
+      // 维修区只依赖赛道长度和半宽,不消耗随机数 —— 所以可以排在这里,
+      // 好让路面网格把地标一起涂出来。
+      this.pitBox = createPitBox(layout.totalLength, layout.halfWidth);
       this.scene.add(createTerrainMesh(course, rng.fork(), palette));
-      trackMesh = createTrackMesh(course, rng.fork(), palette);
+      trackMesh = createTrackMesh(course, rng.fork(), palette, this.pitBox);
       this.scene.add(trackMesh);
     } else {
       const field = new Heightfield(rng.fork());
@@ -362,6 +378,7 @@ export class World {
         ? FUEL.startLitres
         : raceFuelLitres(RACE_FORMAT.lapCount, this.track.totalLength);
     this.vehicle.fuel.reset(startFuel);
+    this.pit.reset();
     for (const rival of this.rivals) {
       rival.condition.reset();
       rival.fuel.reset(startFuel);
@@ -404,11 +421,17 @@ export class World {
      * 这比事后罚时直观。锁住的是**写进物理的那份**,不是外面传进来的
      * `input`,免得把调用方的帧改脏。
      */
-    const locked = this.session?.inputLocked === true;
+    /*
+     * 进站作业期间同样锁输入,而且**多踩一脚刹车**:车已经停下了(进站的
+     * 前提就是速度低于 `PIT.entrySpeed`),但赛道有侧倾和坡度,不踩住会慢慢
+     * 溜出维修区。用现成的刹车力矩按住,比另开一条"冻结刚体"的路子干净。
+     */
+    const servicing = this.updatePit(dt);
+    const locked = this.session?.inputLocked === true || servicing;
     this.input.throttle = locked ? 0 : input.throttle;
     this.input.reverse = locked ? 0 : input.reverse;
     this.input.steer = locked ? 0 : input.steer;
-    this.input.airBrake = locked ? 0 : input.airBrake;
+    this.input.airBrake = servicing ? 1 : locked ? 0 : input.airBrake;
 
     if (this.race !== null) {
       // 就地把 this.input 量化成回放精度 —— 物理这一帧吃到的和录下来的必须是
@@ -547,6 +570,57 @@ export class World {
       groups.push(this.ghost.craft.group);
     }
     return groups;
+  }
+
+  /** 给 HUD 的进站状态。窄接口,HUD 不该知道状态机长什么样。 */
+  get pitStatus(): PitStatus {
+    const box = this.pitBox;
+    return {
+      phase: this.pit.phase,
+      remaining: this.pit.remaining,
+      inside:
+        box !== null && insidePitBox(box, this.vehicle.arc, this.vehicle.lateral),
+    };
+  }
+
+  /**
+   * 推进玩家的进站状态。返回**这一帧是否在作业中**(要锁输入 + 踩住刹车)。
+   *
+   * 作业做完的那一刻才真的加油/换胎/修车 —— 不是一进站就瞬间恢复。时间代价
+   * 和收益必须绑在一起,否则「进站」就变成一个没有取舍的免费按钮。
+   */
+  private updatePit(dt: number): boolean {
+    const box = this.pitBox;
+    const track = this.track;
+    if (box === null || track === null) {
+      return false;
+    }
+    const session = this.session;
+    const inside = insidePitBox(box, this.vehicle.arc, this.vehicle.lateral);
+    const busy = this.pit.update(dt, inside, this.vehicle.groundSpeed, () => {
+      // 加到「还剩几圈 + 余量」,不一律加满 —— 加满等于白背几十公斤出去。
+      const done = this.standings?.rowOf('player')?.laps ?? 0;
+      const left = Math.max(0, (session?.totalLaps ?? RACE_FORMAT.lapCount) - done);
+      const wanted = raceFuelLitres(left + PIT.refuelReserveLaps, track.totalLength);
+      return planService(this.vehicle.fuel, this.vehicle.condition, wanted);
+    });
+
+    if (!busy && this.pit.phase === 'released' && this.pit.service !== null) {
+      const service = this.pit.service;
+      if (service.refuelLitres > 0) {
+        this.vehicle.fuel.refill(this.vehicle.fuel.litres + service.refuelLitres);
+      }
+      if (service.changeTires) {
+        this.vehicle.condition.tireWear = 0;
+      }
+      if (service.repair) {
+        this.vehicle.condition.damage = 0;
+      }
+      // 停了十几秒,刹车当然也凉了。
+      this.vehicle.condition.brakeHeat = 0;
+      this.pit.service = null;
+    }
+    return busy;
   }
 
   /**

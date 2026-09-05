@@ -585,3 +585,28 @@ body {
 .hud-track-state.is-damp {
   color: rgb(120 200 255 / 85%);
 }
+
+/*
+ * 进站提示。画面中央偏下 —— 这是需要**立刻看到**的信息,和右下角那两条
+ * "偶尔瞄一眼"的不是一个量级,所以位置和字号都往上提一档。
+ */
+.hud-pit-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  padding: 8px 18px;
+  border-radius: 6px;
+  background: rgb(12 18 26 / 72%);
+  border: 1px solid rgb(120 190 255 / 45%);
+  color: rgb(190 225 255 / 95%);
+  font: 600 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+
+.hud-pit-banner.is-working {
+  border-color: rgb(255 200 120 / 60%);
+  color: rgb(255 220 170 / 95%);
+}

@@ -246,6 +246,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
         world.standings?.rows.length,
         world.session,
         world.vehicle.fuel.fraction,
+        world.pitStatus,
       );
       /*
        * 动态模糊的扩张焦点 = **速度方向在画面上的投影**,每帧现算。
