@@ -2,7 +2,7 @@ import { Matrix4, Quaternion, Vector3 } from 'three';
 import type { InputFrame } from '../core/input';
 import { clamp, damp } from '../core/mathx';
 import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
-import { type BodyState, type Physics, createBodyState } from './physics';
+import { type BodyState, type ChassisSpec, type Physics, createBodyState } from './physics';
 import { type TireForce, type TireState, tireForce } from './tire';
 import {
   appliedSlot,
@@ -14,6 +14,7 @@ import {
   wheelSlot,
 } from './diagnostics';
 import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
+import { FuelTank } from './fuel';
 import { CarCondition } from './condition';
 import { Gearbox } from './gearbox';
 
@@ -236,6 +237,7 @@ export class Vehicle {
   readonly gearbox = new Gearbox();
   /** `applyForces` 存下的刹车输入,给 `readState` 里的车况更新用。 */
   private lastBrakeInput = 0;
+  private lastThrottleInput = 0;
   /**
    * 气动阻力缩放系数(1 = 无遮挡的干净空气)。跟在别人尾流里时由 `World`
    * 每帧写低,见 `tuning.ts` 的 `DRAFT`。
@@ -252,18 +254,30 @@ export class Vehicle {
   private readonly state: BodyState = createBodyState();
   private readonly hit: GroundHit = createGroundHit();
   private readonly wheels: Wheel[];
+  private readonly chassisSpec: ChassisSpec;
+  /** 上一次写进物理的总质量,用来避免每帧都去动刚体。 */
+  private appliedMass = 0;
+
+  /**
+   * 油箱(B3)。**燃油是会变轻的配重**,所以它不只是个读数 —— `syncMass()`
+   * 每步把「空车 + 油」的质量写回刚体,悬挂载荷、加速、刹车、过弯全都跟着走。
+   */
+  readonly fuel = new FuelTank();
 
   constructor(field: GroundQuery, physics: Physics) {
     this.field = field;
     this.physics = physics;
-    this.body = physics.createChassis({
+    this.chassisSpec = {
       mass: CAR.mass,
       width: CAR.bodyWidth,
       height: CAR.bodyHeight,
       length: CAR.bodyLength,
       restitution: CAR.collisionRestitution,
       friction: CAR.collisionFriction,
-    });
+    };
+    this.body = physics.createChassis(this.chassisSpec);
+    // 起步就是带着油的,质量得先算进去,否则第一帧的悬挂静态压缩会偏。
+    this.syncMass();
 
     const halfBase = CAR.wheelBase / 2;
     const halfTrack = CAR.trackWidth / 2;
@@ -417,6 +431,7 @@ export class Vehicle {
   applyForces(input: InputFrame, dt: number): void {
     // 车况要用到刹车输入,而 readState() 拿不到 input,先存一份。
     this.lastBrakeInput = input.airBrake;
+    this.lastThrottleInput = input.throttle;
     // 先清掉上一步的力:Rapier 的 addForce 是持续力,不清会逐帧累加成指数爆炸。
     this.physics.resetForces(this.body);
     // 清空上一帧的遥测缓冲,免得「上一帧接地、这一帧离地」的轮子残留旧数据。
@@ -587,9 +602,14 @@ export class Vehicle {
      */
     const rearSpin = (Math.abs(this.wheels[2]?.spin ?? 0) + Math.abs(this.wheels[3]?.spin ?? 0)) / 2;
     const gearScale = this.gearbox.update(rearSpin, input.throttle, dt);
+    /*
+     * 没油了就一点驱动力都没有 —— 发动机不转了,不是"动力弱一点"。这也是
+     * 起步油量必须留余量(`FUEL.reserveLaps`)的原因。
+     */
+    const fuelScale = this.fuel.dry ? 0 : 1;
     const throttleTorque =
-      gearScale * CAR.driveTorque * this.condition.powerScale -
-      input.reverse * CAR.driveTorque * CAR.reverseTorqueScale * this.condition.powerScale;
+      gearScale * CAR.driveTorque * this.condition.powerScale * fuelScale -
+      input.reverse * CAR.driveTorque * CAR.reverseTorqueScale * this.condition.powerScale * fuelScale;
 
     // 驱动/差速计算: 后轴左右轮耦合求解
     const ctx2 = contexts[2]!;
@@ -870,6 +890,24 @@ export class Vehicle {
   }
 
   /**
+   * 把「空车 + 燃油」的质量写回刚体。
+   *
+   * **只在变化超过阈值时才写**,不是每帧都写:一帧烧掉的油是克级的,而
+   * `setAdditionalMassProperties` 会重算刚体的质量与惯性张量。每帧动它一遍
+   * 既浪费,又是在往求解器里塞一个每帧都在抖的参数 —— 而「同 seed 逐帧复现」
+   * 是这个项目的地基(CLAUDE.md 的无头验证契约)。50 克的台阶在 1200 公斤上
+   * 是 4e-5,手感上不可能察觉,却把写入次数降到几十次。
+   */
+  private syncMass(): void {
+    const total = CAR.mass + this.fuel.massKg;
+    if (Math.abs(total - this.appliedMass) < VEHICLE.massUpdateStepKg) {
+      return;
+    }
+    this.appliedMass = total;
+    this.physics.setChassisMass(this.body, this.chassisSpec, total);
+  }
+
+  /**
    * `physics.step()` 之后读回刚体状态、解墙碰撞、写遥测帧。**调用方必须先
    * 调过 `applyForces()` 和一次 `physics.step()`,否则读到的是上一步的状态。**
    * 见 `update()`/`applyForces()` 的类注释。
@@ -884,6 +922,8 @@ export class Vehicle {
      * 而那个值正是墙解算算出来的。磨损/热衰用的是刚写回的饱和度与车速。
      */
     this.condition.update(dt, this.gripSaturation, this.groundSpeed, this.lastBrakeInput);
+    this.fuel.burn(dt, this.lastThrottleInput, this.gearbox.rpm);
+    this.syncMass();
     this.condition.addImpact(this.wallNormalSpeed);
 
     // 诊断探针的整车帧采样(read 之后才算数),只复写预分配槽,见 diagnostics.ts。

@@ -545,3 +545,27 @@ body {
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
+
+/*
+ * 油量条。挂在时速表下面 —— 它是"偶尔瞄一眼"的信息,不该和圈速/名次争同一级
+ * 的注意力,所以做得很细、很淡,只有快见底时才变红跳出来。
+ */
+.hud-fuel-bar {
+  margin-top: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 14%);
+  overflow: hidden;
+}
+
+.hud-fuel-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 2px;
+  background: rgb(140 210 255 / 75%);
+  transition: width 240ms linear, background-color 200ms ease;
+}
+
+.hud-fuel-bar.is-low .hud-fuel-fill {
+  background: rgb(255 120 100 / 90%);
+}

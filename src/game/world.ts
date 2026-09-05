@@ -16,6 +16,7 @@ import { Atmosphere } from '../gfx/atmosphere';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { createTrackMesh } from '../gfx/trackMesh';
 import { clamp, normalize01 } from '../core/mathx';
+import { raceFuelLitres } from './fuel';
 import { RacingPilot } from './racingPilot';
 import { TrackRecovery } from './trackRecovery';
 import { RaceSession } from './raceSession';
@@ -29,7 +30,7 @@ import { Physics } from './physics';
 import { Race } from './race';
 import { encodeGhostInput, saveRecord } from './records';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
-import { CRAFT, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED } from './tuning';
+import { CRAFT, FUEL, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED } from './tuning';
 import { applyDraft } from './draft';
 import { Vehicle } from './vehicle';
 
@@ -327,8 +328,19 @@ export class World {
     // 一局重开才换新车:出界回收调的是 vehicle.reset(),那个不清车况
     // ——把车扶回赛道是回收,不是修车(见 condition.ts 的类注释)。
     this.vehicle.condition.reset();
+    /*
+     * 起步油量按**赛程 + 余量**算,不是灌满一箱(见 `fuel.ts`)。所以改
+     * `RACE_FORMAT.lapCount` 或者换一条更长的赛道,加油量会自己跟着变。
+     * `flat` 那块没有赛道的平地拿不到长度,退回 `FUEL.startLitres`。
+     */
+    const startFuel =
+      this.track === null
+        ? FUEL.startLitres
+        : raceFuelLitres(RACE_FORMAT.lapCount, this.track.totalLength);
+    this.vehicle.fuel.reset(startFuel);
     for (const rival of this.rivals) {
       rival.condition.reset();
+      rival.fuel.reset(startFuel);
     }
     for (const recovery of this.rivalRecoveries) {
       recovery.reset();

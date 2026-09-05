@@ -1,3 +1,4 @@
+import { clamp } from '../core/mathx';
 import type { CuratedTrack } from './curatedTracks';
 import { MINIMAP_TUNING } from './tuning';
 import type { Race } from './race';
@@ -27,11 +28,22 @@ interface VectorLike {
  * - 每帧更新执行严格的脏检查(数值未变不触碰 DOM)
  * - 格式化采用整数 centiseconds 比对,每帧零 GC 内存分配
  */
+/**
+ * 油量条变红的阈值(百分比,分母是这趟加的油)。
+ *
+ * 起步按「赛程 + `FUEL.reserveLaps` 圈」加油,所以余量本身约占 25%。取 20%:
+ * 刚吃进余量就提醒,而不是等到真的快趴窝。
+ */
+const HUD_FUEL_LOW_PERCENT = 20;
+
 export class Hud {
   private readonly root: HTMLDivElement;
 
   // 速度组件
   private readonly speedNum: HTMLSpanElement;
+  private readonly fuelBar: HTMLDivElement;
+  private readonly fuelFill: HTMLDivElement;
+  private lastShownFuel = -1;
 
   // 计时与 Delta 组件
   private readonly timingCard: HTMLDivElement;
@@ -202,6 +214,20 @@ export class Hud {
     speedValue.append(this.speedNum, speedUnit);
     speedCard.append(speedValue);
 
+    /*
+     * 油量条。挂在时速表下面而不是单开一张卡:它是"偶尔瞄一眼"的信息,
+     * 不该和圈速/名次争同一级的注意力。
+     *
+     * 用条不用数字:剩几升对玩家没有意义(他不知道一圈要几升),"还剩多少
+     * 格、够不够跑完"才有。快见底时变红,那一下才需要真的看清楚。
+     */
+    this.fuelBar = document.createElement('div');
+    this.fuelBar.className = 'hud-fuel-bar';
+    this.fuelFill = document.createElement('div');
+    this.fuelFill.className = 'hud-fuel-fill';
+    this.fuelBar.append(this.fuelFill);
+    speedCard.append(this.fuelBar);
+
     // ── 4. 左下角操作提示与构建号 ──
     const infoCard = document.createElement('div');
     infoCard.className = 'hud-info-card';
@@ -255,12 +281,23 @@ export class Hud {
     standing?: StandingRow | null,
     fieldSize?: number,
     session?: RaceSession | null,
+    fuelFraction?: number,
   ): void {
     // 1. 速度更新
     const kmh = Math.round(metersPerSecond * 3.6);
     if (kmh !== this.lastShownKmh) {
       this.lastShownKmh = kmh;
       this.speedNum.textContent = String(kmh);
+    }
+
+    // 1b. 油量。按百分点去重 —— 每帧写一次 style 是白白让浏览器重排。
+    if (fuelFraction !== undefined) {
+      const percent = Math.round(clamp(fuelFraction, 0, 1) * 100);
+      if (percent !== this.lastShownFuel) {
+        this.lastShownFuel = percent;
+        this.fuelFill.style.width = `${percent}%`;
+        this.fuelBar.classList.toggle('is-low', percent <= HUD_FUEL_LOW_PERCENT);
+      }
     }
 
     // 2. 计时与分段更新

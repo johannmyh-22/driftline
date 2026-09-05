@@ -113,6 +113,17 @@ export class Physics {
    * 的一部分,不该是几何体的副产物。所以下面挂的车间碰撞体密度设成 0,
    * 只提供形状和碰撞响应,不再叠加一份引擎推出来的质量。
    */
+  /**
+   * 改车身质量(燃油烧掉之后车会变轻,见 `game/fuel.ts`)。
+   *
+   * **转动惯量必须跟着一起改**,不能只改质量:惯量是按质量 × 尺寸算的,
+   * 只改质量会让车的转动响应和平动质量对不上 —— 表现是"车轻了但转起来还是
+   * 那么沉",而且随着油量变化越来越离谱。
+   */
+  setChassisMass(body: RAPIER.RigidBody, spec: ChassisSpec, mass: number): void {
+    setChassisMass(body, spec, mass);
+  }
+
   createChassis(spec: ChassisSpec): RAPIER.RigidBody {
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
@@ -121,19 +132,7 @@ export class Physics {
     );
 
     const { mass, width, height, length, restitution, friction } = spec;
-    const k = mass / 12;
-    body.setAdditionalMassProperties(
-      mass,
-      { x: 0, y: 0, z: 0 },
-      {
-        // 绕 X = 俯仰,绕 Y = 偏航,绕 Z = 侧倾。
-        x: k * (height * height + length * length),
-        y: k * (width * width + length * length),
-        z: k * (width * width + height * height),
-      },
-      { x: 0, y: 0, z: 0, w: 1 },
-      true,
-    );
+    setChassisMass(body, spec, mass);
 
     this.world.createCollider(
       RAPIER.ColliderDesc.cuboid(width / 2, height / 2, length / 2)
@@ -230,4 +229,22 @@ export class Physics {
   dispose(): void {
     this.world.free();
   }
+}
+
+/** 质量 + 转动惯量一起设。创建和后续改质量走同一条路,免得两处算法跑偏。 */
+function setChassisMass(body: RAPIER.RigidBody, spec: ChassisSpec, mass: number): void {
+  const { width, height, length } = spec;
+  const k = mass / 12;
+  body.setAdditionalMassProperties(
+    mass,
+    { x: 0, y: 0, z: 0 },
+    {
+      // 绕 X = 俯仰,绕 Y = 偏航,绕 Z = 侧倾。
+      x: k * (height * height + length * length),
+      y: k * (width * width + length * length),
+      z: k * (width * width + height * height),
+    },
+    { x: 0, y: 0, z: 0, w: 1 },
+    true,
+  );
 }

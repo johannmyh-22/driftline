@@ -238,14 +238,15 @@ async function boot(container: HTMLDivElement): Promise<void> {
       }
       world.present(alpha);
       readout?.update(
-      world.vehicle.groundSpeed,
-      world.race,
-      world.vehicle.position,
-      world.vehicle.yaw,
-      world.standings?.rowOf('player'),
-      world.standings?.rows.length,
-      world.session,
-    );
+        world.vehicle.groundSpeed,
+        world.race,
+        world.vehicle.position,
+        world.vehicle.yaw,
+        world.standings?.rowOf('player'),
+        world.standings?.rows.length,
+        world.session,
+        world.vehicle.fuel.fraction,
+      );
       /*
        * 动态模糊的扩张焦点 = **速度方向在画面上的投影**,每帧现算。
        *
