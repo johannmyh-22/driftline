@@ -1,5 +1,6 @@
 import {
   type Camera,
+  Color,
   HalfFloatType,
   type Material,
   Matrix4,
@@ -162,6 +163,7 @@ export class VelocityBuffer {
   private readonly previous = new WeakMap<Object3D, Matrix4>();
   private readonly marked = new Set<Object3D>();
   private readonly savedViewport = new Vector4();
+  private readonly savedClearColor = new Color();
 
   constructor(width = 1, height = 1) {
     this.target = new WebGLRenderTarget(width, height, {
@@ -188,12 +190,26 @@ export class VelocityBuffer {
        * 也会被调到。
        */
       mesh.onBeforeRender = (_renderer, _scene, _camera, _geometry, material: Material): void => {
-        const uniforms = (material as ShaderMaterial).uniforms;
-        const slot = uniforms?.['prevModelMatrix'];
+        const shader = material as ShaderMaterial;
+        const slot = shader.uniforms?.['prevModelMatrix'];
         if (slot === undefined) {
           return;
         }
         (slot.value as Matrix4).copy(this.previous.get(mesh) ?? mesh.matrixWorld);
+        /*
+         * **这一行是整件事能不能成立的关键。**
+         *
+         * `overrideMaterial` 让全场共用同一份材质,而 three 会按材质 id 缓存
+         * "程序已经刷过了":同一份材质连着画很多个物体时,后面那些**根本不会
+         * 重新上传材质的 uniform**。于是上面那次 copy 只对第一个网格生效,
+         * 其余几十个网格全都拿着第一个的上一帧矩阵在算速度。
+         *
+         * 症状很有欺骗性:速度缓冲**看起来是work的**(轮子确实糊了),只是
+         * 幅度不对。是量出来才发现的 —— 把快门从 0.7 拉到 2.0、位移上限从
+         * 0.03 拉到 0.09,帧间差几乎没变,说明幅度被别的东西钉住了,不是参数
+         * 不够大。
+         */
+        shader.uniformsNeedUpdate = true;
       };
     });
   }
@@ -211,6 +227,8 @@ export class VelocityBuffer {
     const savedOverride = scene.overrideMaterial;
     const savedMask = camera.layers.mask;
     renderer.getViewport(this.savedViewport);
+    renderer.getClearColor(this.savedClearColor);
+    const savedClearAlpha = renderer.getClearAlpha();
 
     camera.layers.set(MOVING_LAYER);
     scene.overrideMaterial = this.material;
@@ -224,6 +242,8 @@ export class VelocityBuffer {
     camera.layers.mask = savedMask;
     renderer.setRenderTarget(savedTarget);
     renderer.setViewport(this.savedViewport);
+    // 清屏色一定要还回去:后面那条后处理链里有人会用它清背景。
+    renderer.setClearColor(this.savedClearColor, savedClearAlpha);
 
     // 这一帧画完才更新「上一帧」,否则同一帧里前后两个位置会是同一个。
     for (const mesh of this.marked) {

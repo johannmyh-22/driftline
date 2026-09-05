@@ -224,15 +224,27 @@ export class Postprocess {
    * (uv,0..1),由 `main.ts` 用相机把它投出来 —— 钉死在屏幕中心的话过弯时
    * 模糊方向会明显不对(推导见 `gfx/motionBlur.ts`)。
    *
+   * `alignment` 是**速度方向和相机朝向的重合度**(0..1),乘在强度上。
+   *
+   * **这一项是拍完截图才补上的,不补的话固定机位会糊成一团。** 径向模糊的
+   * 推导前提是「相机沿自己的视线方向前进」,那时光流才是从扩张焦点发散的
+   * 径向场。而 `side`/`front`/`top` 这几个机位是**横着跟拍**的:扩张焦点跑到
+   * 画面外很远的地方,着色器里 `位移 ∝ 离焦点的距离` 那条就彻底失效,整幅
+   * 画面被拉出一串重影 —— 实测 `side` 机位 53 m/s 时车身完全糊掉。
+   *
+   * 玩家也够得着这个坑:鼠标把视角转到侧面时,前提同样不成立。用重合度当
+   * 闸门,前提不成立时自然衰减到 0,不需要判断"现在是哪个机位"。
+   *
    * **强度为 0 时整级 pass 直接关掉**,而不是喂一个 0 进去:后者照样要跑一遍
    * 全屏采样,而慢速行驶和停车恰恰是最不该花这笔钱的时候。
    */
-  setMotionBlur(speed01: number, focusX: number, focusY: number): void {
+  setMotionBlur(speed01: number, focusX: number, focusY: number, alignment = 1): void {
     const pass = this.motion;
     if (pass === null || !this.effectsOn) {
       return;
     }
-    const strength = motionBlurStrength(speed01, this.reducedMotion);
+    const strength =
+      motionBlurStrength(speed01, this.reducedMotion) * Math.min(1, Math.max(0, alignment));
     pass.enabled = strength > 0;
     if (!pass.enabled) {
       return;

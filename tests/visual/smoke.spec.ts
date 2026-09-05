@@ -498,6 +498,84 @@ test('首屏不等车辆模型:先画出程序化造型,模型到货后自己换
   expect(problems).toEqual([]);
 });
 
+test('逐物体运动模糊真的压住了轮子的频闪', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  /*
+   * **这条是量出来的验收,不是看图。**
+   *
+   * 频闪的本质是轮辐每帧跳到一个不同的角度(马车轮效应),所以「轮子那一小块
+   * 的帧间平均像素差」就是它的直接度量。开与关跑同一段路、同一批帧,比两者。
+   *
+   * 为什么非要有这条:实现里踩了一个**看起来是work的**坑 —— `overrideMaterial`
+   * 让全场共用一份材质,而 three 会跳过重复上传同一材质的 uniform,于是每个
+   * 网格的"上一帧矩阵"其实全是第一个网格的。画面上轮子照样糊了,截图完全看
+   * 不出问题;是把快门从 0.7 拉到 2.0 发现帧间差纹丝不动才暴露的。
+   * 这类"幅度错了但看着对"的 bug,只有数值拦得住。
+   */
+  const wheelFlicker = async (extra: string): Promise<number> => {
+    await page.goto(`${BASE_URL}?test=1&seed=42${extra}`, { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+    await page.evaluate(async () => {
+      await window.__DRIFTLINE_TEST__!.ready;
+    });
+    return page.evaluate(() => {
+      const api = window.__DRIFTLINE_TEST__!;
+      api.setCamera('side');
+      api.setInput({ throttle: 1, steer: 0, airBrake: 0 });
+      api.advance(420);
+      /*
+       * **多推一帧再开始量。** 速度缓冲要有"上一帧"才算得出速度,而 420 帧的
+       * 预热里 `advance()` 只在最后渲染一次 —— 那一帧没有历史,所以完全不糊。
+       * 拿它当基准帧的话,第一个差值量到的是"从不糊跳到糊"(实测 29/255),
+       * 一个样本就把 5 帧的平均值整个抬起来,结论直接反过来。
+       */
+      api.advance(1);
+
+      const source = document.querySelector('canvas') as HTMLCanvasElement;
+      const scratch = document.createElement('canvas');
+      // 只框住后轮。框大了会被路面流过和车身边缘淹掉,量的就不是频闪而是
+      // "整个画面在动"。坐标是从 side 机位的截图上量的。
+      const rx = 688;
+      const ry = 352;
+      const rw = 34;
+      const rh = 34;
+      scratch.width = rw;
+      scratch.height = rh;
+      const ctx = scratch.getContext('2d')!;
+      ctx.drawImage(source, rx, ry, rw, rh, 0, 0, rw, rh);
+      let previous = ctx.getImageData(0, 0, rw, rh).data;
+      let total = 0;
+      const frames = 5;
+      for (let i = 0; i < frames; i++) {
+        api.advance(1);
+        ctx.clearRect(0, 0, rw, rh);
+        ctx.drawImage(source, rx, ry, rw, rh, 0, 0, rw, rh);
+        const current = ctx.getImageData(0, 0, rw, rh).data;
+        let sum = 0;
+        for (let p = 0; p < current.length; p += 4) {
+          sum +=
+            Math.abs((current[p] ?? 0) - (previous[p] ?? 0)) +
+            Math.abs((current[p + 1] ?? 0) - (previous[p + 1] ?? 0)) +
+            Math.abs((current[p + 2] ?? 0) - (previous[p + 2] ?? 0));
+        }
+        total += sum / ((current.length / 4) * 3);
+        previous = current;
+      }
+      return total / frames;
+    });
+  };
+
+  // 关掉这一级当基线,其余后处理保持一致 —— 只有一个变量在动。
+  const off = await wheelFlicker('&post=motion,bloom,smaa,vignette');
+  const on = await wheelFlicker('');
+
+  // 实测约 12.0 → 7.2(降四成)。阈值留足余量:这里要拦的是"完全没生效"
+  // 和上面那种"幅度被钉住"(当时只降两成),不是把某个具体数字钉死。
+  expect(on, `开=${on.toFixed(2)} 关=${off.toFixed(2)}`).toBeLessThan(off * 0.85);
+  expect(problems).toEqual([]);
+});
+
 test.describe('触屏控件', () => {
   // 无头 Chromium 默认 maxTouchPoints=0,不开这个连 pointer 事件都不是触摸。
   test.use({ hasTouch: true });

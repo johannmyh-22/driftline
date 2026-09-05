@@ -260,6 +260,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
       const speed = Math.hypot(velocity.x, velocity.y, velocity.z);
       let focusX = 0.5;
       let focusY = 0.5;
+      let alignment = 0;
       if (speed > 0.5) {
         focusPoint
           .copy(velocity)
@@ -270,9 +271,21 @@ async function boot(container: HTMLDivElement): Promise<void> {
         // 把整幅画都算成"离焦点很远"。
         focusX = clamp(focusPoint.x * 0.5 + 0.5, -0.5, 1.5);
         focusY = clamp(focusPoint.y * 0.5 + 0.5, -0.5, 1.5);
+        /*
+         * 径向模糊只在「相机沿自己的视线方向前进」时才成立(那时光流才是从
+         * 扩张焦点发散的径向场)。横着跟拍的固定机位、以及玩家用鼠标把视角
+         * 转到侧面时,这个前提不成立 —— 用重合度当闸门自然衰减掉,不去判断
+         * "现在是哪个机位"。理由与实测见 `Postprocess.setMotionBlur()`。
+         */
+        cameraForward.set(0, 0, -1).applyQuaternion(world.camera.quaternion);
+        alignment = Math.max(
+          0,
+          (cameraForward.x * velocity.x + cameraForward.y * velocity.y + cameraForward.z * velocity.z) /
+            speed,
+        );
       }
       const speed01 = normalize01(speed, 0, REFERENCE_TOP_SPEED);
-      post.setMotionBlur(speed01, focusX, focusY);
+      post.setMotionBlur(speed01, focusX, focusY, alignment);
       post.setObjectMotionBlur(speed01);
       post.render(world.camera);
       touch?.present();
@@ -315,6 +328,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
 
   // 每帧复用,不在渲染路径上分配对象。
   const focusPoint = new Vector3();
+  const cameraForward = new Vector3();
 
   // 模型到货就换车壳。`upgradeCrafts()` 自己会判 `isCraftModelReady()`,
   // 载入失败时是空操作,不需要在这里再判一次。
