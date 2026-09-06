@@ -108,13 +108,15 @@ export class Heightfield implements GroundQuery {
 
     // 平地场景没有赛道概念:整块地都算「路面」,没有出界也没有弧长。
     out.onTrack = true;
+    out.inPit = false;
     out.lateral = 0;
     out.arc = 0;
     out.segment = 0;
     out.tangentX = 0;
     out.tangentZ = 1;
     // 平地场景没有护栏,车爱开多远开多远。
-    out.wallDistance = Number.POSITIVE_INFINITY;
+    out.wallLeft = Number.NEGATIVE_INFINITY;
+    out.wallRight = Number.POSITIVE_INFINITY;
   }
 
   /**

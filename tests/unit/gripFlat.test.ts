@@ -33,7 +33,8 @@ const flatGround: GroundQuery = {
     out.onTrack = true;
     out.tangentX = 0;
     out.tangentZ = 1;
-    out.wallDistance = Number.POSITIVE_INFINITY;
+    out.wallLeft = Number.NEGATIVE_INFINITY;
+    out.wallRight = Number.POSITIVE_INFINITY;
   },
 };
 

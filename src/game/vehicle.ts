@@ -15,6 +15,7 @@ import {
 } from './diagnostics';
 import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
 import { FuelTank } from './fuel';
+import { pitLimiterScale } from './pitLane';
 import {
   NEUTRAL_WEATHER,
   type Weather,
@@ -195,6 +196,14 @@ export class Vehicle {
   /** 车身原点到地面的高度。 */
   clearance = 0;
   onTrack = true;
+  /**
+   * 车现在踩的是不是维修道的路面。
+   *
+   * 限速器读的就是它(见 `applyForces()` 里的 `pitLimiterScale`)。用**上一步
+   * 读回来的**状态而不是这一步四个轮子采样里的最后一个:后者取决于轮子的
+   * 遍历顺序,车骑在维修道边界上时会一帧一个样。
+   */
+  inPit = false;
   lateral = 0;
   arc = 0;
   /** 侧向抓地力的使用率 0..1。到 1 就是滑出去了,给音效和 HUD 用。 */
@@ -422,6 +431,7 @@ export class Vehicle {
     this.grounded = true;
     this.clearance = rideHeight;
     this.onTrack = this.hit.onTrack;
+    this.inPit = this.hit.inPit;
     this.lateral = this.hit.lateral;
     this.arc = this.hit.arc;
 
@@ -645,9 +655,19 @@ export class Vehicle {
      * 起步油量必须留余量(`FUEL.reserveLaps`)的原因。
      */
     const fuelScale = this.fuel.dry ? 0 : 1;
+    /*
+     * 维修道限速器。在维修道路面上、超过限速就切驱动力矩 —— 真机上那颗按钮
+     * 做的就是这件事(切油/切点火),**它不替你刹车**,所以以赛车速度冲进来
+     * 照样会冲过车位。
+     *
+     * 挂在 `Vehicle` 而不是 `World` 里改 `input`:改 input 会把录进幽灵的那份
+     * 也改掉,同一段输入在有/没有维修道时重放出两条线。
+     */
+    const limiterScale = this.inPit ? pitLimiterScale(this.groundSpeed) : 1;
     const throttleTorque =
-      gearScale * CAR.driveTorque * this.condition.powerScale * fuelScale -
-      input.reverse * CAR.driveTorque * CAR.reverseTorqueScale * this.condition.powerScale * fuelScale;
+      limiterScale *
+      (gearScale * CAR.driveTorque * this.condition.powerScale * fuelScale -
+        input.reverse * CAR.driveTorque * CAR.reverseTorqueScale * this.condition.powerScale * fuelScale);
 
     // 驱动/差速计算: 后轴左右轮耦合求解
     const ctx2 = contexts[2]!;
@@ -1058,6 +1078,7 @@ export class Vehicle {
     this.field.sample(s.x, s.z, this.hit);
     this.clearance = s.y - this.hit.height;
     this.onTrack = this.hit.onTrack;
+    this.inPit = this.hit.inPit;
     this.lateral = this.hit.lateral;
     this.arc = this.hit.arc;
 
@@ -1067,34 +1088,47 @@ export class Vehicle {
 
   /**
    * 护墙。仍然用解析判定 + 冲量,没有交给引擎的碰撞体 ——
-   * 墙是沿赛道条带外缘生成的,`wallDistance` 已经是精确的横向距离,
+   * 墙是沿赛道条带(以及维修道)外缘生成的,走廊边界已经是精确的横向距离,
    * 再造一套三角网碰撞体等于引入第二个面,正是不变量 1 要避免的事。
+   *
+   * **走廊是有符号的上下界,不是一个对称距离。** 维修道的两道墙都在正的一侧
+   * (`[条带外缘, 条带外缘+道宽]`),内侧那道要把车往**外**推 —— 用
+   * `Math.abs(lateral)` 那一版根本表达不出来。赛道段的 `wallLeft/wallRight`
+   * 就是 ∓外缘半宽,所以这一段的行为和改之前**逐位相同**。
    */
   private resolveWall(dt: number): void {
-    const limit = this.hit.wallDistance - CAR.halfWidth;
-    if (!Number.isFinite(limit)) {
-      this.wallImpact = 0;
-      this.wallNormalSpeed = 0;
-      this.wallTangentSpeed = 0;
-      return;
-    }
-
     const lateral = this.hit.lateral;
-    if (
-      !Number.isFinite(lateral) ||
-      Math.abs(lateral) <= limit ||
-      Math.abs(lateral) > this.hit.wallDistance + 3.0
-    ) {
+    if (!Number.isFinite(lateral)) {
       this.wallImpact = 0;
       this.wallNormalSpeed = 0;
       this.wallTangentSpeed = 0;
       return;
     }
 
-    // scratch 指向内侧 (向中心线)。Course.sample 中 lateral > 0 为右侧,故向内为 (-right)
-    const outward = Math.sign(lateral);
+    // 撞的是哪一道:超出右界就是右墙(往左推),低于左界就是左墙(往右推)。
+    const highLimit = this.hit.wallRight - CAR.halfWidth;
+    const lowLimit = this.hit.wallLeft + CAR.halfWidth;
+    let wall = 0;
+    let overshootRaw = 0;
+    if (lateral > highLimit && lateral <= this.hit.wallRight + 3.0) {
+      wall = 1;
+      overshootRaw = lateral - highLimit;
+    } else if (lateral < lowLimit && lateral >= this.hit.wallLeft - 3.0) {
+      wall = -1;
+      overshootRaw = lowLimit - lateral;
+    }
+
+    if (wall === 0) {
+      this.wallImpact = 0;
+      this.wallNormalSpeed = 0;
+      this.wallTangentSpeed = 0;
+      return;
+    }
+
+    // scratch 指向走廊内侧。Course.sample 中 lateral > 0 为右侧,故右墙向内为 (-right)。
+    const outward = wall;
     scratch.set(this.hit.tangentZ * outward, 0, -this.hit.tangentX * outward);
-    const overshoot = Math.min(1.5, Math.abs(lateral) - limit);
+    const overshoot = Math.min(1.5, overshootRaw);
 
     const s = this.state;
     this.position.addScaledVector(scratch, overshoot);
@@ -1148,6 +1182,7 @@ export class Vehicle {
     this.field.sample(this.position.x, this.position.z, this.hit);
     this.lateral = this.hit.lateral;
     this.onTrack = this.hit.onTrack;
+    this.inPit = this.hit.inPit;
 
     const speed = this.velocity.length() || 1;
     this.wallImpact = Math.min(1, -inwardSpeed / speed) * -inwardSpeed;

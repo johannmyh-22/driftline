@@ -318,6 +318,45 @@ test('?course=flat 切回 M1 那块平地', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+test('维修道在浏览器里是一条真的路,车停得进车位', async ({ page }) => {
+  /*
+   * `?pit=1` 把车摆进车位。这条测试守的是**接线**,不是几何 ——
+   * 几何、限速器、圈数判定都在 tests/unit/pitLane.test.ts 里量过了。
+   *
+   * 但有一类错单测拦不住:维修道在浏览器里根本没铺出来(`World` 没把
+   * `PitLane` 传给 `Course` / `createTrackMesh`),那时候几何全对、单测全绿,
+   * 而玩家开过去掉进地形里。这条断言 `inPit` 和 `onTrack` 同时为真,
+   * 而且画面上确实有东西。
+   */
+  const problems = watchForProblems(page);
+
+  await page.goto(`${BASE_URL}?test=1&seed=${SEED}&pit=1`, { waitUntil: 'load' });
+  await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+  const snapshot = await page.evaluate(async () => {
+    const api = window.__DRIFTLINE_TEST__;
+    if (api === undefined) {
+      throw new Error('__DRIFTLINE_TEST__ 未挂载');
+    }
+    await api.ready;
+    // 停着别动:进站的前提就是停稳,踩油门反而会开出车位。
+    api.setInput({ throttle: 0 });
+    api.advance(240);
+    return api.snapshot();
+  });
+  const stats = await shoot(page, 'smoke-pit.png');
+
+  // 维修道是合法路面 —— 不是的话圈不算数,人还会被出界回收传送走。
+  expect(snapshot['inPit']).toBe(1);
+  expect(snapshot['onTrack']).toBe(1);
+  // 车位在赛道外侧,横向一定超过条带外缘(半宽 7.5 + 路肩 7)。
+  expect(snapshot['lateral'] ?? 0).toBeGreaterThan(14.5);
+  // 停稳了就开始作业,而且**只作业一次** —— 作业完直接回 idle 会无限循环。
+  expect(snapshot['pitStops']).toBe(1);
+  expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+  expect(stats.lowerMeanLuminance).toBeGreaterThan(MIN_GROUND_LUMINANCE);
+  expect(problems).toEqual([]);
+});
+
 test('advance(60) 精确推进 60 帧', async ({ page }) => {
   const before = await driveScene(page, BASE_URL, { seed: SEED, frames: 30, camera: 'chase' });
 

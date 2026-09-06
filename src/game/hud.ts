@@ -1,6 +1,7 @@
 import { clamp } from '../core/mathx';
 import type { CuratedTrack } from './curatedTracks';
-import { MINIMAP_TUNING } from './tuning';
+import type { PitLane } from './pitLane';
+import { MINIMAP_TUNING, PIT } from './tuning';
 import type { Race } from './race';
 import type { TrackLayout, TrackSample } from './trackLayout';
 import type { StandingRow } from './standings';
@@ -11,7 +12,12 @@ import type { Weather } from './weather';
 export interface PitStatus {
   readonly phase: 'idle' | 'servicing' | 'released';
   readonly remaining: number;
+  /** 停在车位里(可以开始作业)。 */
   readonly inside: boolean;
+  /** 压在维修道路面上(限速区)。 */
+  readonly inLane: boolean;
+  /** 限速器正在切油 —— 车比限速快。 */
+  readonly limited: boolean;
 }
 
 interface VectorLike {
@@ -105,6 +111,8 @@ export class Hud {
     track: TrackLayout | null,
     race: Race | null,
     curated: CuratedTrack | null = null,
+    /** 维修道。传进来就在小地图上画出那条岔路,不传就只画赛道。 */
+    pitLane: PitLane | null = null,
   ) {
     this.root = document.createElement('div');
     this.root.id = 'readout';
@@ -199,7 +207,7 @@ export class Hud {
 
     if (track !== null && track.samples.length > 0) {
       this.hasMap = true;
-      const { svg, marker, centerX, centerZ, scale } = buildMinimapSvg(track.samples);
+      const { svg, marker, centerX, centerZ, scale } = buildMinimapSvg(track.samples, pitLane);
       this.minimapCard.append(svg);
       this.playerMarker = marker;
       this.trackCenterX = centerX;
@@ -343,14 +351,23 @@ export class Hud {
       }
     }
 
-    // 1c. 进站提示。按文本去重 —— 每帧改 DOM 是白白让浏览器重排。
+    /*
+     * 1c. 进站提示。按文本去重 —— 每帧改 DOM 是白白让浏览器重排。
+     *
+     * 「限速」这一条必须在「停车维修」**之前**判:进了维修道但还没减到限速
+     * 的时候,玩家要看到的是"你太快了",不是"可以停了"。
+     */
     if (pit !== undefined) {
       const text =
         pit.phase === 'servicing'
           ? `维修中 ${Math.ceil(pit.remaining)}s`
-          : pit.inside && pit.phase === 'idle'
-            ? '停车维修'
-            : '';
+          : pit.limited
+            ? `限速 ${Math.round(PIT.speedLimit * 3.6)}`
+            : pit.inside && pit.phase === 'idle'
+              ? '停车维修'
+              : pit.inLane
+                ? '维修道'
+                : '';
       if (text !== this.lastPitText) {
         this.lastPitText = text;
         this.pitBanner.textContent = text;
@@ -585,8 +602,8 @@ export function formatDelta(delta: number): string {
   return `${sign}${secs}.${h}s`;
 }
 
-/** 由赛道采样点程序化生成 SVG 小地图。 */
-function buildMinimapSvg(samples: readonly TrackSample[]): {
+/** 由赛道采样点程序化生成 SVG 小地图。`pit` 传进来就顺便画出维修道。 */
+function buildMinimapSvg(samples: readonly TrackSample[], pit: PitLane | null): {
   svg: SVGSVGElement;
   marker: SVGElement;
   centerX: number;
@@ -651,6 +668,29 @@ function buildMinimapSvg(samples: readonly TrackSample[]): {
   pathLine.setAttribute('stroke-linejoin', 'round');
   pathLine.setAttribute('stroke-linecap', 'round');
 
+  /*
+   * 维修道入口的标记点。
+   *
+   * **量过之后从"画一条岔路"改成"点一个标"**:小地图把一整圈赛道(跨度上千米)
+   * 压进 200 个单位,比例尺约 0.18 单位/米,而维修道离中心线只有 14.5~26.5 米
+   * —— 折算成 2.6~4.7 个单位,而赛道自己的描边就有 6 个单位宽。**那条岔路会
+   * 整个被压在赛道的线里面,画了等于没画。**
+   *
+   * 玩家在这张图上真正需要的信息只有一条:入口在哪儿。一个点解决,而且在
+   * 任何比例尺下都读得出来。
+   */
+  const pitMark = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  pitMark.setAttribute('class', 'hud-map-pit-entry');
+  if (pit !== null) {
+    const s = samples[pit.entryRow % samples.length];
+    if (s !== undefined) {
+      pitMark.setAttribute('cx', (halfSize + (s.x - centerX) * scale).toFixed(1));
+      pitMark.setAttribute('cy', (halfSize + (s.z - centerZ) * scale).toFixed(1));
+      pitMark.setAttribute('r', String(MINIMAP_TUNING.pitEntryRadius));
+      pitMark.setAttribute('fill', MINIMAP_TUNING.pitEntryColor);
+    }
+  }
+
   // 起跑线标记点
   const startSample = samples[0];
   const startCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -681,7 +721,7 @@ function buildMinimapSvg(samples: readonly TrackSample[]): {
 
   markerGroup.append(playerDot, playerPointer);
 
-  svg.append(pathBg, pathLine, startCircle, markerGroup);
+  svg.append(pathBg, pathLine, pitMark, startCircle, markerGroup);
 
   return {
     svg,

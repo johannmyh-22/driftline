@@ -5,7 +5,9 @@ import type { StandingRow } from '../../src/game/standings';
 import { RaceSession } from '../../src/game/raceSession';
 import { Standings } from '../../src/game/standings';
 import { Race } from '../../src/game/race';
-import { generateTrack } from '../../src/game/trackLayout';
+import { type PitLane, createPitLane } from '../../src/game/pitLane';
+import { type TrackLayout, generateTrack } from '../../src/game/trackLayout';
+import { MINIMAP_TUNING, TRACK } from '../../src/game/tuning';
 
 // 确保在 Node.js 环境下拥有完备的轻量级 DOM 模拟
 class MockNode {
@@ -385,5 +387,52 @@ describe('赛制显示(M7)', () => {
     expect((container.querySelector('.hud-countdown') as HTMLElement | null)?.hidden).toBe(true);
     expect((container.querySelector('.hud-results') as HTMLElement | null)?.hidden).toBe(true);
     hud.dispose();
+  });
+});
+
+describe('小地图上的维修道入口', () => {
+  /*
+   * **不标它,这条道基本等于不存在。** 赛道是按 seed 生成的,玩家没有"记住
+   * 这条赛道"这回事;入口在起跑线前 220 米,开到跟前才看得见楔形张开。
+   *
+   * 标的是一个点而不是整条岔路 —— 那是量出来的:比例尺约 0.18 单位/米,
+   * 维修道离中心线 14.5~26.5 米折算成 2.6~4.7 个单位,而赛道自己的描边就有
+   * 6 个单位宽,岔路整条会被压在赛道的线里面。
+   */
+  function layoutWithPit(): { layout: TrackLayout; lane: PitLane } {
+    const rng = new Rng(42);
+    const layout = generateTrack(rng.fork());
+    return { layout, lane: createPitLane(layout, layout.halfWidth + TRACK.shoulderWidth) };
+  }
+
+  it('传了维修道就标出入口,不传就没有', () => {
+    const { layout, lane } = layoutWithPit();
+    const race = new Race(layout);
+
+    const without = document.createElement('div');
+    new Hud(without, 42, layout, race);
+    expect(without.querySelector('.hud-map-pit-entry')?.getAttribute('r') ?? '').toBe('');
+
+    const withPit = document.createElement('div');
+    new Hud(withPit, 42, layout, race, null, lane);
+    const mark = withPit.querySelector('.hud-map-pit-entry');
+    expect(mark?.getAttribute('r')).toBe(String(MINIMAP_TUNING.pitEntryRadius));
+    expect(Number(mark?.getAttribute('cx'))).toBeGreaterThan(0);
+  });
+
+  it('入口标在入口那一行上,不是标在起跑线上', () => {
+    const { layout, lane } = layoutWithPit();
+    const container = document.createElement('div');
+    new Hud(container, 42, layout, new Race(layout), null, lane);
+    const pit = container.querySelector('.hud-map-pit-entry');
+    const start = container.querySelector('.hud-map-start-node');
+    const dx = Number(pit?.getAttribute('cx')) - Number(start?.getAttribute('cx'));
+    const dy = Number(pit?.getAttribute('cy')) - Number(start?.getAttribute('cy'));
+    /*
+     * 入口在起跑线前 220 米,小地图比例尺约 0.18 单位/米 —— 直线距离会小于
+     * 220 × 0.18(赛道是弯的),但一定不该是 0。**这一条防的是"标错成 0 号
+     * 采样"**:那种错在图上就是两个点重合,一眼看不出来。
+     */
+    expect(Math.hypot(dx, dy)).toBeGreaterThan(5);
   });
 });

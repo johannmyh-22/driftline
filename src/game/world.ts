@@ -19,10 +19,11 @@ import { applyTrackDamp, createTrackMesh } from '../gfx/trackMesh';
 import { clamp, normalize01 } from '../core/mathx';
 import { raceFuelLitres } from './fuel';
 import {
-  type PitBox,
+  type PitLane,
   PitStop,
-  createPitBox,
+  createPitLane,
   insidePitBox,
+  pitBoxCentre,
   planService,
 } from './pitLane';
 import { type Weather, createWeather } from './weather';
@@ -40,7 +41,7 @@ import { Physics } from './physics';
 import { Race } from './race';
 import { encodeGhostInput, saveRecord } from './records';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
-import { CRAFT, FUEL, PIT, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED } from './tuning';
+import { CRAFT, FUEL, PIT, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED, TRACK } from './tuning';
 import { applyDraft } from './draft';
 import { Vehicle } from './vehicle';
 
@@ -158,8 +159,8 @@ export class World {
   /** 这一局的赛道状态(气温/路温/湿度)。由 seed 决定,一局之内不变。 */
   readonly weather: Weather;
 
-  /** 维修区。`flat` 那块没有赛道的平地上是 null。 */
-  readonly pitBox: PitBox | null = null;
+  /** 维修道。`flat` 那块没有赛道的平地上是 null。 */
+  readonly pitLane: PitLane | null = null;
   /** 玩家的进站状态机。 */
   readonly pit = new PitStop();
 
@@ -219,14 +220,18 @@ export class World {
         this.atmosphere.sunDirection.x,
         this.atmosphere.sunDirection.z,
       );
-      const course = new Course(layout, rng.fork());
+      /*
+       * 维修道只依赖赛道长度、采样间距和条带外缘半宽,**不消耗随机数** ——
+       * 所以可以排在这里,而 `rng.fork()` 的取用顺序一个字没动:同一个 seed
+       * 还是同一条赛道(HANDOFF 第五十七节踩过一次的那条线)。
+       */
+      const pitLane = createPitLane(layout, layout.halfWidth + TRACK.shoulderWidth);
+      const course = new Course(layout, rng.fork(), pitLane);
       this.track = layout;
       this.field = course;
-      // 维修区只依赖赛道长度和半宽,不消耗随机数 —— 所以可以排在这里,
-      // 好让路面网格把地标一起涂出来。
-      this.pitBox = createPitBox(layout.totalLength, layout.halfWidth);
+      this.pitLane = pitLane;
       this.scene.add(createTerrainMesh(course, rng.fork(), palette));
-      trackMesh = createTrackMesh(course, rng.fork(), palette, this.pitBox);
+      trackMesh = createTrackMesh(course, rng.fork(), palette, pitLane);
       this.scene.add(trackMesh);
     } else {
       const field = new Heightfield(rng.fork());
@@ -388,6 +393,53 @@ export class World {
     }
     this.standings?.reset([this.vehicle.arc, ...this.rivals.map((r) => r.arc)]);
     this.session?.begin({ skipCountdown: this.skipCountdown });
+  }
+
+  /**
+   * 把玩家直接摆到维修道上:`box` = 车位里,`entry` = 入口前的赛车线上。
+   *
+   * **这是一条验收路径,不是玩法。** 维修道在起跑线前 210 米到线后 150 米
+   * 之间,而截图机位全部跟着车走、车又起步在起跑线上 —— 想看它长什么样,
+   * 得先在无头里开一整圈过去。上一版维修区的观感始终没验过,原因就是这个
+   * (HANDOFF 第五十八节「还没做的」)。
+   *
+   * 两个位置分工不同:`box` 拍近景(车位、隔离墙、维修道外墙),`entry` 是
+   * 给人试玩用的 —— 从那里往前开一遍就把入口、限速、停车、出口全走完了。
+   *
+   * 不清车况、不重开一局:它是"把车挪过去",不是 `spawnAtStart()`。
+   */
+  spawnAtPit(where: 'box' | 'entry'): void {
+    const lane = this.pitLane;
+    const track = this.track;
+    if (lane === null || track === null) {
+      return;
+    }
+    const { samples, spacing } = track;
+    const centre = pitBoxCentre(lane);
+    // 入口前留 60 米,够把车速降到限速以下再切进引道。
+    const entryRow = ((lane.entryRow - Math.round(60 / spacing)) % samples.length +
+      samples.length) % samples.length;
+    const row = where === 'box' ? Math.floor(centre.arc / spacing) % samples.length : entryRow;
+    const lateral = where === 'box' ? centre.lateral : 0;
+    const sample = samples[row];
+    if (sample === undefined) {
+      return;
+    }
+    /*
+     * **`Course.sample()` 的 `lateral` 正方向是 `(-tangentZ, tangentX)`,
+     * 和上面发车格用的 `(tangentZ, -tangentX)` 正好相反**(HANDOFF 第五十八节
+     * 量过这一条)。发车格左右对称,用错也看不出来;维修道只在正的一侧,
+     * 用错就是把车摆到赛道另一边的山坡上。
+     */
+    this.vehicle.reset(
+      sample.x - sample.tangentZ * lateral,
+      sample.z + sample.tangentX * lateral,
+      Math.atan2(sample.tangentX, sample.tangentZ),
+    );
+    this.prevPosition.copy(this.vehicle.position);
+    this.prevOrientation.copy(this.vehicle.orientation);
+    this.chase.snapTo(this.vehicle);
+    this.present(1);
   }
 
   get camera(): PerspectiveCamera {
@@ -574,12 +626,16 @@ export class World {
 
   /** 给 HUD 的进站状态。窄接口,HUD 不该知道状态机长什么样。 */
   get pitStatus(): PitStatus {
-    const box = this.pitBox;
+    const lane = this.pitLane;
     return {
       phase: this.pit.phase,
       remaining: this.pit.remaining,
-      inside:
-        box !== null && insidePitBox(box, this.vehicle.arc, this.vehicle.lateral),
+      inside: lane !== null && insidePitBox(lane, this.vehicle.arc, this.vehicle.lateral),
+      // 「在不在维修道上」直接读物理查出来的那一位,不再自己判一遍 ——
+      // 楔形段的边界是按段内参数插值的,重算一次必然差一点,HUD 就会在
+      // 引道上闪。
+      inLane: this.vehicle.inPit,
+      limited: this.vehicle.inPit && this.vehicle.groundSpeed > PIT.speedLimit,
     };
   }
 
@@ -590,13 +646,13 @@ export class World {
    * 和收益必须绑在一起,否则「进站」就变成一个没有取舍的免费按钮。
    */
   private updatePit(dt: number): boolean {
-    const box = this.pitBox;
+    const lane = this.pitLane;
     const track = this.track;
-    if (box === null || track === null) {
+    if (lane === null || track === null) {
       return false;
     }
     const session = this.session;
-    const inside = insidePitBox(box, this.vehicle.arc, this.vehicle.lateral);
+    const inside = insidePitBox(lane, this.vehicle.arc, this.vehicle.lateral);
     const busy = this.pit.update(dt, inside, this.vehicle.groundSpeed, () => {
       // 加到「还剩几圈 + 余量」,不一律加满 —— 加满等于白背几十公斤出去。
       const done = this.standings?.rowOf('player')?.laps ?? 0;

@@ -83,6 +83,18 @@ const stages: readonly PostStage[] =
  */
 const forceTouch = params.get('touch') === '1';
 
+/**
+ * `?pit=1` 把车摆进维修道的车位(拍近景),`?pit=entry` 摆在入口前的赛车线上
+ * (从那里往前开一遍就把入口、限速、停车、出口全走完)。
+ *
+ * 和 `?course=flat` 一类:**它存在是因为某样东西不这么做就验不了。** 维修道
+ * 在起跑线前 210 米到线后 150 米之间,而截图机位全跟着车走、车又起步在
+ * 起跑线上 —— 想看维修道长什么样,得先在无头里开一整圈过去。上一版的维修区
+ * 观感一直没验过,原因就是这个(HANDOFF 第五十八节)。
+ */
+const pitParam = params.get('pit');
+const spawnAtPit = pitParam === '1' ? 'box' : pitParam === 'entry' ? 'entry' : null;
+
 const qualityParam = params.get('quality');
 const forcedQuality =
   qualityParam === null ? null : Math.min(PERF.levels.length - 1, Math.max(0, Number(qualityParam) | 0));
@@ -148,6 +160,9 @@ async function boot(container: HTMLDivElement): Promise<void> {
 
   const rng = new Rng(seed);
   const world = new World(rng, courseKind, { skipCountdown: testMode });
+  if (spawnAtPit !== null) {
+    world.spawnAtPit(spawnAtPit);
+  }
   // 环境贴图要用渲染器把天空烘出来,所以只能等到这里。烘一次,天空是静态的。
   world.scene.environment = world.atmosphere.buildEnvironment(renderer);
   world.scene.environmentIntensity = SKY.environmentIntensity;
@@ -190,7 +205,7 @@ async function boot(container: HTMLDivElement): Promise<void> {
   const frame: InputFrame = createInputFrame();
   const readout = testMode
     ? null
-    : new Hud(container, seed, world.track, world.race, getCuratedTrack(seed));
+    : new Hud(container, seed, world.track, world.race, getCuratedTrack(seed), world.pitLane);
   /*
    * 程序化音频。测试模式不构造:`?test=1` 下没有真实用户手势,
    * `AudioContext` 起不来,建了也是空跑。`rng.fork()` 排在 World 已经
@@ -505,6 +520,12 @@ async function boot(container: HTMLDivElement): Promise<void> {
         lateralSpeed: world.vehicle.lateralSpeed,
         grounded: world.vehicle.grounded ? 1 : 0,
         onTrack: world.vehicle.onTrack ? 1 : 0,
+        // 维修道:踩没踩在那条道上、进站状态机走到哪一相位、进过几次站。
+        // 限速器和圈数判定都挂在 inPit 上,不暴露就没法在无头里断言。
+        inPit: world.vehicle.inPit ? 1 : 0,
+        pitPhase:
+          world.pit.phase === 'idle' ? 0 : world.pit.phase === 'servicing' ? 1 : 2,
+        pitStops: world.pit.stops,
         lateral: world.vehicle.lateral,
         arc: world.vehicle.arc,
         laps: world.race?.laps ?? 0,
