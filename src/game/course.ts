@@ -140,6 +140,17 @@ export class Course implements GroundQuery {
    * 赛道外的地面高度,**已经按走廊压平**。
    *
    * 地形网格和路肩过渡都必须用它而不是裸噪声,否则赛道边缘会立起一堵墙。
+   *
+   * **两个量都必须沿段内插值,不能拿整行的值当常数** —— 这是量出来才发现的
+   * 一条既有缺陷(2026-09,HANDOFF 第六十二节)。原来的写法直接取最近那一行的
+   * `sample.y` 和「到那一行中心线点的垂距」,两者在一行之内是常数,跨行才跳。
+   * 于是赛道外那条压平走廊实际上是**一段段 6 米平台 + 台阶的楼梯**:
+   * seed 107 第 23 行实测 −1.664 m,下一行 −0.671 m,**0.99 米落差发生在一个
+   * 行边界上**(赛道最大坡度 0.17 × 段长 5.92 m,正好是这个量级)。
+   *
+   * 压平走廊本来就是为了「赛道边缘不立起一堵墙」而存在的,量化成台阶等于把
+   * 那堵墙切碎了再摆回去。`nearestRow()` 本来就算过最近点和段内参数,拿来用
+   * 就行,没有额外开销。
    */
   groundHeightAt(x: number, z: number): number {
     const row = this.nearestRow(x, z);
@@ -147,10 +158,10 @@ export class Course implements GroundQuery {
     if (sample === undefined) {
       return this.terrain.heightAt(x, z);
     }
-    const lateral = Math.abs(
-      (x - sample.x) * -sample.tangentZ + (z - sample.z) * sample.tangentX,
-    );
-    return this.blendTerrain(sample.y, lateral, x, z);
+    const next = this.layout.samples[(row + 1) % this.rows];
+    const trackY =
+      next === undefined ? sample.y : sample.y + (next.y - sample.y) * this.nearestT;
+    return this.blendTerrain(trackY, this.nearestDistance, x, z);
   }
 
   /**
@@ -368,11 +379,20 @@ export class Course implements GroundQuery {
 
   /** 最近一次 nearestRow 的段内参数。和返回值配套使用,避免多返回一个对象。 */
   private nearestT = 0;
+  /**
+   * 最近一次 nearestRow 到那条**线段**的水平距离(米,无符号)。
+   *
+   * 和 `sample()` 里那个有符号的 `lateral` 不是一回事:那个是沿所在行的法向
+   * 量的,因为条带的顶点网格就是按行 × 列索引的,换成到线段的距离会和网格
+   * 对不上。这个是给走廊压平用的,那里只关心「离赛道多远」。
+   */
+  private nearestDistance = 0;
 
   /** 用空间索引找最近的中心线段。找不到返回 -1。 */
   private nearestRow(x: number, z: number): number {
     const cell = this.cellIndexAt(x, z);
     this.nearestT = 0;
+    this.nearestDistance = 0;
     if (cell < 0) {
       return -1;
     }
@@ -405,6 +425,7 @@ export class Course implements GroundQuery {
       }
     }
 
+    this.nearestDistance = bestRow < 0 ? 0 : Math.sqrt(bestDistSq);
     return bestRow;
   }
 

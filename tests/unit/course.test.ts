@@ -329,3 +329,124 @@ function referenceWorkMs(): number {
   }
   return Date.now() - started;
 }
+
+describe('赛道外的压平走廊不是楼梯', () => {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   * 这一条是修出来的(2026-09,HANDOFF 第六十二节)。
+   *
+   * `groundHeightAt()` 原来直接取**最近那一行**的 `sample.y`,而"最近那一行"
+   * 在一行之内是常数、跨行才跳。于是赛道外那条压平走廊实际上是**一段段 6 米
+   * 平台 + 台阶的楼梯**:seed 107 第 23 行实测 −1.664 m,下一行 −0.671 m,
+   * **0.99 米落差发生在一个行边界上**,六条精选赛道无一幸免(0.49~0.99 m)。
+   *
+   * 压平走廊本来就是为了「赛道边缘不立起一堵墙」而存在的,量化成台阶等于把
+   * 那堵墙切碎了再摆回去 —— 跑宽出去的车会被一路弹。
+   *
+   * **截图拦不住这个**:地形网格按 9 米格点采样,采不到 6 米周期的台阶,
+   * 画面上是平滑的斜坡,而物理踩的是楼梯。只有数值断言拦得住。
+   * ══════════════════════════════════════════════════════════════════════════
+   */
+  const SEEDS = [42, 135, 325, 107, 110, 154];
+
+  /** 沿中心线偏移 `lateral` 米的那条平行线上,第 `row` 段内参数 `t` 处的点。 */
+  function offsetPoint(
+    course: Course,
+    row: number,
+    t: number,
+    lateral: number,
+  ): { x: number; z: number } {
+    const samples = course.layout.samples;
+    const a = samples[((row % samples.length) + samples.length) % samples.length];
+    const b = samples[(((row + 1) % samples.length) + samples.length) % samples.length];
+    if (a === undefined || b === undefined) {
+      throw new Error('采样点缺失');
+    }
+    const cx = a.x + (b.x - a.x) * t;
+    const cz = a.z + (b.z - a.z) * t;
+    const tx = a.tangentX + (b.tangentX - a.tangentX) * t;
+    const tz = a.tangentZ + (b.tangentZ - a.tangentZ) * t;
+    const n = Math.hypot(tx, tz) || 1;
+    return { x: cx - (tz / n) * lateral, z: cz + (tx / n) * lateral };
+  }
+
+  it('**一行之内高度必须跟着坡度走** —— 这条直接钉住原来那个 bug', () => {
+    /*
+     * 原来的实现在一行之内返回**同一个常数**,所以这条会以「差值恰好是 0」
+     * 变红。断言的是「走廊的坡度 ≈ 赛道自己的坡度」,而不是"差值非零" ——
+     * 后者随便插一点噪声就能骗过去。
+     */
+    for (const seed of SEEDS) {
+      const course = makeCourse(seed);
+      const samples = course.layout.samples;
+      const lateral = course.outerHalfWidth + 1;
+      let checked = 0;
+
+      for (let row = 0; row < samples.length; row += 17) {
+        const a = samples[row];
+        const b = samples[(row + 1) % samples.length];
+        if (a === undefined || b === undefined) {
+          continue;
+        }
+        const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+        const grade = (b.y - a.y) / segLen;
+        // 太平的段上比值没有意义,跳过。
+        if (Math.abs(grade) < 0.02) {
+          continue;
+        }
+        const p0 = offsetPoint(course, row, 0.25, lateral);
+        const p1 = offsetPoint(course, row, 0.75, lateral);
+        const measured =
+          (course.groundHeightAt(p1.x, p1.z) - course.groundHeightAt(p0.x, p0.z)) /
+          (segLen * 0.5);
+        /*
+         * 比值不会正好是 1:偏移出去的那条线在拐角处比中心线长/短一截,
+         * 最近点投影把段内参数压缩或拉伸了。实测 2279 个样本
+         * 中位 0.972、min 0.760、max 1.123 —— 取 [0.6, 1.4]:比实测宽一倍,
+         * 而**原来那个 bug 的比值恰好是 0**,分得开得不能再开。
+         */
+        expect(measured / grade).toBeGreaterThan(0.6);
+        expect(measured / grade).toBeLessThan(1.4);
+        checked++;
+      }
+      expect(checked).toBeGreaterThan(5);
+    }
+  });
+
+  it('行边界上没有一米级的台阶', () => {
+    /*
+     * 剩下的残差是**最近点投影在拐角处折叠**的固有产物:实测最差的边界上,
+     * 段内参数从 t=0.881 直接跳到下一段的 t=0.119,中间约 1.4 米的中心线
+     * 从来不是任何一个偏移点的最近点。折叠量正比于横向距离乘拐角角度。
+     *
+     * 修完之后:中位 0.4~0.9 cm、p90 约 3 cm、最大 8~15 cm,超过 5 cm 的只占
+     * 2~7%(修之前是**每一个**行边界上 0.49~0.99 m)。阈值取 0.25 m ——
+     * 比实测最大值宽一倍,又远低于那个一米级的 bug。
+     */
+    for (const seed of SEEDS) {
+      const course = makeCourse(seed);
+      const samples = course.layout.samples;
+      let worst = 0;
+
+      for (const lateral of [course.outerHalfWidth + 1, course.outerHalfWidth + 6]) {
+        for (let row = 0; row < samples.length; row++) {
+          const a = samples[row];
+          const b = samples[(row + 1) % samples.length];
+          if (a === undefined || b === undefined) {
+            continue;
+          }
+          const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+          const before = offsetPoint(course, row, 1 - 0.05 / segLen, lateral);
+          const after = offsetPoint(course, row + 1, 0.05 / segLen, lateral);
+          worst = Math.max(
+            worst,
+            Math.abs(
+              course.groundHeightAt(after.x, after.z) - course.groundHeightAt(before.x, before.z),
+            ),
+          );
+        }
+      }
+      expect(worst).toBeLessThan(0.25);
+    }
+  });
+});
