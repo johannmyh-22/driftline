@@ -90,10 +90,30 @@ export class AudioBus {
     this.applyGain();
   }
 
+  /**
+   * 在用户手势里调。**无条件调 `context.resume()`,不要按 `state` 判断是否
+   * 需要调。**
+   *
+   * 老代码写的是 `if (state === 'suspended') resume()`,人类实际听到的症状是
+   * 「刚进游戏没声音,得撞一下车之后引擎声才出来」。原因就在这个判断上:
+   * Chrome 的自动播放策略下,未经手势创建的 `AudioContext` **可以报告
+   * `state === 'running'` 却根本不出声**——被策略挡住和被 `suspend()` 挂起
+   * 是两回事,`state` 只反映后者。于是这个 if 把唯一能解锁它的那次调用跳过了。
+   *
+   * `resume()` 在已经运行的上下文上是无害的空操作,所以这里不做任何判断。
+   */
   resume(): void {
-    if (this.context.state === 'suspended') {
-      void this.context.resume();
-    }
+    void this.context.resume().then(() => {
+      // 解锁之后按当前(已经开始走动的)时钟重新锚一次主音量:构造时那次
+      // setTargetAtTime 锚在冻结的 currentTime 上,解锁后可能是一条已经过期的
+      // 自动化曲线。
+      this.applyGain();
+    });
+  }
+
+  /** 上下文是否真的在跑。`main.ts` 用它决定要不要继续等下一次手势。 */
+  get isRunning(): boolean {
+    return this.context.state === 'running';
   }
 
   get currentVolume(): number {

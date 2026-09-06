@@ -318,6 +318,45 @@ test('?course=flat 切回 M1 那块平地', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+test('维修道在浏览器里是一条真的路,车停得进车位', async ({ page }) => {
+  /*
+   * `?pit=1` 把车摆进车位。这条测试守的是**接线**,不是几何 ——
+   * 几何、限速器、圈数判定都在 tests/unit/pitLane.test.ts 里量过了。
+   *
+   * 但有一类错单测拦不住:维修道在浏览器里根本没铺出来(`World` 没把
+   * `PitLane` 传给 `Course` / `createTrackMesh`),那时候几何全对、单测全绿,
+   * 而玩家开过去掉进地形里。这条断言 `inPit` 和 `onTrack` 同时为真,
+   * 而且画面上确实有东西。
+   */
+  const problems = watchForProblems(page);
+
+  await page.goto(`${BASE_URL}?test=1&seed=${SEED}&pit=1`, { waitUntil: 'load' });
+  await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+  const snapshot = await page.evaluate(async () => {
+    const api = window.__DRIFTLINE_TEST__;
+    if (api === undefined) {
+      throw new Error('__DRIFTLINE_TEST__ 未挂载');
+    }
+    await api.ready;
+    // 停着别动:进站的前提就是停稳,踩油门反而会开出车位。
+    api.setInput({ throttle: 0 });
+    api.advance(240);
+    return api.snapshot();
+  });
+  const stats = await shoot(page, 'smoke-pit.png');
+
+  // 维修道是合法路面 —— 不是的话圈不算数,人还会被出界回收传送走。
+  expect(snapshot['inPit']).toBe(1);
+  expect(snapshot['onTrack']).toBe(1);
+  // 车位在赛道外侧,横向一定超过条带外缘(半宽 7.5 + 路肩 7)。
+  expect(snapshot['lateral'] ?? 0).toBeGreaterThan(14.5);
+  // 停稳了就开始作业,而且**只作业一次** —— 作业完直接回 idle 会无限循环。
+  expect(snapshot['pitStops']).toBe(1);
+  expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+  expect(stats.lowerMeanLuminance).toBeGreaterThan(MIN_GROUND_LUMINANCE);
+  expect(problems).toEqual([]);
+});
+
 test('advance(60) 精确推进 60 帧', async ({ page }) => {
   const before = await driveScene(page, BASE_URL, { seed: SEED, frames: 30, camera: 'chase' });
 
@@ -454,6 +493,187 @@ test('不带 test=1 时自行跑主循环,且不暴露测试接口', async ({ pa
   expect(exposed).toBe(false);
   expect(readout).toContain('km/h');
   expect(problems).toEqual([]);
+});
+
+test('首屏不等车辆模型:先画出程序化造型,模型到货后自己换上来', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  /*
+   * M6「首屏加载 < 3s」那一格:`car.glb` gzip 约 990 KB,等它等于让所有人多
+   * 盯一秒白屏。现在开局直接用 `craft.ts` 的程序化造型(它本来就是回退路径),
+   * 模型到货之后 `World.upgradeCrafts()` 整批换掉。
+   *
+   * **这条断的是「首帧早于模型」这个先后关系**,不是"能不能画出来"——
+   * 换车壳失败的样子是「一直是程序化的那辆车」,而两辆都是蓝色的车,
+   * 截图根本认不出差别。所以靠 `data-craft` 这个标记,不靠看图。
+   */
+  /*
+   * 把 `car.glb` 的响应压慢三秒。**不压的话这条测不出东西**:本地预览服务器
+   * 上 1.7 MB 是瞬间的事,而 SwiftShader 画第一帧要一秒多,模型反而先到 ——
+   * 于是"首屏没等模型"和"首屏等了模型"看起来一模一样。真实用户的网络才是
+   * 慢的那一头,这里用延迟把那个次序还原出来。
+   */
+  await page.route('**/*.glb', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await route.continue();
+  });
+
+  await page.goto(BASE_URL, { waitUntil: 'commit' });
+  await page.waitForFunction(() => document.documentElement.dataset['painted'] === '1', null, {
+    timeout: 60_000,
+  });
+  // 首帧画完的那一刻模型还在路上,车壳只能是程序化的那套。
+  expect(await page.getAttribute('html', 'data-craft')).toBeNull();
+
+  await page.waitForFunction(() => document.documentElement.dataset['craft'] !== undefined, null, {
+    timeout: 60_000,
+  });
+  // 'model' 而不是 'model-preloaded':确实**换**过,不是一开始就是模型版。
+  expect(await page.getAttribute('html', 'data-craft')).toBe('model');
+
+  // 换完之后画面仍然是活的 —— 换车壳会动 scene graph,弄坏了就是黑屏或缺车。
+  const stats = await shoot(page, 'smoke-craft-upgrade.png');
+  expect(stats.luminanceVariance).toBeGreaterThan(MIN_LUMINANCE_VARIANCE);
+  expect(problems).toEqual([]);
+});
+
+test('逐物体运动模糊真的把轮辐糊平了', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  /*
+   * **量的是「轮辐对比度」,不是帧间差。**
+   *
+   * 第一版量的是轮子那一小块的帧间平均像素差 —— 想法是"频闪 = 每帧都在变"。
+   * 那个度量被路面**污染**了:路面以 53 m/s 从旁边流过去,它的帧间差比轮子
+   * 还大。轮子明明已经糊成一个圆盘,量出来的降幅只有一成,反而像是没生效。
+   *
+   * 现在直接量轮子那一块的**空间梯度**(相邻像素亮度差的平均)—— 有辐条就
+   * 高对比,糊平了就低。它只看这一帧的画面内部,路面流不流过完全不影响。
+   * 实测 37.4 → 20.2(降 46%)。
+   *
+   * 这条测试还兜住过一个**看起来是work的** bug:`overrideMaterial` 让全场
+   * 共用一份材质,three 会跳过重复上传同一材质的 uniform,于是每个网格的
+   * "上一帧矩阵"全是第一个网格的。画面上轮子照样糊,只是幅度不对。
+   */
+  const spokeContrast = async (extra: string): Promise<number> => {
+    await page.goto(`${BASE_URL}?test=1&seed=42${extra}`, { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+    await page.evaluate(async () => {
+      await window.__DRIFTLINE_TEST__!.ready;
+    });
+    return page.evaluate(() => {
+      const api = window.__DRIFTLINE_TEST__!;
+      api.setCamera('side');
+      api.setInput({ throttle: 1, steer: 0, airBrake: 0 });
+      api.advance(420);
+      // 速度缓冲要有"上一帧"才算得出速度,预热的最后一帧没有历史、完全不糊。
+      api.advance(1);
+
+      const source = document.querySelector('canvas') as HTMLCanvasElement;
+      const scratch = document.createElement('canvas');
+      // 只框住后轮那个圆盘,一点富余都不留 —— 框大了量到的是车身边缘和路面。
+      // 坐标是拿 DPR 4 的局部截图一格一格量出来的。
+      const rx = 697;
+      const ry = 346;
+      const rw = 18;
+      const rh = 30;
+      scratch.width = rw;
+      scratch.height = rh;
+      const ctx = scratch.getContext('2d')!;
+      // 多帧取平均,免得刚好抽到轮辐对齐的那一帧。
+      let total = 0;
+      const frames = 6;
+      for (let f = 0; f < frames; f++) {
+        ctx.clearRect(0, 0, rw, rh);
+        ctx.drawImage(source, rx, ry, rw, rh, 0, 0, rw, rh);
+        const d = ctx.getImageData(0, 0, rw, rh).data;
+        let sum = 0;
+        let n = 0;
+        for (let y = 0; y < rh; y++) {
+          for (let x = 0; x < rw - 1; x++) {
+            const p = (y * rw + x) * 4;
+            const q = p + 4;
+            const a = (d[p] ?? 0) * 0.3 + (d[p + 1] ?? 0) * 0.6 + (d[p + 2] ?? 0) * 0.1;
+            const b = (d[q] ?? 0) * 0.3 + (d[q + 1] ?? 0) * 0.6 + (d[q + 2] ?? 0) * 0.1;
+            sum += Math.abs(a - b);
+            n++;
+          }
+        }
+        total += sum / n;
+        api.advance(1);
+      }
+      return total / frames;
+    });
+  };
+
+  // 关掉这一级当基线,其余后处理保持一致 —— 只有一个变量在动。
+  const off = await spokeContrast('&post=motion,bloom,smaa,vignette');
+  const on = await spokeContrast('');
+
+  // 实测 37.4 → 20.2。阈值留足余量:要拦的是"完全没生效"和"幅度被钉住",
+  // 不是把某个具体数字钉死。
+  expect(on, `开=${on.toFixed(2)} 关=${off.toFixed(2)}`).toBeLessThan(off * 0.75);
+  expect(problems).toEqual([]);
+});
+
+test.describe('触屏控件', () => {
+  // 无头 Chromium 默认 maxTouchPoints=0,不开这个连 pointer 事件都不是触摸。
+  test.use({ hasTouch: true });
+
+  test('控件出得来,按住油门车就走', async ({ page }) => {
+    const problems = watchForProblems(page);
+
+    /*
+     * 走 `?test=1` 而不是实时模式:SwiftShader 上一帧一秒多,实时等四秒连
+     * 发车倒计时都走不完,根本看不出车动没动。测试模式下 `advance()` 确定性
+     * 步进,几十帧就够。`?touch=1` 强制打开控件 —— 无头 Chromium 的
+     * `maxTouchPoints` 是 0,所以其余回归截图不会多出这一层来。
+     *
+     * 这条测的是**接线**:控件画在哪、按下去有没有转成 `InputFrame`。判据
+     * 细节(死区、多指、命中)在 tests/unit/touchInput.test.ts,那边跑纯逻辑。
+     */
+    await page.goto(`${BASE_URL}?test=1&touch=1&seed=42`, { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+    await page.evaluate(async () => {
+      await window.__DRIFTLINE_TEST__!.ready;
+    });
+
+    const throttle = page.locator('.touch-button', { hasText: '油门' });
+    await expect(throttle).toBeVisible();
+    await expect(page.locator('.touch-stick')).toBeVisible();
+
+    const box = await throttle.boundingBox();
+    expect(box).not.toBeNull();
+    const cx = (box?.x ?? 0) + (box?.width ?? 0) / 2;
+    const cy = (box?.y ?? 0) + (box?.height ?? 0) / 2;
+
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+
+    const moving = await page.evaluate(() => {
+      const api = window.__DRIFTLINE_TEST__!;
+      api.advance(180);
+      return api.snapshot();
+    });
+    expect(moving['groundSpeed'] ?? 0).toBeGreaterThan(5);
+    /*
+     * 按钮高亮是在 `render()` 里刷的,所以这条断言必须排在 `advance()`
+     * **之后** —— `?test=1` 下没有 rAF,不推帧就永远不刷。
+     */
+    await expect(throttle).toHaveClass(/is-held/);
+
+    await page.mouse.up();
+    // 松手之后再推同样多帧,车必须在减速,不能"油门粘住"。
+    const coasting = await page.evaluate(() => {
+      const api = window.__DRIFTLINE_TEST__!;
+      api.advance(180);
+      return api.snapshot();
+    });
+    expect(coasting['groundSpeed'] ?? 0).toBeLessThan(moving['groundSpeed'] ?? 0);
+    await expect(throttle).not.toHaveClass(/is-held/);
+
+    expect(problems).toEqual([]);
+  });
 });
 
 for (const s of [1, 42, 1337]) {

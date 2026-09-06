@@ -2,7 +2,7 @@ import { Matrix4, Quaternion, Vector3 } from 'three';
 import type { InputFrame } from '../core/input';
 import { clamp, damp } from '../core/mathx';
 import { type GroundHit, type GroundQuery, createGroundHit } from './groundQuery';
-import { type BodyState, type Physics, createBodyState } from './physics';
+import { type BodyState, type ChassisSpec, type Physics, createBodyState } from './physics';
 import { type TireForce, type TireState, tireForce } from './tire';
 import {
   appliedSlot,
@@ -14,6 +14,16 @@ import {
   wheelSlot,
 } from './diagnostics';
 import { CAR, REFERENCE_TOP_SPEED, TIRE, VEHICLE } from './tuning';
+import { FuelTank } from './fuel';
+import { pitLimiterScale } from './pitLane';
+import {
+  NEUTRAL_WEATHER,
+  type Weather,
+  weatherGripScale,
+  weatherWearScale,
+} from './weather';
+import { CarCondition } from './condition';
+import { Gearbox } from './gearbox';
 
 // 每帧路径上的临时量,全部提到模块作用域复用。60Hz 下新建 Vector3 的 GC 抖动看得见。
 const chassisUp = new Vector3();
@@ -58,6 +68,15 @@ export interface WheelView {
   readonly length: number;
   /** 累计滚转角(弧度)。 */
   readonly rollAngle: number;
+  /**
+   * 车轮角速度(弧度/秒),正 = 往前滚。
+   *
+   * 渲染层要它来插值滚转角:`rollAngle` 每个物理步能跳 60° 以上,直接拿
+   * 当前值渲染,在刷新率高于 60 Hz 的屏幕上轮子会明显比车身一顿一顿的
+   * (见 `World.present()`)。按角速度外推比按角度插值更对 —— 角度是对
+   * 2π 取过模的,插值会在跨越 0 的那一步走反方向。
+   */
+  readonly spin: number;
 }
 
 /** 一个车轮。位置在车身局部系:**+X 是驾驶员左侧,+Z 是车头**。 */
@@ -177,6 +196,14 @@ export class Vehicle {
   /** 车身原点到地面的高度。 */
   clearance = 0;
   onTrack = true;
+  /**
+   * 车现在踩的是不是维修道的路面。
+   *
+   * 限速器读的就是它(见 `applyForces()` 里的 `pitLimiterScale`)。用**上一步
+   * 读回来的**状态而不是这一步四个轮子采样里的最后一个:后者取决于轮子的
+   * 遍历顺序,车骑在维修道边界上时会一帧一个样。
+   */
+  inPit = false;
   lateral = 0;
   arc = 0;
   /** 侧向抓地力的使用率 0..1。到 1 就是滑出去了,给音效和 HUD 用。 */
@@ -190,10 +217,51 @@ export class Vehicle {
   lateralGripAccel = 0;
   /** 最近一次撞墙的强度,没撞是 0。 */
   wallImpact = 0;
+  /**
+   * 撞墙这一帧的**法向**闭合速度(m/s,正值,没撞是 0)——垂直撞进墙里的那一半。
+   *
+   * `wallImpact` 把「多硬」和「什么角度」乘在了一个标量里
+   * (`min(1, 法向/总速) × 法向`),音频层拿它只能放出一种声音。**擦过去和
+   * 正面撞进去在物理上是两个不同的量**,拆开才能分别驱动"刮擦"和"撞击"。
+   * 纯输出字段,不参与任何物理解算。
+   */
+  wallNormalSpeed = 0;
+  /**
+   * 贴着墙的**切向**滑行速度(m/s,正值,没接触是 0)——沿墙面蹭过去的那一半。
+   *
+   * 注意它在「接触但没有撞进去」的那一帧也是非零的(贴着护墙滑行时法向速度
+   * 接近 0),这正是刮擦声需要的信号:刮擦是持续状态,不是瞬时事件。
+   */
+  wallTangentSpeed = 0;
   /** 侧向速度,**正值 = 向驾驶员右手边滑**。漂移感就看它。 */
   lateralSpeed = 0;
   /** 当前前轮转角(弧度),正 = 左。 */
   steerAngle = 0;
+  /**
+   * 车况(轮胎磨损 / 刹车热衰 / 碰撞损伤)。三样都从 0 开始,所以一局刚开始
+   * 的车和加这套系统之前逐位一样,见 `condition.ts` 的类注释。
+   *
+   * **`reset()` 不清它** —— 出界回收是把车扶回赛道,不是修车。一局结束重开
+   * 由 `World.spawnAtStart()` 显式调 `condition.reset()`。
+   */
+  readonly condition = new CarCondition();
+  /**
+   * 变速箱。**和音频层那套同名的东西不是一回事** —— 那个只生成转速锯齿不回写
+   * 物理,这个决定车轮上到底有多少力矩(见 `gearbox.ts` 的类注释)。
+   */
+  readonly gearbox = new Gearbox();
+  /** `applyForces` 存下的刹车输入,给 `readState` 里的车况更新用。 */
+  private lastBrakeInput = 0;
+  private lastThrottleInput = 0;
+  /**
+   * 气动阻力缩放系数(1 = 无遮挡的干净空气)。跟在别人尾流里时由 `World`
+   * 每帧写低,见 `tuning.ts` 的 `DRAFT`。
+   *
+   * 放成公开字段而不是让 `Vehicle` 自己去找前车:场上有几辆车、谁在谁前面
+   * 是 `World` 的知识,`Vehicle` 只管把系数乘进阻力里 —— 单车场景(平地、
+   * 幽灵)压根不需要知道尾流这回事。
+   */
+  dragScale = 1;
 
   private readonly field: GroundQuery;
   private readonly physics: Physics;
@@ -201,16 +269,48 @@ export class Vehicle {
   private readonly state: BodyState = createBodyState();
   private readonly hit: GroundHit = createGroundHit();
   private readonly wheels: Wheel[];
+  private readonly chassisSpec: ChassisSpec;
+  /** 路面状态对抓地/磨损的缩放。一局之内不变(见 `weather.ts`)。 */
+  private weatherGrip: number;
 
-  constructor(field: GroundQuery, physics: Physics) {
+  /**
+   * 侧向抓地的总缩放:轮胎磨损 × 路面状态。**1 = 新胎 + 理想路温 + 干燥。**
+   *
+   * `RacingPilot` 必须用这个而不是 `condition.tireGripScale` —— 后者只算磨损,
+   * 湿冷路面上照着干地的过弯速度进弯就是直接撞墙。第四十三节已经在"磨损之后
+   * 还用新胎预算"上踩过一次同样的坑,这里是同一条。
+   */
+  private weatherWear: number;
+  /** 上一次写进物理的总质量,用来避免每帧都去动刚体。 */
+  private appliedMass = 0;
+
+  /**
+   * 油箱(B3)。**燃油是会变轻的配重**,所以它不只是个读数 —— `syncMass()`
+   * 每步把「空车 + 油」的质量写回刚体,悬挂载荷、加速、刹车、过弯全都跟着走。
+   */
+  readonly fuel = new FuelTank();
+
+  /**
+   * `weather` 默认中性 —— 抓地与磨损的缩放都恰好是 1,**所以加这套系统之前
+   * 和之后,不传天气的那些调用点(全部单测、`?course=flat`)逐位一样**。
+   * CLAUDE.md 里已验收的手感是在中性条件下验的,那条基线不受影响。
+   */
+  constructor(field: GroundQuery, physics: Physics, weather: Weather = NEUTRAL_WEATHER) {
     this.field = field;
     this.physics = physics;
-    this.body = physics.createChassis({
+    this.weatherGrip = weatherGripScale(weather);
+    this.weatherWear = weatherWearScale(weather);
+    this.chassisSpec = {
       mass: CAR.mass,
       width: CAR.bodyWidth,
       height: CAR.bodyHeight,
       length: CAR.bodyLength,
-    });
+      restitution: CAR.collisionRestitution,
+      friction: CAR.collisionFriction,
+    };
+    this.body = physics.createChassis(this.chassisSpec);
+    // 起步就是带着油的,质量得先算进去,否则第一帧的悬挂静态压缩会偏。
+    this.syncMass();
 
     const halfBase = CAR.wheelBase / 2;
     const halfTrack = CAR.trackWidth / 2;
@@ -225,6 +325,25 @@ export class Vehicle {
     ];
 
     this.reset();
+  }
+
+  /** 当前轮胎摩擦系数 = 基准 μ × 磨损缩放。磨损为 0 时就是 `TIRE.mu0`。 */
+  /**
+   * 换赛道状态。**`World` 在构造函数最后才调**:天气本身要消耗一次
+   * `rng.fork()`,排在车辆/赛道之前的话同一个 seed 会生成出另一条赛道
+   * (见 `gfx/trackMesh.ts` 的 `applyTrackDamp()`)。
+   */
+  setWeather(weather: Weather): void {
+    this.weatherGrip = weatherGripScale(weather);
+    this.weatherWear = weatherWearScale(weather);
+  }
+
+  get gripScale(): number {
+    return this.condition.tireGripScale * this.weatherGrip;
+  }
+
+  private get mu(): number {
+    return TIRE.mu0 * this.condition.tireGripScale * this.weatherGrip;
   }
 
   get speed(): number {
@@ -307,9 +426,12 @@ export class Vehicle {
     this.gripSaturation = 0;
     this.lateralGripAccel = 0;
     this.wallImpact = 0;
+    this.wallNormalSpeed = 0;
+    this.wallTangentSpeed = 0;
     this.grounded = true;
     this.clearance = rideHeight;
     this.onTrack = this.hit.onTrack;
+    this.inPit = this.hit.inPit;
     this.lateral = this.hit.lateral;
     this.arc = this.hit.arc;
 
@@ -355,6 +477,9 @@ export class Vehicle {
    * 物理世界。
    */
   applyForces(input: InputFrame, dt: number): void {
+    // 车况要用到刹车输入,而 readState() 拿不到 input,先存一份。
+    this.lastBrakeInput = input.airBrake;
+    this.lastThrottleInput = input.throttle;
     // 先清掉上一步的力:Rapier 的 addForce 是持续力,不清会逐帧累加成指数爆炸。
     this.physics.resetForces(this.body);
     // 清空上一帧的遥测缓冲,免得「上一帧接地、这一帧离地」的轮子残留旧数据。
@@ -518,9 +643,31 @@ export class Vehicle {
     const I = CAR.wheelInertia;
     const invDt = 1 / dt;
     const CI = I * invDt;
+    /*
+     * 驱动力矩过一遍变速箱:恒定力矩是「踩下去永远一个劲」那种电动车手感的
+     * 来源,真实内燃机的轮上力矩由「扭矩曲线 × 齿比」决定,换挡还会短暂断动力。
+     * 用后轴平均轮速反推发动机转速。
+     */
+    const rearSpin = (Math.abs(this.wheels[2]?.spin ?? 0) + Math.abs(this.wheels[3]?.spin ?? 0)) / 2;
+    const gearScale = this.gearbox.update(rearSpin, input.throttle, dt);
+    /*
+     * 没油了就一点驱动力都没有 —— 发动机不转了,不是"动力弱一点"。这也是
+     * 起步油量必须留余量(`FUEL.reserveLaps`)的原因。
+     */
+    const fuelScale = this.fuel.dry ? 0 : 1;
+    /*
+     * 维修道限速器。在维修道路面上、超过限速就切驱动力矩 —— 真机上那颗按钮
+     * 做的就是这件事(切油/切点火),**它不替你刹车**,所以以赛车速度冲进来
+     * 照样会冲过车位。
+     *
+     * 挂在 `Vehicle` 而不是 `World` 里改 `input`:改 input 会把录进幽灵的那份
+     * 也改掉,同一段输入在有/没有维修道时重放出两条线。
+     */
+    const limiterScale = this.inPit ? pitLimiterScale(this.groundSpeed) : 1;
     const throttleTorque =
-      input.throttle * CAR.driveTorque -
-      input.reverse * CAR.driveTorque * CAR.reverseTorqueScale;
+      limiterScale *
+      (gearScale * CAR.driveTorque * this.condition.powerScale * fuelScale -
+        input.reverse * CAR.driveTorque * CAR.reverseTorqueScale * this.condition.powerScale * fuelScale);
 
     // 驱动/差速计算: 后轴左右轮耦合求解
     const ctx2 = contexts[2]!;
@@ -535,7 +682,7 @@ export class Vehicle {
     const fric_rear = (ctx2.friction + ctx3.friction) / 2;
     const mu_rear = Math.max(
       0,
-      TIRE.mu0 * fric_rear * (1 - (TIRE.loadSensitivity * (load_rear / 2 - fz0)) / fz0),
+      this.mu * fric_rear * (1 - (TIRE.loadSensitivity * (load_rear / 2 - fz0)) / fz0),
     );
     const peak_rear = mu_rear * load_rear;
     const ref_rear = Math.max((ctx2.reference + ctx3.reference) / 2, SLIP_SPEED_FLOOR);
@@ -570,7 +717,8 @@ export class Vehicle {
     let w2_final = w_avg + w_diff / 2;
     let w3_final = w_avg - w_diff / 2;
 
-    const brakeRear = (input.airBrake * CAR.brakeTorque * (1 - CAR.frontBrakeBias)) / 2;
+    const brakeRear =
+      (input.airBrake * CAR.brakeTorque * this.condition.brakeScale * (1 - CAR.frontBrakeBias)) / 2;
     if (brakeRear > 0) {
       const deltaBrake = (brakeRear / I) * dt;
       w2_final =
@@ -597,12 +745,13 @@ export class Vehicle {
     for (let i = 0; i < 2; i++) {
       const wheel = this.wheels[i]!;
       const ctx = contexts[i]!;
-      const brakeFront = input.airBrake * CAR.brakeTorque * (CAR.frontBrakeBias / 2);
+      const brakeFront =
+        input.airBrake * CAR.brakeTorque * this.condition.brakeScale * (CAR.frontBrakeBias / 2);
       const driveFront = throttleTorque * ((1 - CAR.rearDriveBias) / 2);
 
       let w = wheel.spin;
       if (ctx.grounded && ctx.load > 0) {
-        const peakFront = TIRE.mu0 * ctx.friction * ctx.load;
+        const peakFront = this.mu * ctx.friction * ctx.load;
         const peakTorqueFront = peakFront * R;
         if (Math.abs(driveFront) <= peakTorqueFront) {
           const targetSlip = TIRE.peakSlipRatio * (driveFront / peakTorqueFront);
@@ -691,7 +840,7 @@ export class Vehicle {
       // 那部分传不出去,真车表现为那一侧空转得更凶。不封的话摩擦圆会被捅破。
       let drive = tireOut.longitudinal;
       if (i >= 2 && ctx.load > 0) {
-        const budget = ctx.load * TIRE.mu0 * ctx.friction;
+        const budget = ctx.load * this.mu * ctx.friction;
         const room = Math.sqrt(Math.max(0, budget * budget - fy * fy));
         const shared = (tireOut.longitudinal * rearLoadAvg) / ctx.load;
         drive = clamp(shared, -room, room);
@@ -772,7 +921,7 @@ export class Vehicle {
 
       totalLateralForce += fy;
 
-      const budget = ctx.load * TIRE.mu0;
+      const budget = ctx.load * this.mu;
       if (budget > 0) {
         saturation = Math.max(saturation, Math.min(1, Math.hypot(fx, fy) / budget));
       }
@@ -799,6 +948,24 @@ export class Vehicle {
   }
 
   /**
+   * 把「空车 + 燃油」的质量写回刚体。
+   *
+   * **只在变化超过阈值时才写**,不是每帧都写:一帧烧掉的油是克级的,而
+   * `setAdditionalMassProperties` 会重算刚体的质量与惯性张量。每帧动它一遍
+   * 既浪费,又是在往求解器里塞一个每帧都在抖的参数 —— 而「同 seed 逐帧复现」
+   * 是这个项目的地基(CLAUDE.md 的无头验证契约)。50 克的台阶在 1200 公斤上
+   * 是 4e-5,手感上不可能察觉,却把写入次数降到几十次。
+   */
+  private syncMass(): void {
+    const total = CAR.mass + this.fuel.massKg;
+    if (Math.abs(total - this.appliedMass) < VEHICLE.massUpdateStepKg) {
+      return;
+    }
+    this.appliedMass = total;
+    this.physics.setChassisMass(this.body, this.chassisSpec, total);
+  }
+
+  /**
    * `physics.step()` 之后读回刚体状态、解墙碰撞、写遥测帧。**调用方必须先
    * 调过 `applyForces()` 和一次 `physics.step()`,否则读到的是上一步的状态。**
    * 见 `update()`/`applyForces()` 的类注释。
@@ -807,6 +974,21 @@ export class Vehicle {
     this.physics.read(this.body, this.state);
     this.writeBack();
     this.resolveWall(dt);
+
+    /*
+     * 车况放在 `resolveWall()` **之后**:损伤要读这一帧的 `wallNormalSpeed`,
+     * 而那个值正是墙解算算出来的。磨损/热衰用的是刚写回的饱和度与车速。
+     */
+    this.condition.update(
+      dt,
+      this.gripSaturation,
+      this.groundSpeed,
+      this.lastBrakeInput,
+      this.weatherWear,
+    );
+    this.fuel.burn(dt, this.lastThrottleInput, this.gearbox.rpm);
+    this.syncMass();
+    this.condition.addImpact(this.wallNormalSpeed);
 
     // 诊断探针的整车帧采样(read 之后才算数),只复写预分配槽,见 diagnostics.ts。
     frameSlot.x = this.state.x;
@@ -852,7 +1034,7 @@ export class Vehicle {
    */
   private steerLimit(): number {
     const speed = Math.max(this.groundSpeed, 1);
-    const gripAccel = TIRE.mu0 * VEHICLE.gravity;
+    const gripAccel = this.mu * VEHICLE.gravity;
     const kinematic = (CAR.wheelBase * gripAccel) / (speed * speed);
     return Math.min(CAR.steerMax, kinematic + TIRE.peakSlipAngle * CAR.steerPastPeak);
   }
@@ -866,8 +1048,8 @@ export class Vehicle {
     }
     const speed = Math.sqrt(speedSq);
 
-    // 阻力与速度反向,大小正比于 v²。
-    const drag = CAR.dragArea * speedSq;
+    // 阻力与速度反向,大小正比于 v²。dragScale 是尾流折扣,默认 1。
+    const drag = CAR.dragArea * speedSq * this.dragScale;
     scratch.set(-s.vx / speed, -s.vy / speed, -s.vz / speed).multiplyScalar(drag);
 
     // 下压力沿车身向下:速度越高抓地越强,高速弯反而比低速弯稳。
@@ -896,6 +1078,7 @@ export class Vehicle {
     this.field.sample(s.x, s.z, this.hit);
     this.clearance = s.y - this.hit.height;
     this.onTrack = this.hit.onTrack;
+    this.inPit = this.hit.inPit;
     this.lateral = this.hit.lateral;
     this.arc = this.hit.arc;
 
@@ -905,30 +1088,47 @@ export class Vehicle {
 
   /**
    * 护墙。仍然用解析判定 + 冲量,没有交给引擎的碰撞体 ——
-   * 墙是沿赛道条带外缘生成的,`wallDistance` 已经是精确的横向距离,
+   * 墙是沿赛道条带(以及维修道)外缘生成的,走廊边界已经是精确的横向距离,
    * 再造一套三角网碰撞体等于引入第二个面,正是不变量 1 要避免的事。
+   *
+   * **走廊是有符号的上下界,不是一个对称距离。** 维修道的两道墙都在正的一侧
+   * (`[条带外缘, 条带外缘+道宽]`),内侧那道要把车往**外**推 —— 用
+   * `Math.abs(lateral)` 那一版根本表达不出来。赛道段的 `wallLeft/wallRight`
+   * 就是 ∓外缘半宽,所以这一段的行为和改之前**逐位相同**。
    */
   private resolveWall(dt: number): void {
-    const limit = this.hit.wallDistance - CAR.halfWidth;
-    if (!Number.isFinite(limit)) {
-      this.wallImpact = 0;
-      return;
-    }
-
     const lateral = this.hit.lateral;
-    if (
-      !Number.isFinite(lateral) ||
-      Math.abs(lateral) <= limit ||
-      Math.abs(lateral) > this.hit.wallDistance + 3.0
-    ) {
+    if (!Number.isFinite(lateral)) {
       this.wallImpact = 0;
+      this.wallNormalSpeed = 0;
+      this.wallTangentSpeed = 0;
       return;
     }
 
-    // scratch 指向内侧 (向中心线)。Course.sample 中 lateral > 0 为右侧,故向内为 (-right)
-    const outward = Math.sign(lateral);
+    // 撞的是哪一道:超出右界就是右墙(往左推),低于左界就是左墙(往右推)。
+    const highLimit = this.hit.wallRight - CAR.halfWidth;
+    const lowLimit = this.hit.wallLeft + CAR.halfWidth;
+    let wall = 0;
+    let overshootRaw = 0;
+    if (lateral > highLimit && lateral <= this.hit.wallRight + 3.0) {
+      wall = 1;
+      overshootRaw = lateral - highLimit;
+    } else if (lateral < lowLimit && lateral >= this.hit.wallLeft - 3.0) {
+      wall = -1;
+      overshootRaw = lowLimit - lateral;
+    }
+
+    if (wall === 0) {
+      this.wallImpact = 0;
+      this.wallNormalSpeed = 0;
+      this.wallTangentSpeed = 0;
+      return;
+    }
+
+    // scratch 指向走廊内侧。Course.sample 中 lateral > 0 为右侧,故右墙向内为 (-right)。
+    const outward = wall;
     scratch.set(this.hit.tangentZ * outward, 0, -this.hit.tangentX * outward);
-    const overshoot = Math.min(1.5, Math.abs(lateral) - limit);
+    const overshoot = Math.min(1.5, overshootRaw);
 
     const s = this.state;
     this.position.addScaledVector(scratch, overshoot);
@@ -943,9 +1143,18 @@ export class Vehicle {
       s.qw,
     );
 
+    // 走到这里位置已经被推回墙面 = 确实在接触。切向速度在「贴着滑」和「撞进去」
+    // 两种情况下都要报,所以放在下面那个法向提前返回**之前**;墙沿赛道条带外缘
+    // 生成,切向就是赛道切线,点乘直接算,不占临时向量。
+    this.wallTangentSpeed = Math.abs(
+      this.velocity.x * this.hit.tangentX + this.velocity.z * this.hit.tangentZ,
+    );
+
     const inwardSpeed = this.velocity.dot(scratch);
     if (inwardSpeed >= 0) {
+      // 贴着墙平行滑行:没有撞击,但刮擦还在继续,所以只清法向不清切向。
       this.wallImpact = 0;
+      this.wallNormalSpeed = 0;
       return;
     }
 
@@ -973,9 +1182,11 @@ export class Vehicle {
     this.field.sample(this.position.x, this.position.z, this.hit);
     this.lateral = this.hit.lateral;
     this.onTrack = this.hit.onTrack;
+    this.inPit = this.hit.inPit;
 
     const speed = this.velocity.length() || 1;
     this.wallImpact = Math.min(1, -inwardSpeed / speed) * -inwardSpeed;
+    this.wallNormalSpeed = -inwardSpeed;
   }
 }
 

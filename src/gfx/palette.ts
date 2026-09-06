@@ -23,6 +23,17 @@ export interface Palette {
   roadEdge: Color;
   wallCap: Color;
   startLine: Color;
+  /**
+   * 维修车位。**故意用一个赛道上不会出现的颜色**(偏蓝的冷色)——
+   * 它是功能标识不是装饰,玩家要能一眼认出停哪儿,而路肩、标线、起跑线
+   * 已经把中性灰白那一档占满了。
+   */
+  pitBox: Color;
+  /**
+   * 引道与车位区的底色。比车位淡一档:它标的是「这一片属于维修道」这个范围,
+   * 抢眼程度不该和「停这里」一样 —— 两个都刺眼的话玩家反而找不到车位。
+   */
+  pitApron: Color;
 
   /** 载具。 */
   craftHull: Color;
@@ -95,6 +106,8 @@ export function createPalette(rng: Rng): Palette {
     // 护墙的压顶。比墙身深一档:顶面积灰、被雨水冲刷,现实里从来不是最亮的那块。
     wallCap: linear(0.62, 0.61, 0.585),
     startLine: linear(0.5, 0.49, 0.46),
+    pitBox: linear(0.24, 0.42, 0.62),
+    pitApron: linear(0.44, 0.52, 0.62),
 
     // 金属材质下基色是**反射的色调**而不是亮度,所以要比直觉暗:
     // 上一版取 0.34 亮度,配上高强度太阳和 IBL 直接过曝成一片惨白。
@@ -102,6 +115,31 @@ export function createPalette(rng: Rng): Palette {
     craftHull: new Color().setHSL(theme.craftHue, 0.55, 0.16),
     craftAccent: new Color().setHSL(theme.craftHue, 0.45, 0.26),
     craftGlow: new Color().setHSL(0.55, 0.9, 0.62),
+  };
+}
+
+/**
+ * 从一份基础配色派生「和玩家明显不同」的车身配色,给 M7 的对手车用。
+ *
+ * 不重新挑主题 —— 地形/路面/护墙必须和玩家共享同一个环境,只有车身颜色
+ * 需要区分。直接把色相转半圈:不管原来是三套主题里哪一套选出来的色相,
+ * 转完之后都离得够远,一眼分得清谁是谁(人类看过并排出现在同一屏的截图,
+ * 反馈"对手车不能和玩家长一样",见 docs/HANDOFF.md 第三十六节)。
+ */
+export function rivalCraftColors(base: Palette, index = 0, count = 1): Palette {
+  const hsl = { h: 0, s: 0, l: 0 };
+  base.craftHull.getHSL(hsl);
+  /*
+   * 多辆对手时把色相在**除玩家之外**的色环上均分,而不是每辆都转半圈——
+   * 转半圈只在一对一时管用,两辆以上会撞成同一个颜色。玩家占 0 号位,
+   * 对手从半圈处开始按 (index+1)/(count+1) 铺开,谁都不会和玩家撞色。
+   */
+  const spread = (index + 1) / (count + 1);
+  const rivalHue = (hsl.h + spread) % 1;
+  return {
+    ...base,
+    craftHull: new Color().setHSL(rivalHue, 0.55, 0.16),
+    craftAccent: new Color().setHSL(rivalHue, 0.45, 0.26),
   };
 }
 

@@ -1,7 +1,24 @@
+import { clamp } from '../core/mathx';
 import type { CuratedTrack } from './curatedTracks';
-import { MINIMAP_TUNING } from './tuning';
+import type { PitLane } from './pitLane';
+import { MINIMAP_TUNING, PIT } from './tuning';
 import type { Race } from './race';
 import type { TrackLayout, TrackSample } from './trackLayout';
+import type { StandingRow } from './standings';
+import type { RaceSession } from './raceSession';
+import type { Weather } from './weather';
+
+/** HUD 要显示的进站状态。用一个窄接口而不是整个 `PitStop`,HUD 不该知道状态机。 */
+export interface PitStatus {
+  readonly phase: 'idle' | 'servicing' | 'released';
+  readonly remaining: number;
+  /** 停在车位里(可以开始作业)。 */
+  readonly inside: boolean;
+  /** 压在维修道路面上(限速区)。 */
+  readonly inLane: boolean;
+  /** 限速器正在切油 —— 车比限速快。 */
+  readonly limited: boolean;
+}
 
 interface VectorLike {
   x: number;
@@ -15,7 +32,8 @@ interface VectorLike {
  * 采用 DOM Overlay 实现(不往 WebGL canvas 里排文字)。
  * 包含:
  * - 速度显示(大字数字仪表, km/h)
- * - 圈数、当前圈时、最佳单圈、上一圈用时
+ * - 圈数、名次(M7)、当前圈时、最佳单圈、上一圈用时
+ * - 和前车/后车的差距(M7,米)
  * - 分段 delta(相对历史最佳圈,绿色领先、红色落后)
  * - 程序化 SVG 小地图(显示赛道闭环、起跑线、玩家实时位置与车头朝向)
  * - 操作说明与构建号(__BUILD_ID__,严格保留在左下角)
@@ -24,15 +42,36 @@ interface VectorLike {
  * - 每帧更新执行严格的脏检查(数值未变不触碰 DOM)
  * - 格式化采用整数 centiseconds 比对,每帧零 GC 内存分配
  */
+/**
+ * 油量条变红的阈值(百分比,分母是这趟加的油)。
+ *
+ * 起步按「赛程 + `FUEL.reserveLaps` 圈」加油,所以余量本身约占 25%。取 20%:
+ * 刚吃进余量就提醒,而不是等到真的快趴窝。
+ */
+const HUD_FUEL_LOW_PERCENT = 20;
+
 export class Hud {
   private readonly root: HTMLDivElement;
 
   // 速度组件
   private readonly speedNum: HTMLSpanElement;
+  private readonly fuelBar: HTMLDivElement;
+  private readonly fuelFill: HTMLDivElement;
+  private readonly trackState: HTMLParagraphElement;
+  private readonly pitBanner: HTMLDivElement;
+  private lastPitText = '';
+  private lastShownFuel = -1;
 
   // 计时与 Delta 组件
   private readonly timingCard: HTMLDivElement;
   private readonly lapBadge: HTMLSpanElement;
+  private readonly posBadge: HTMLSpanElement;
+  private readonly gapRow: HTMLDivElement;
+  private readonly gapVal: HTMLSpanElement;
+  // 赛制(M7):发车倒计时与结算面板
+  private readonly countdownEl: HTMLDivElement;
+  private readonly resultsEl: HTMLDivElement;
+  private readonly resultsBody: HTMLDivElement;
   private readonly currentTime: HTMLDivElement;
   private readonly deltaBadge: HTMLSpanElement;
   private readonly bestTimeVal: HTMLSpanElement;
@@ -57,6 +96,11 @@ export class Hud {
   private lastShownDeltaText = '';
   /** delta 的整型脏检查键(百分之一秒)。NaN = 尚未显示过。 */
   private lastShownDeltaKey = Number.NaN;
+  private lastShownPosKey = -1;
+  private lastShownGapKey = Number.NaN;
+  private lastShownCountdown = -1;
+  private countdownHideAt = 0;
+  private resultsShown = false;
   private lastShownPlayerX = -99999;
   private lastShownPlayerZ = -99999;
   private lastShownPlayerRot = -99999;
@@ -67,6 +111,8 @@ export class Hud {
     track: TrackLayout | null,
     race: Race | null,
     curated: CuratedTrack | null = null,
+    /** 维修道。传进来就在小地图上画出那条岔路,不传就只画赛道。 */
+    pitLane: PitLane | null = null,
   ) {
     this.root = document.createElement('div');
     this.root.id = 'readout';
@@ -88,11 +134,17 @@ export class Hud {
     this.lapBadge.className = 'hud-lap-badge';
     this.lapBadge.textContent = 'LAP 1';
 
+    // 名次徽章(M7)。没有对手车(flat 场地)时整个隐藏,不占位。
+    this.posBadge = document.createElement('span');
+    this.posBadge.className = 'hud-pos-badge';
+    this.posBadge.textContent = 'P1';
+    this.posBadge.hidden = true;
+
     this.deltaBadge = document.createElement('span');
     this.deltaBadge.className = 'hud-delta-badge hud-delta-idle';
     this.deltaBadge.textContent = '—';
 
-    timingHeader.append(this.lapBadge, this.deltaBadge);
+    timingHeader.append(this.lapBadge, this.posBadge, this.deltaBadge);
 
     this.currentTime = document.createElement('div');
     this.currentTime.className = 'hud-current-time';
@@ -134,7 +186,19 @@ export class Hud {
     this.lastTimeVal.textContent = formatTime(race?.lastLapTime ?? 0);
     lastRow.append(lastLabel, this.lastTimeVal);
 
-    timingFooter.append(bestRow, lastRow);
+    // 和前车(领跑时是后车)的差距,单位米。没有对手时隐藏。
+    this.gapRow = document.createElement('div');
+    this.gapRow.className = 'hud-record-row hud-gap-row';
+    this.gapRow.hidden = true;
+    const gapLabel = document.createElement('span');
+    gapLabel.className = 'hud-record-label';
+    gapLabel.textContent = 'GAP';
+    this.gapVal = document.createElement('span');
+    this.gapVal.className = 'hud-record-val';
+    this.gapVal.textContent = '—';
+    this.gapRow.append(gapLabel, this.gapVal);
+
+    timingFooter.append(bestRow, lastRow, this.gapRow);
     this.timingCard.append(timingHeader, this.currentTime, timingFooter);
 
     // ── 2. 右上角程序化 SVG 小地图 ──
@@ -143,7 +207,7 @@ export class Hud {
 
     if (track !== null && track.samples.length > 0) {
       this.hasMap = true;
-      const { svg, marker, centerX, centerZ, scale } = buildMinimapSvg(track.samples);
+      const { svg, marker, centerX, centerZ, scale } = buildMinimapSvg(track.samples, pitLane);
       this.minimapCard.append(svg);
       this.playerMarker = marker;
       this.trackCenterX = centerX;
@@ -169,13 +233,48 @@ export class Hud {
     speedValue.append(this.speedNum, speedUnit);
     speedCard.append(speedValue);
 
+    /*
+     * 油量条。挂在时速表下面而不是单开一张卡:它是"偶尔瞄一眼"的信息,
+     * 不该和圈速/名次争同一级的注意力。
+     *
+     * 用条不用数字:剩几升对玩家没有意义(他不知道一圈要几升),"还剩多少
+     * 格、够不够跑完"才有。快见底时变红,那一下才需要真的看清楚。
+     */
+    this.fuelBar = document.createElement('div');
+    this.fuelBar.className = 'hud-fuel-bar';
+    this.fuelFill = document.createElement('div');
+    this.fuelFill.className = 'hud-fuel-fill';
+    this.fuelBar.append(this.fuelFill);
+    speedCard.append(this.fuelBar);
+
+    /*
+     * 路面状态。**一局之内不变,所以只写一次、不进每帧路径。**
+     *
+     * 显示的是路温不是气温:真实转播里念的也是路温,因为抓地挂在它上面
+     * (见 `game/weather.ts`)。湿路面时多一个标记 —— 那时候画面本身也会
+     * 变暗变亮,读数只是把"为什么今天这么滑"说清楚。
+     */
+    this.trackState = document.createElement('p');
+    this.trackState.className = 'hud-track-state';
+    speedCard.append(this.trackState);
+
+    /*
+     * 进站提示。压在维修区里但还没停稳时提示"停车维修",作业中显示进度。
+     * 放在画面中央偏下 —— 这是需要**立刻看到**的信息,和右下角那两条"偶尔
+     * 瞄一眼"的不是一个量级。
+     */
+    this.pitBanner = document.createElement('div');
+    this.pitBanner.className = 'hud-pit-banner';
+    this.pitBanner.hidden = true;
+    this.root.append(this.pitBanner);
+
     // ── 4. 左下角操作提示与构建号 ──
     const infoCard = document.createElement('div');
     infoCard.className = 'hud-info-card';
 
     const help = document.createElement('p');
     help.className = 'readout-help';
-    help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹 · Esc 暂停';
+    help.textContent = 'W/S 油门倒车 · A/D 转向 · Space 空气刹 · 点击画面后移动鼠标环视 · Esc 暂停';
 
     // 试玩反馈靠构建号识别版本,必须保留在左下角
     const build = document.createElement('p');
@@ -185,8 +284,43 @@ export class Hud {
     infoCard.append(help, build);
 
     // 组装到 DOM 根节点
-    this.root.append(this.timingCard, this.minimapCard, speedCard, infoCard);
+    // ── 赛制:发车倒计时(画面正中大字)与结算面板 ──
+    this.countdownEl = document.createElement('div');
+    this.countdownEl.className = 'hud-countdown';
+    this.countdownEl.hidden = true;
+
+    this.resultsEl = document.createElement('div');
+    this.resultsEl.className = 'hud-results';
+    this.resultsEl.hidden = true;
+    const resultsTitle = document.createElement('div');
+    resultsTitle.className = 'hud-results-title';
+    resultsTitle.textContent = 'RESULT';
+    this.resultsBody = document.createElement('div');
+    this.resultsBody.className = 'hud-results-body';
+    const resultsHint = document.createElement('div');
+    resultsHint.className = 'hud-results-hint';
+    resultsHint.textContent = 'Esc 打开菜单 · 重开一局';
+    this.resultsEl.append(resultsTitle, this.resultsBody, resultsHint);
+
+    this.root.append(
+      this.timingCard,
+      this.minimapCard,
+      speedCard,
+      infoCard,
+      this.countdownEl,
+      this.resultsEl,
+    );
     parent.append(this.root);
+  }
+
+  /**
+   * 写一次路面状态。**不在每帧路径上** —— 它一局之内不变,每帧去改 DOM
+   * 是白白让浏览器重排。由 `main.ts` 在开局调一次。
+   */
+  setTrackState(weather: Weather): void {
+    const temp = `路面 ${Math.round(weather.trackTempC)}°C`;
+    this.trackState.textContent = weather.damp > 0 ? `${temp} · 潮湿` : temp;
+    this.trackState.classList.toggle('is-damp', weather.damp > 0);
   }
 
   update(
@@ -194,6 +328,11 @@ export class Hud {
     race: Race | null,
     vehiclePos?: VectorLike,
     vehicleYaw?: number,
+    standing?: StandingRow | null,
+    fieldSize?: number,
+    session?: RaceSession | null,
+    fuelFraction?: number,
+    pit?: PitStatus,
   ): void {
     // 1. 速度更新
     const kmh = Math.round(metersPerSecond * 3.6);
@@ -202,13 +341,52 @@ export class Hud {
       this.speedNum.textContent = String(kmh);
     }
 
+    // 1b. 油量。按百分点去重 —— 每帧写一次 style 是白白让浏览器重排。
+    if (fuelFraction !== undefined) {
+      const percent = Math.round(clamp(fuelFraction, 0, 1) * 100);
+      if (percent !== this.lastShownFuel) {
+        this.lastShownFuel = percent;
+        this.fuelFill.style.width = `${percent}%`;
+        this.fuelBar.classList.toggle('is-low', percent <= HUD_FUEL_LOW_PERCENT);
+      }
+    }
+
+    /*
+     * 1c. 进站提示。按文本去重 —— 每帧改 DOM 是白白让浏览器重排。
+     *
+     * 「限速」这一条必须在「停车维修」**之前**判:进了维修道但还没减到限速
+     * 的时候,玩家要看到的是"你太快了",不是"可以停了"。
+     */
+    if (pit !== undefined) {
+      const text =
+        pit.phase === 'servicing'
+          ? `维修中 ${Math.ceil(pit.remaining)}s`
+          : pit.limited
+            ? `限速 ${Math.round(PIT.speedLimit * 3.6)}`
+            : pit.inside && pit.phase === 'idle'
+              ? '停车维修'
+              : pit.inLane
+                ? '维修道'
+                : '';
+      if (text !== this.lastPitText) {
+        this.lastPitText = text;
+        this.pitBanner.textContent = text;
+        this.pitBanner.hidden = text === '';
+        this.pitBanner.classList.toggle('is-working', pit.phase === 'servicing');
+      }
+    }
+
     // 2. 计时与分段更新
     if (race !== null) {
       // 圈数
-      const currentLap = race.laps + 1;
-      if (currentLap !== this.lastShownLaps) {
-        this.lastShownLaps = currentLap;
-        this.lapBadge.textContent = `LAP ${currentLap}`;
+      const total = session?.totalLaps ?? 0;
+      // 冲线之后圈数停在总圈数上,不要显示 "LAP 4/3"。
+      const raw = race.laps + 1;
+      const currentLap = total > 0 ? Math.min(raw, total) : raw;
+      const lapKey = currentLap * 100 + total;
+      if (lapKey !== this.lastShownLaps) {
+        this.lastShownLaps = lapKey;
+        this.lapBadge.textContent = total > 0 ? `LAP ${currentLap}/${total}` : `LAP ${currentLap}`;
       }
 
       // 当前圈时
@@ -262,6 +440,43 @@ export class Hud {
       }
     }
 
+    // 2.5 名次与差距(M7)
+    if (standing != null && fieldSize !== undefined && fieldSize > 1) {
+      if (this.posBadge.hidden) {
+        this.posBadge.hidden = false;
+        this.gapRow.hidden = false;
+      }
+      const posKey = standing.position * 100 + fieldSize;
+      if (posKey !== this.lastShownPosKey) {
+        this.lastShownPosKey = posKey;
+        this.posBadge.textContent = `P${standing.position}/${fieldSize}`;
+        this.posBadge.className =
+          standing.position === 1 ? 'hud-pos-badge hud-pos-lead' : 'hud-pos-badge';
+      }
+
+      /*
+       * 领跑时 `gapToAhead` 是 0(前面没车),这时候有意义的是「甩开后车多少」。
+       * 两种情况共用一行,靠正负号区分:负 = 领先,正 = 落后,和 delta 那栏
+       * 的符号约定一致。
+       */
+      const gap = standing.position === 1 ? -standing.gapToBehind : standing.gapToAhead;
+      const gapKey = Math.round(gap);
+      if (gapKey !== this.lastShownGapKey) {
+        this.lastShownGapKey = gapKey;
+        this.gapVal.textContent = formatGap(gap);
+        this.gapVal.className =
+          gapKey < 0 ? 'hud-record-val hud-delta-ahead' : 'hud-record-val hud-delta-behind';
+      }
+    } else if (!this.posBadge.hidden) {
+      this.posBadge.hidden = true;
+      this.gapRow.hidden = true;
+    }
+
+    // 2.7 赛制:倒计时与结算面板(M7)
+    if (session != null) {
+      this.updateRaceSession(session);
+    }
+
     // 3. 小地图载具光标更新
     if (this.hasMap && this.playerMarker !== null && vehiclePos !== undefined) {
       const dx = vehiclePos.x - this.lastShownPlayerX;
@@ -287,6 +502,57 @@ export class Hud {
     }
   }
 
+  private updateRaceSession(session: RaceSession): void {
+    // 倒计时:剩余秒数向上取整,最后显示 GO。
+    if (session.phase === 'countdown') {
+      const shown = Math.ceil(session.countdown);
+      if (shown !== this.lastShownCountdown) {
+        this.lastShownCountdown = shown;
+        this.countdownEl.hidden = false;
+        this.countdownEl.textContent = String(Math.max(1, shown));
+      }
+    } else if (this.lastShownCountdown !== 0) {
+      // 从倒计时切到比赛:GO 闪一下再消失。用 hidden 而不是 display,
+      // 和 CLAUDE.md 里 artifact 那条一致,也免得和 CSS 打架。
+      this.lastShownCountdown = 0;
+      this.countdownEl.textContent = 'GO';
+      this.countdownEl.hidden = false;
+      this.countdownHideAt = Date.now() + 700;
+    }
+    if (this.countdownHideAt > 0 && Date.now() > this.countdownHideAt) {
+      this.countdownHideAt = 0;
+      this.countdownEl.hidden = true;
+    }
+
+    // 结算面板:只在 finished 那一刻建一次,之后不再动 DOM。
+    if (session.phase === 'finished' && !this.resultsShown) {
+      this.resultsShown = true;
+      this.resultsEl.hidden = false;
+      for (const result of session.results) {
+        const row = document.createElement('div');
+        row.className = 'hud-results-row';
+        const pos = document.createElement('span');
+        pos.className = 'hud-results-pos';
+        pos.textContent = `P${result.position}`;
+        const who = document.createElement('span');
+        who.className = 'hud-results-who';
+        // id 形如 player / rival0 / rival1 …,结算面板显示成「你 / 对手 1」。
+        who.textContent =
+          result.id === 'player' ? '你' : `对手 ${Number(result.id.replace('rival', '')) + 1}`;
+        const time = document.createElement('span');
+        time.className = 'hud-results-time';
+        // time 为 0 = 没冲线就被强制结算(见 raceSession.ts 的 finish())。
+        time.textContent = result.time > 0 ? formatTime(result.time) : 'DNF';
+        row.append(pos, who, time);
+        this.resultsBody.append(row);
+      }
+    } else if (session.phase !== 'finished' && this.resultsShown) {
+      this.resultsShown = false;
+      this.resultsEl.hidden = true;
+      this.resultsBody.replaceChildren();
+    }
+  }
+
   dispose(): void {
     this.root.remove();
   }
@@ -294,6 +560,22 @@ export class Hud {
 
 /** 兼容老版导出命名。 */
 export { Hud as Readout };
+
+/**
+ * 名次差距格式化(米)。负 = 领先,正 = 落后,符号约定和分段 delta 那栏一致。
+ * 超过一公里改用 km,免得 HUD 上出现「+1834m」这种读不快的数字。
+ */
+export function formatGap(meters: number): string {
+  if (!Number.isFinite(meters)) {
+    return '—';
+  }
+  const sign = meters < 0 ? '−' : '+';
+  const abs = Math.abs(meters);
+  if (abs < 1) {
+    return '±0m';
+  }
+  return abs >= 1000 ? `${sign}${(abs / 1000).toFixed(2)}km` : `${sign}${Math.round(abs)}m`;
+}
 
 /** 时间格式化为 MM:SS.hh */
 export function formatTime(seconds: number): string {
@@ -320,8 +602,8 @@ export function formatDelta(delta: number): string {
   return `${sign}${secs}.${h}s`;
 }
 
-/** 由赛道采样点程序化生成 SVG 小地图。 */
-function buildMinimapSvg(samples: readonly TrackSample[]): {
+/** 由赛道采样点程序化生成 SVG 小地图。`pit` 传进来就顺便画出维修道。 */
+function buildMinimapSvg(samples: readonly TrackSample[], pit: PitLane | null): {
   svg: SVGSVGElement;
   marker: SVGElement;
   centerX: number;
@@ -386,6 +668,29 @@ function buildMinimapSvg(samples: readonly TrackSample[]): {
   pathLine.setAttribute('stroke-linejoin', 'round');
   pathLine.setAttribute('stroke-linecap', 'round');
 
+  /*
+   * 维修道入口的标记点。
+   *
+   * **量过之后从"画一条岔路"改成"点一个标"**:小地图把一整圈赛道(跨度上千米)
+   * 压进 200 个单位,比例尺约 0.18 单位/米,而维修道离中心线只有 14.5~26.5 米
+   * —— 折算成 2.6~4.7 个单位,而赛道自己的描边就有 6 个单位宽。**那条岔路会
+   * 整个被压在赛道的线里面,画了等于没画。**
+   *
+   * 玩家在这张图上真正需要的信息只有一条:入口在哪儿。一个点解决,而且在
+   * 任何比例尺下都读得出来。
+   */
+  const pitMark = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  pitMark.setAttribute('class', 'hud-map-pit-entry');
+  if (pit !== null) {
+    const s = samples[pit.entryRow % samples.length];
+    if (s !== undefined) {
+      pitMark.setAttribute('cx', (halfSize + (s.x - centerX) * scale).toFixed(1));
+      pitMark.setAttribute('cy', (halfSize + (s.z - centerZ) * scale).toFixed(1));
+      pitMark.setAttribute('r', String(MINIMAP_TUNING.pitEntryRadius));
+      pitMark.setAttribute('fill', MINIMAP_TUNING.pitEntryColor);
+    }
+  }
+
   // 起跑线标记点
   const startSample = samples[0];
   const startCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -416,7 +721,7 @@ function buildMinimapSvg(samples: readonly TrackSample[]): {
 
   markerGroup.append(playerDot, playerPointer);
 
-  svg.append(pathBg, pathLine, startCircle, markerGroup);
+  svg.append(pathBg, pathLine, pitMark, startCircle, markerGroup);
 
   return {
     svg,

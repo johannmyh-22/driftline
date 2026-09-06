@@ -82,3 +82,89 @@ describe('ChaseCamera 的 prefers-reduced-motion 分支', () => {
     expect(upX.x).toBeCloseTo(0, 6);
   });
 });
+
+describe('鼠标自由视角(M7 之外的手感补充)', () => {
+  /** 把自由视角角度推到目标值并让相机收敛。 */
+  function settleLook(
+    camera: ChaseCamera,
+    vehicle: Vehicle,
+    yaw: number,
+    pitch: number,
+    seconds = 2,
+  ): void {
+    const dt = 1 / 60;
+    for (let t = 0; t < seconds; t += dt) {
+      camera.setLookAngles(yaw, pitch, dt);
+      camera.update(vehicle, dt);
+    }
+    camera.present(1);
+  }
+
+  it('不动鼠标时相机位姿和没有这个功能时逐位一致', () => {
+    const vehicle = makeVehicle(30, 0);
+    const a = new ChaseCamera(flatField, 16 / 9, false);
+    a.snapTo(vehicle);
+    settle(a, vehicle, 2);
+    const withoutLook = a.camera.position.clone();
+
+    const b = new ChaseCamera(flatField, 16 / 9, false);
+    b.snapTo(vehicle);
+    settleLook(b, vehicle, 0, 0, 2);
+    expect(b.camera.position.x).toBe(withoutLook.x);
+    expect(b.camera.position.y).toBe(withoutLook.y);
+    expect(b.camera.position.z).toBe(withoutLook.z);
+  });
+
+  it('偏航 90° 把相机转到车的侧面,而不是原地转头', () => {
+    const vehicle = makeVehicle(0, 0);
+    const camera = new ChaseCamera(flatField, 16 / 9, false);
+    camera.snapTo(vehicle);
+    settleLook(camera, vehicle, Math.PI / 2, 0);
+
+    // 车头朝 +Z,默认机位在 -Z 侧。绕 Y 转 90° 之后应该跑到 X 轴一侧去。
+    const pos = camera.camera.position;
+    expect(Math.abs(pos.x)).toBeGreaterThan(CAMERA.offsetBack * 0.7);
+    expect(Math.abs(pos.z)).toBeLessThan(CAMERA.offsetBack * 0.4);
+  });
+
+  it('环视时相机到车的水平距离基本不变——是绕着车转,不是拉远或推近', () => {
+    const vehicle = makeVehicle(0, 0);
+    const base = new ChaseCamera(flatField, 16 / 9, false);
+    base.snapTo(vehicle);
+    settleLook(base, vehicle, 0, 0);
+    const r0 = Math.hypot(base.camera.position.x, base.camera.position.z);
+
+    for (const yaw of [Math.PI / 4, Math.PI / 2, Math.PI]) {
+      const camera = new ChaseCamera(flatField, 16 / 9, false);
+      camera.snapTo(vehicle);
+      settleLook(camera, vehicle, yaw, 0);
+      const r = Math.hypot(camera.camera.position.x, camera.camera.position.z);
+      expect(Math.abs(r - r0)).toBeLessThan(0.5);
+    }
+  });
+
+  it('抬高俯仰会把相机抬起来', () => {
+    const vehicle = makeVehicle(0, 0);
+    const low = new ChaseCamera(flatField, 16 / 9, false);
+    low.snapTo(vehicle);
+    settleLook(low, vehicle, 0, 0);
+
+    const high = new ChaseCamera(flatField, 16 / 9, false);
+    high.snapTo(vehicle);
+    settleLook(high, vehicle, 0, CAMERA.lookPitchMax);
+    expect(high.camera.position.y).toBeGreaterThan(low.camera.position.y);
+  });
+
+  it('snapTo 会把自由视角清零,重开一局不残留上一局的视角', () => {
+    const vehicle = makeVehicle(0, 0);
+    const camera = new ChaseCamera(flatField, 16 / 9, false);
+    camera.snapTo(vehicle);
+    settleLook(camera, vehicle, Math.PI / 2, 0);
+
+    camera.snapTo(vehicle);
+    const fresh = new ChaseCamera(flatField, 16 / 9, false);
+    fresh.snapTo(vehicle);
+    expect(camera.camera.position.x).toBeCloseTo(fresh.camera.position.x, 6);
+    expect(camera.camera.position.z).toBeCloseTo(fresh.camera.position.z, 6);
+  });
+});

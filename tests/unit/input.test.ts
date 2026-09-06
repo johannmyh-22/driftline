@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type InputFrame,
+  type InputSource,
   InputRecorder,
   KeyboardInput,
+  MergedInput,
   RecordedInput,
   ScriptedInput,
   createInputFrame,
@@ -174,5 +177,56 @@ describe('InputRecorder / RecordedInput', () => {
 
   it('拒绝长度不对齐的回放数据', () => {
     expect(() => new RecordedInput(Int8Array.from([1, 2, 3]))).toThrow(RangeError);
+  });
+});
+
+describe('MergedInput', () => {
+  /*
+   * 合并规则是**「绝对值大的赢」**,不是"后者覆盖前者"。后者覆盖的话,没在
+   * 用的那一路每帧都会把另一路清零 —— 表现是"键盘和触屏都插着就都不好使",
+   * 而且只在同时接着两种输入的机器上出现。
+   */
+  class Fixed implements InputSource {
+    constructor(private readonly frame: Partial<InputFrame>) {}
+    sample(out: InputFrame): void {
+      out.throttle = this.frame.throttle ?? 0;
+      out.reverse = this.frame.reverse ?? 0;
+      out.steer = this.frame.steer ?? 0;
+      out.airBrake = this.frame.airBrake ?? 0;
+    }
+  }
+
+  it('后一个源的零不会把前一个源清掉', () => {
+    const merged = new MergedInput([new Fixed({ throttle: 1, steer: -1 }), new Fixed({})]);
+    const out = createInputFrame();
+    merged.sample(out);
+    expect(out.throttle).toBe(1);
+    expect(out.steer).toBe(-1);
+  });
+
+  it('方向取绝对值大的那个,不是相加', () => {
+    const merged = new MergedInput([new Fixed({ steer: 0.3 }), new Fixed({ steer: -0.8 })]);
+    const out = createInputFrame();
+    merged.sample(out);
+    expect(out.steer).toBe(-0.8);
+  });
+
+  it('每次采样都从零开始 —— 上一帧的值不许漏过来', () => {
+    const source = new Fixed({ throttle: 1 });
+    const merged = new MergedInput([source]);
+    const out = createInputFrame();
+    merged.sample(out);
+    expect(out.throttle).toBe(1);
+
+    const empty = new MergedInput([new Fixed({})]);
+    empty.sample(out);
+    expect(out.throttle).toBe(0);
+  });
+
+  it('没有源就是全零', () => {
+    const out = createInputFrame();
+    out.throttle = 1;
+    new MergedInput([]).sample(out);
+    expect(out.throttle).toBe(0);
   });
 });

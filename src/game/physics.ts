@@ -68,7 +68,19 @@ export interface ChassisSpec {
   width: number;
   height: number;
   length: number;
+  /** 车间碰撞的弹性/摩擦系数,决定权见 `tuning.ts` 的 `CAR.collisionRestitution/Friction`。 */
+  restitution: number;
+  friction: number;
 }
+
+/*
+ * 车身碰撞体的碰撞组:只和别的车身碰撞体互相作用。Rapier 把交互组打包成一个
+ * u32 —— 低 16 位是「归属的组」,高 16 位是「允许交互的组过滤器」——
+ * 两半填同一个 bit,车与车互相看得见,和以后任何新增的碰撞体(比如护栏若
+ * 真的改用引擎碰撞体实现)都不会意外撞上。
+ */
+const VEHICLE_GROUP = 0b1;
+const VEHICLE_COLLISION_GROUPS = (VEHICLE_GROUP << 16) | VEHICLE_GROUP;
 
 /*
  * 每帧路径上的临时量。Rapier 的 API 吃普通对象字面量,而这些调用每帧发生
@@ -92,13 +104,26 @@ export class Physics {
   }
 
   /**
-   * 造车身刚体。**不挂碰撞体** —— 轮子的接地靠 `Course.sample()` 查询,
-   * 那条路径保证了「物理查询的面 == 渲染出来的面」(见 `docs/HANDOFF.md`
-   * 第四节不变量 1),换成引擎的三角网碰撞体反而会引入两套面。
+   * 造车身刚体。**地面接触不挂碰撞体** —— 轮子的接地靠 `Course.sample()`
+   * 查询,那条路径保证了「物理查询的面 == 渲染出来的面」(见
+   * `docs/HANDOFF.md` 第四节不变量 1),换成引擎的三角网碰撞体反而会引入
+   * 两套面。这条不变量管的只是**地面**这一条查询路径。
    *
-   * 没有碰撞体就没有由碰撞体推出的质量,所以质量和惯量在这里显式给。
-   * 这也更可控:惯量是手感的一部分,不该是几何体的副产物。
+   * 车身质量和惯量继续显式给(不从碰撞体推导)——这也更可控:惯量是手感
+   * 的一部分,不该是几何体的副产物。所以下面挂的车间碰撞体密度设成 0,
+   * 只提供形状和碰撞响应,不再叠加一份引擎推出来的质量。
    */
+  /**
+   * 改车身质量(燃油烧掉之后车会变轻,见 `game/fuel.ts`)。
+   *
+   * **转动惯量必须跟着一起改**,不能只改质量:惯量是按质量 × 尺寸算的,
+   * 只改质量会让车的转动响应和平动质量对不上 —— 表现是"车轻了但转起来还是
+   * 那么沉",而且随着油量变化越来越离谱。
+   */
+  setChassisMass(body: RAPIER.RigidBody, spec: ChassisSpec, mass: number): void {
+    setChassisMass(body, spec, mass);
+  }
+
   createChassis(spec: ChassisSpec): RAPIER.RigidBody {
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
@@ -106,20 +131,18 @@ export class Physics {
         .setCanSleep(false),
     );
 
-    const { mass, width, height, length } = spec;
-    const k = mass / 12;
-    body.setAdditionalMassProperties(
-      mass,
-      { x: 0, y: 0, z: 0 },
-      {
-        // 绕 X = 俯仰,绕 Y = 偏航,绕 Z = 侧倾。
-        x: k * (height * height + length * length),
-        y: k * (width * width + length * length),
-        z: k * (width * width + height * height),
-      },
-      { x: 0, y: 0, z: 0, w: 1 },
-      true,
+    const { mass, width, height, length, restitution, friction } = spec;
+    setChassisMass(body, spec, mass);
+
+    this.world.createCollider(
+      RAPIER.ColliderDesc.cuboid(width / 2, height / 2, length / 2)
+        .setDensity(0)
+        .setRestitution(restitution)
+        .setFriction(friction)
+        .setCollisionGroups(VEHICLE_COLLISION_GROUPS),
+      body,
     );
+
     return body;
   }
 
@@ -206,4 +229,22 @@ export class Physics {
   dispose(): void {
     this.world.free();
   }
+}
+
+/** 质量 + 转动惯量一起设。创建和后续改质量走同一条路,免得两处算法跑偏。 */
+function setChassisMass(body: RAPIER.RigidBody, spec: ChassisSpec, mass: number): void {
+  const { width, height, length } = spec;
+  const k = mass / 12;
+  body.setAdditionalMassProperties(
+    mass,
+    { x: 0, y: 0, z: 0 },
+    {
+      // 绕 X = 俯仰,绕 Y = 偏航,绕 Z = 侧倾。
+      x: k * (height * height + length * length),
+      y: k * (width * width + length * length),
+      z: k * (width * width + height * height),
+    },
+    { x: 0, y: 0, z: 0, w: 1 },
+    true,
+  );
 }

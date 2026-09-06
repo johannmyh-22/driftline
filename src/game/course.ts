@@ -1,5 +1,6 @@
 import type { Rng } from '../core/rng';
 import type { GroundHit, GroundQuery } from './groundQuery';
+import { type PitLane, pitLaneWidthAt, pitRowIndex, pitWallAtRow } from './pitLane';
 import { TerrainNoise } from './terrainNoise';
 import type { TrackLayout } from './trackLayout';
 import { TRACK } from './tuning';
@@ -8,6 +9,14 @@ const normalScratch = new Float32Array(3);
 
 /** 横向分档数。条带每一段被切成这么多列,列数越多侧倾越平滑。 */
 const LATERAL_DIVISIONS = 10;
+/**
+ * 维修道的横向分档数。
+ *
+ * 比主条带少,因为维修道**没有侧倾**(它在条带外缘之外,高度走的是地形压平
+ * 那条曲线),不需要靠列数去逼近一个倾斜面。6 档 = 2 米一格,够把「快车道 /
+ * 车位」这条分界画在格子边上。
+ */
+const PIT_LATERAL_DIVISIONS = 6;
 /** 空间索引的格子边长(米)。 */
 const INDEX_CELL = 24;
 
@@ -44,6 +53,9 @@ export class Course implements GroundQuery {
   /** 含路肩的外缘半宽。超出它就算离开条带。 */
   readonly outerHalfWidth: number;
 
+  /** 维修道。`null` = 这条赛道没有维修道(测试里造一个裸 `Course` 时)。 */
+  readonly pit: PitLane | null;
+
   private readonly terrain: TerrainNoise;
   private readonly rows: number;
   private readonly columns = LATERAL_DIVISIONS + 1;
@@ -53,6 +65,15 @@ export class Course implements GroundQuery {
   private readonly vy: Float64Array;
   private readonly vz: Float64Array;
 
+  /**
+   * 维修道的顶点网格。行 = 入口起算的第几行,列 = 横向分档,和主条带一个套路:
+   * **物理查询的面 == 渲染出来的面**,两边吃同一张表。
+   */
+  private readonly pitColumns = PIT_LATERAL_DIVISIONS + 1;
+  private readonly px: Float64Array;
+  private readonly py: Float64Array;
+  private readonly pz: Float64Array;
+
   // 空间索引:CSR 结构,cellStart[c]..cellStart[c+1] 是落在格子 c 里的行号。
   private readonly gridMinX: number;
   private readonly gridMinZ: number;
@@ -61,12 +82,19 @@ export class Course implements GroundQuery {
   private readonly cellStart: Int32Array;
   private readonly cellItems: Int32Array;
 
-  constructor(layout: TrackLayout, rng: Rng) {
+  /**
+   * `pit` 是可选的:传进来就在条带外缘之外再铺一条维修道。
+   *
+   * **它不消耗随机数**(`createPitLane()` 只看长度和宽度),所以加不加维修道
+   * 都不会动 `World` 里 `rng.fork()` 的取用顺序 —— 同一个 seed 还是同一条赛道。
+   */
+  constructor(layout: TrackLayout, rng: Rng, pit: PitLane | null = null) {
     this.layout = layout;
     this.halfWidth = layout.halfWidth;
     this.outerHalfWidth = layout.halfWidth + TRACK.shoulderWidth;
     this.lateralStep = (this.outerHalfWidth * 2) / LATERAL_DIVISIONS;
     this.rows = layout.samples.length;
+    this.pit = pit;
 
     this.terrain = new TerrainNoise(rng.fork(), {
       scale: TRACK.terrainScale,
@@ -79,6 +107,12 @@ export class Course implements GroundQuery {
     this.vy = new Float64Array(total);
     this.vz = new Float64Array(total);
     this.buildRibbon();
+
+    const pitTotal = pit === null ? 0 : (pit.laneRowCount + 1) * this.pitColumns;
+    this.px = new Float64Array(pitTotal);
+    this.py = new Float64Array(pitTotal);
+    this.pz = new Float64Array(pitTotal);
+    this.buildPitRibbon();
 
     // 索引范围按条带外缘再加一格,免得边界查询落到格子外面。
     let minX = Infinity;
@@ -106,6 +140,17 @@ export class Course implements GroundQuery {
    * 赛道外的地面高度,**已经按走廊压平**。
    *
    * 地形网格和路肩过渡都必须用它而不是裸噪声,否则赛道边缘会立起一堵墙。
+   *
+   * **两个量都必须沿段内插值,不能拿整行的值当常数** —— 这是量出来才发现的
+   * 一条既有缺陷(2026-09,HANDOFF 第六十二节)。原来的写法直接取最近那一行的
+   * `sample.y` 和「到那一行中心线点的垂距」,两者在一行之内是常数,跨行才跳。
+   * 于是赛道外那条压平走廊实际上是**一段段 6 米平台 + 台阶的楼梯**:
+   * seed 107 第 23 行实测 −1.664 m,下一行 −0.671 m,**0.99 米落差发生在一个
+   * 行边界上**(赛道最大坡度 0.17 × 段长 5.92 m,正好是这个量级)。
+   *
+   * 压平走廊本来就是为了「赛道边缘不立起一堵墙」而存在的,量化成台阶等于把
+   * 那堵墙切碎了再摆回去。`nearestRow()` 本来就算过最近点和段内参数,拿来用
+   * 就行,没有额外开销。
    */
   groundHeightAt(x: number, z: number): number {
     const row = this.nearestRow(x, z);
@@ -113,10 +158,10 @@ export class Course implements GroundQuery {
     if (sample === undefined) {
       return this.terrain.heightAt(x, z);
     }
-    const lateral = Math.abs(
-      (x - sample.x) * -sample.tangentZ + (z - sample.z) * sample.tangentX,
-    );
-    return this.blendTerrain(sample.y, lateral, x, z);
+    const next = this.layout.samples[(row + 1) % this.rows];
+    const trackY =
+      next === undefined ? sample.y : sample.y + (next.y - sample.y) * this.nearestT;
+    return this.blendTerrain(trackY, this.nearestDistance, x, z);
   }
 
   /**
@@ -180,23 +225,61 @@ export class Course implements GroundQuery {
       arc = 0;
     }
 
+    /*
+     * 走廊的两道边界。左边永远是条带外缘;右边要看维修道:
+     *
+     * - 维修道那一段的**隔离墙**在条带外缘上,和平时一样;
+     * - 入口/出口的**缺口**上根本没有墙 —— 那是引道,车要从赛车线横切过去,
+     *   所以走廊一路开到维修道外缘;
+     * - 没有维修道的路段照旧。
+     *
+     * 缺口的位置是按**行号**判的,和护墙网格跳过的行是同一批 —— 差一行就是
+     * 一堵看不见的墙。
+     */
+    const pit = this.pit;
+    const openToPit = pit !== null && pitRowIndex(pit, bestRow) >= 0 && !pitWallAtRow(pit, bestRow);
+    /*
+     * 引道那两段维修道是楔形张开的,所以外缘逐行不同 —— 而且**必须按段内参数
+     * 插值**,不能只取所在行的宽度。渲染出来的外缘是两行顶点之间的一条直线段;
+     * 只取起始行的话,楔形段最外面那一条会「画得出来但查不到」,也就是
+     * 「视觉上有路、物理上没有」。三角形重心那条测试钉的就是这个。
+     */
+    const pitOuter =
+      pit === null
+        ? 0
+        : pit.lateralMin +
+          pitLaneWidthAt(pit, bestRow) +
+          (pitLaneWidthAt(pit, (bestRow + 1) % this.rows) - pitLaneWidthAt(pit, bestRow)) * bestT;
+
     const applyTrackFields = (): void => {
       out.lateral = lateral;
       out.segment = bestRow;
       out.arc = arc;
       out.tangentX = a.tangentX;
       out.tangentZ = a.tangentZ;
-      out.wallDistance = this.outerHalfWidth;
+      out.wallLeft = -this.outerHalfWidth;
+      out.wallRight = openToPit ? pitOuter : this.outerHalfWidth;
     };
     applyTrackFields();
 
     if (Math.abs(lateral) > this.outerHalfWidth) {
+      const pitRow = pit === null ? -1 : pitRowIndex(pit, bestRow);
+      if (pit !== null && pitRow >= 0 && lateral >= pit.lateralMin && lateral <= pitOuter) {
+        out.onTrack = true;
+        out.inPit = true;
+        // 维修道里,内侧是隔离墙(缺口处则一路通回赛道),外侧是自己的外墙。
+        out.wallLeft = openToPit ? -this.outerHalfWidth : pit.lateralMin;
+        out.wallRight = pitOuter;
+        this.fillFromPit(x, z, pitRow, bestT, lateral, out);
+        return;
+      }
       this.fillFromTerrain(x, z, out);
       applyTrackFields();
       return;
     }
 
     out.onTrack = true;
+    out.inPit = false;
     this.fillFromRibbon(x, z, bestRow, bestT, lateral, out);
   }
 
@@ -296,11 +379,20 @@ export class Course implements GroundQuery {
 
   /** 最近一次 nearestRow 的段内参数。和返回值配套使用,避免多返回一个对象。 */
   private nearestT = 0;
+  /**
+   * 最近一次 nearestRow 到那条**线段**的水平距离(米,无符号)。
+   *
+   * 和 `sample()` 里那个有符号的 `lateral` 不是一回事:那个是沿所在行的法向
+   * 量的,因为条带的顶点网格就是按行 × 列索引的,换成到线段的距离会和网格
+   * 对不上。这个是给走廊压平用的,那里只关心「离赛道多远」。
+   */
+  private nearestDistance = 0;
 
   /** 用空间索引找最近的中心线段。找不到返回 -1。 */
   private nearestRow(x: number, z: number): number {
     const cell = this.cellIndexAt(x, z);
     this.nearestT = 0;
+    this.nearestDistance = 0;
     if (cell < 0) {
       return -1;
     }
@@ -333,6 +425,7 @@ export class Course implements GroundQuery {
       }
     }
 
+    this.nearestDistance = bestRow < 0 ? 0 : Math.sqrt(bestDistSq);
     return bestRow;
   }
 
@@ -358,6 +451,243 @@ export class Course implements GroundQuery {
 
   private vertexIndex(row: number, col: number): number {
     return (row % this.rows) * this.columns + col;
+  }
+
+  private pitVertexIndex(pitRow: number, col: number): number {
+    return pitRow * this.pitColumns + col;
+  }
+
+  /**
+   * 维修道的顶点网格。
+   *
+   * 高度直接用 `blendTerrain()` —— 和路肩外缘用的是同一条曲线,所以维修道
+   * 内缘和条带外缘的高度**逐位相同**,两块面接得上,不会留台阶。
+   *
+   * 维修道**不跟侧倾**:它在条带外缘之外,那里的高度早就交给地形压平那条
+   * 曲线了。真实维修道也是平的。
+   *
+   * 网格比车道多一行(`laneRowCount + 1`):最后一行用来闭合出口那一段的四边形。
+   */
+  private buildPitRibbon(): void {
+    const pit = this.pit;
+    if (pit === null) {
+      return;
+    }
+    for (let j = 0; j <= pit.laneRowCount; j++) {
+      const trackRow = (pit.entryRow + j) % this.rows;
+      const sample = this.layout.samples[trackRow];
+      if (sample === undefined) {
+        continue;
+      }
+      const rightX = -sample.tangentZ;
+      const rightZ = sample.tangentX;
+      // 宽度逐行变:引道两端是楔形张开的,见 `pitLane.ts` 的 `pitLaneWidthAt()`。
+      const step = pitLaneWidthAt(pit, trackRow) / PIT_LATERAL_DIVISIONS;
+      for (let col = 0; col < this.pitColumns; col++) {
+        const d = pit.lateralMin + col * step;
+        const wx = sample.x + rightX * d;
+        const wz = sample.z + rightZ * d;
+        const index = this.pitVertexIndex(j, col);
+        this.px[index] = wx;
+        this.py[index] = this.blendTerrain(sample.y, d, wx, wz);
+        this.pz[index] = wz;
+      }
+    }
+  }
+
+  /**
+   * 维修道的三角面。切分方式和主条带一致,`sample()` 和渲染吃同一份。
+   *
+   * `lateral` 是每个三角形所在横向分档的中点,归一化到 0..1(0 = 内缘 =
+   * 隔离墙那一侧,1 = 外缘),上色时用来区分快车道 / 车位 / 边线。
+   * `row` 是该三角形所在的**主赛道行号**,用来画入口/出口的引道标记。
+   */
+  buildPitTriangles(): {
+    positions: Float32Array;
+    normals: Float32Array;
+    uvs: Float32Array;
+    lateral: Float32Array;
+    row: Int32Array;
+  } {
+    const pit = this.pit;
+    const quads = pit === null ? 0 : pit.laneRowCount * PIT_LATERAL_DIVISIONS;
+    const positions = new Float32Array(quads * 6 * 3);
+    const normals = new Float32Array(quads * 6 * 3);
+    const uvs = new Float32Array(quads * 6 * 2);
+    const lateral = new Float32Array(quads * 2);
+    const row = new Int32Array(quads * 2);
+    if (pit === null) {
+      return { positions, normals, uvs, lateral, row };
+    }
+
+    let o = 0;
+    let n = 0;
+    let u = 0;
+    let l = 0;
+
+    const push = (j: number, col: number): void => {
+      const index = this.pitVertexIndex(j, col);
+      positions[o++] = this.px[index] ?? 0;
+      positions[o++] = this.py[index] ?? 0;
+      positions[o++] = this.pz[index] ?? 0;
+
+      this.pitVertexNormal(j, col, normalScratch);
+      normals[n++] = normalScratch[0] ?? 0;
+      normals[n++] = normalScratch[1] ?? 1;
+      normals[n++] = normalScratch[2] ?? 0;
+
+      // UV 用顶点自己的横向距离,楔形段才不会把贴图横向压扁。
+      uvs[u++] =
+        Math.hypot(
+          (this.px[index] ?? 0) - (this.px[this.pitVertexIndex(j, 0)] ?? 0),
+          (this.pz[index] ?? 0) - (this.pz[this.pitVertexIndex(j, 0)] ?? 0),
+        ) / TRACK.textureScale;
+      uvs[u++] = ((pit.entryRow + j) * this.layout.spacing) / TRACK.textureScale;
+    };
+
+    for (let j = 0; j < pit.laneRowCount; j++) {
+      const trackRow = (pit.entryRow + j) % this.rows;
+      for (let col = 0; col < PIT_LATERAL_DIVISIONS; col++) {
+        push(j, col);
+        push(j, col + 1);
+        push(j + 1, col);
+
+        push(j + 1, col + 1);
+        push(j + 1, col);
+        push(j, col + 1);
+
+        const centre = (col + 0.5) / PIT_LATERAL_DIVISIONS;
+        lateral[l] = centre;
+        row[l] = trackRow;
+        l++;
+        lateral[l] = centre;
+        row[l] = trackRow;
+        l++;
+      }
+    }
+
+    return { positions, normals, uvs, lateral, row };
+  }
+
+  /**
+   * 维修道某一侧外缘的顶点序列(xyz 依次排列,每行一组),含闭合用的最后一行。
+   *
+   * 和 `buildEdgeLine()` 同一条道理:墙必须坐在**路面自己的外缘顶点**上,
+   * 不能另算一套高度。
+   */
+  buildPitEdgeLine(side: 'inner' | 'outer'): Float64Array {
+    const pit = this.pit;
+    if (pit === null) {
+      return new Float64Array(0);
+    }
+    const col = side === 'inner' ? 0 : this.pitColumns - 1;
+    const line = new Float64Array((pit.laneRowCount + 1) * 3);
+    for (let j = 0; j <= pit.laneRowCount; j++) {
+      const index = this.pitVertexIndex(j, col);
+      line[j * 3] = this.px[index] ?? 0;
+      line[j * 3 + 1] = this.py[index] ?? 0;
+      line[j * 3 + 2] = this.pz[index] ?? 0;
+    }
+    return line;
+  }
+
+  /** 维修道顶点的平滑法线。行方向在两端不环绕 —— 这条道不是闭环。 */
+  private pitVertexNormal(j: number, col: number, out: Float32Array): void {
+    const pit = this.pit;
+    if (pit === null) {
+      out[0] = 0;
+      out[1] = 1;
+      out[2] = 0;
+      return;
+    }
+    const loRow = j > 0 ? j - 1 : j;
+    const hiRow = j < pit.laneRowCount ? j + 1 : j;
+    const loCol = col > 0 ? col - 1 : col;
+    const hiCol = col < this.pitColumns - 1 ? col + 1 : col;
+
+    const a = this.pitVertexIndex(loRow, col);
+    const b = this.pitVertexIndex(hiRow, col);
+    const c = this.pitVertexIndex(j, loCol);
+    const d = this.pitVertexIndex(j, hiCol);
+
+    const alongX = (this.px[b] ?? 0) - (this.px[a] ?? 0);
+    const alongY = (this.py[b] ?? 0) - (this.py[a] ?? 0);
+    const alongZ = (this.pz[b] ?? 0) - (this.pz[a] ?? 0);
+    const acrossX = (this.px[d] ?? 0) - (this.px[c] ?? 0);
+    const acrossY = (this.py[d] ?? 0) - (this.py[c] ?? 0);
+    const acrossZ = (this.pz[d] ?? 0) - (this.pz[c] ?? 0);
+
+    let nx = acrossY * alongZ - acrossZ * alongY;
+    let ny = acrossZ * alongX - acrossX * alongZ;
+    let nz = acrossX * alongY - acrossY * alongX;
+    if (ny < 0) {
+      nx = -nx;
+      ny = -ny;
+      nz = -nz;
+    }
+    const inv = 1 / (Math.hypot(nx, ny, nz) || 1);
+    out[0] = nx * inv;
+    out[1] = ny * inv;
+    out[2] = nz * inv;
+  }
+
+  /** 和 `fillFromRibbon()` 同一套三角形求解,只是吃维修道那张顶点表。 */
+  private fillFromPit(
+    x: number,
+    z: number,
+    pitRow: number,
+    t: number,
+    lateral: number,
+    out: GroundHit,
+  ): void {
+    const pit = this.pit;
+    if (pit === null) {
+      return;
+    }
+    /*
+     * 楔形段的列宽逐行变,所以先算这一段(row..row+1)插值出来的宽度,再把
+     * 横向距离归一化成列 —— 用固定列宽的话,入口那几行会整段错位。
+     */
+    const wHere = pitLaneWidthAt(pit, (pit.entryRow + pitRow) % this.rows);
+    const wThere = pitLaneWidthAt(pit, (pit.entryRow + pitRow + 1) % this.rows);
+    const width = wHere + (wThere - wHere) * t;
+    if (width <= 1e-6) {
+      return;
+    }
+    const raw = ((lateral - pit.lateralMin) / width) * PIT_LATERAL_DIVISIONS;
+    let col = Math.floor(raw);
+    col = col < 0 ? 0 : col > PIT_LATERAL_DIVISIONS - 1 ? PIT_LATERAL_DIVISIONS - 1 : col;
+    const s = raw - col;
+
+    const useFirst = t + s <= 1;
+    const i0 = useFirst ? this.pitVertexIndex(pitRow, col) : this.pitVertexIndex(pitRow + 1, col + 1);
+    const i1 = useFirst ? this.pitVertexIndex(pitRow, col + 1) : this.pitVertexIndex(pitRow + 1, col);
+    const i2 = useFirst ? this.pitVertexIndex(pitRow + 1, col) : this.pitVertexIndex(pitRow, col + 1);
+
+    const ax = this.px[i0] ?? 0;
+    const ay = this.py[i0] ?? 0;
+    const az = this.pz[i0] ?? 0;
+    const e1x = (this.px[i1] ?? 0) - ax;
+    const e1y = (this.py[i1] ?? 0) - ay;
+    const e1z = (this.pz[i1] ?? 0) - az;
+    const e2x = (this.px[i2] ?? 0) - ax;
+    const e2y = (this.py[i2] ?? 0) - ay;
+    const e2z = (this.pz[i2] ?? 0) - az;
+
+    let nx = e1y * e2z - e1z * e2y;
+    let ny = e1z * e2x - e1x * e2z;
+    let nz = e1x * e2y - e1y * e2x;
+    if (ny < 0) {
+      nx = -nx;
+      ny = -ny;
+      nz = -nz;
+    }
+    const inv = 1 / (Math.hypot(nx, ny, nz) || 1);
+
+    out.normalX = nx * inv;
+    out.normalY = ny * inv;
+    out.normalZ = nz * inv;
+    out.height = ny !== 0 ? ay - (nx * (x - ax) + nz * (z - az)) / ny : ay;
   }
 
   private buildRibbon(): void {
@@ -458,12 +788,14 @@ export class Course implements GroundQuery {
     out.normalY = inv;
     out.normalZ = -dz * inv;
     out.onTrack = false;
+    out.inPit = false;
     out.lateral = Number.POSITIVE_INFINITY;
     out.arc = 0;
     out.segment = 0;
     out.tangentX = 0;
     out.tangentZ = 1;
-    out.wallDistance = Number.POSITIVE_INFINITY;
+    out.wallLeft = Number.NEGATIVE_INFINITY;
+    out.wallRight = Number.POSITIVE_INFINITY;
   }
 
   private cellIndexAt(x: number, z: number): number {

@@ -81,7 +81,10 @@ async function main(): Promise<void> {
       },
       { camera: options.camera, warmup: options.warmup },
     );
-    await page.screenshot();
+    // 预热的 GL 队列也要在这里结算掉,超时同样要给够 —— 引入 glTF 车模之后
+    // (四辆车 ~88k 三角形 + 阴影),SwiftShader 上光是把预热的积压画完就能
+    // 超过 Playwright 默认的 30 秒,这个 harness 本身会先超时。
+    await page.screenshot({ timeout: 180_000 });
 
     const start = performance.now();
     const inPage = await page.evaluate((count: number) => {

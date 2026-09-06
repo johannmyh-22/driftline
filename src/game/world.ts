@@ -5,29 +5,98 @@ import {
   Vector3,
 } from 'three';
 import { type InputFrame, InputRecorder, createInputFrame } from '../core/input';
-import type { Rng } from '../core/rng';
+import { rollAt } from './wheelView';
+import { Rng } from '../core/rng';
 import { type Craft, createCraft } from '../gfx/craft';
+import type { Object3D } from 'three';
+import { isCraftModelReady } from '../gfx/craftModel';
 import { createGround } from '../gfx/ground';
-import { createPalette } from '../gfx/palette';
+import { type Palette, createPalette, rivalCraftColors } from '../gfx/palette';
 import { Atmosphere } from '../gfx/atmosphere';
+import type { Group } from 'three';
 import { createTerrainMesh } from '../gfx/terrainMesh';
-import { createTrackMesh } from '../gfx/trackMesh';
-import { normalize01 } from '../core/mathx';
+import { applyTrackDamp, createTrackMesh } from '../gfx/trackMesh';
+import { clamp, normalize01 } from '../core/mathx';
+import { raceFuelLitres } from './fuel';
+import {
+  type PitLane,
+  PitStop,
+  createPitLane,
+  insidePitBox,
+  pitBoxCentre,
+  planService,
+} from './pitLane';
+import { type Weather, createWeather } from './weather';
+import { RacingPilot } from './racingPilot';
+import { TrackRecovery } from './trackRecovery';
+import { RaceSession } from './raceSession';
+import { Standings } from './standings';
 import { ChaseCamera } from './chaseCamera';
 import { Course } from './course';
 import { Ghost } from './ghost';
+import type { PitStatus } from './hud';
 import type { GroundQuery } from './groundQuery';
 import { Heightfield } from './heightfield';
 import { Physics } from './physics';
 import { Race } from './race';
 import { encodeGhostInput, saveRecord } from './records';
 import { type TrackLayout, alignStartAwayFromSun, generateTrack } from './trackLayout';
-import { CRAFT, REFERENCE_TOP_SPEED } from './tuning';
+import { CRAFT, FUEL, PIT, RACE_FORMAT, RACING_AI, REFERENCE_TOP_SPEED, TRACK } from './tuning';
+import { applyDraft } from './draft';
 import { Vehicle } from './vehicle';
 
 const shownPosition = new Vector3();
 const shownOrientation = new Quaternion();
+const rivalShownPosition = new Vector3();
+const rivalShownOrientation = new Quaternion();
 const mapCentre = new Vector3();
+
+/**
+ * 对手起步时落后玩家多远(沿赛道弧长,米)。**不是手感参数**,只是起步
+ * 摆位,不放进 `tuning.ts`。
+ *
+ * **故意沿赛道纵向错开,不是并排。** 第一次接这块时试过并排起步(横向
+ * 偏移),结果 `smoke.spec.ts` 里"满油门打满舵 2.5 秒"那条测试红了——
+ * 不是断言太严,是玩家真的被 3 米外的对手车撞歪了,横向位移的方向都变了。
+ * 那条测试的前提是"只有玩家一辆车",纵向错开能保证短时间窗口的测试
+ * (这个项目里最长的连续输入测试是 6.5 秒)碰不到跟在后面的对手车,
+ * 同时不用去改测试本身迁就一个新加入的、和被测行为无关的变量。
+ */
+/** 传给对手 AI 的「场上其他车」。复用同一个数组,每帧不分配。 */
+const rivalOpponents: Vehicle[] = [];
+/** 场上所有车(玩家 + 对手),尾流计算用。同样复用,不每帧新建。 */
+const allCars: Vehicle[] = [];
+
+/** 名次表 / 结算面板里各车的 id。0 号恒为玩家,其后是对手。 */
+function racerIds(rivalCount: number): string[] {
+  const ids = ['player'];
+  for (let i = 0; i < rivalCount; i++) {
+    ids.push(`rival${i}`);
+  }
+  return ids;
+}
+
+/**
+ * 发车格:第 `slot` 位(0 = 玩家的杆位)相对起跑线的纵向后退距离与横向偏移。
+ *
+ * 两两一排交错(和真实发车格一样),不是一字纵队——纵队里后车全程被前车
+ * 挡着,永远看不到超车。
+ */
+function gridSlot(slot: number): { back: number; lateral: number } {
+  // 杆位(玩家)留在中心线上。真实发车格杆位也是偏一侧的,但把玩家摆偏之后
+  // 一上来就得先并回赛道中间,而且「起跑在中心线」是既有截图测试钉住的行为
+  // (smoke.spec.ts「起跑时在赛道上」断言 |lateral| < 1)。对手才交错排开。
+  if (slot <= 0) {
+    return { back: 0, lateral: 0 };
+  }
+  const index = slot - 1;
+  const row = Math.floor(index / 2);
+  const side = index % 2 === 0 ? -1 : 1;
+  return {
+    back: (row + 1) * RACE_FORMAT.gridRow,
+    lateral: side * RACE_FORMAT.gridLateral,
+  };
+}
 
 
 /** 固定机位:回归截图用,和玩家实际在用的跟随机位分开。 */
@@ -65,11 +134,63 @@ export class World {
   readonly physics: Physics;
   /** 幽灵回放。`flat` 场地(没有 `Race`)下是 null。 */
   readonly ghost: Ghost | null;
+  /**
+   * 竞速对手(M7 第一次真的有第二辆车参与物理,和玩家共享同一个
+   * `Physics` 世界——不是幽灵那种独立世界里的半透明重放)。
+   *
+   * 开的是 `RacingPilot`。**曾经是 `Autopilot`,换掉了**:那东西自己的类
+   * 注释写着「不是游戏内容,是验收工具」,实测当对手用单圈比目标时间慢
+   * 56~74%、满油门占比只有 5%,人类反馈「AI 车太垃圾了」。`Autopilot` 本身
+   * 一个字没动,截图回归的既有基线还靠它。
+   *
+   * `flat` 场地(没有赛道可循迹)下是 null。
+   */
+  readonly rivals: Vehicle[] = [];
+  /**
+   * 名次表(M7)。`flat` 场地没有赛道也就没有弧长,自然也没有名次,是 null。
+   * 下标顺序固定:0 = 玩家,1 = 对手,和 `RACER_IDS` 一致。
+   */
+  readonly standings: Standings | null;
+  /**
+   * 赛制(M7):倒计时发车、跑 N 圈、结算。`flat` 场地没有赛道也就没有比赛。
+   */
+  readonly session: RaceSession | null;
 
-  private readonly craft: Craft;
+  /** 这一局的赛道状态(气温/路温/湿度)。由 seed 决定,一局之内不变。 */
+  readonly weather: Weather;
+
+  /** 维修道。`flat` 那块没有赛道的平地上是 null。 */
+  readonly pitLane: PitLane | null = null;
+  /** 玩家的进站状态机。 */
+  readonly pit = new PitStop();
+
+  /** **不是 readonly**:glTF 模型异步到货之后整辆换掉,见 `upgradeCrafts()`。 */
+  private craft: Craft;
+  /** 造车壳用的配色,换车壳时要按原样再造一遍。 */
+  private readonly palette: Palette;
+  private readonly rivalPalettes: Palette[] = [];
+  private readonly rivalPilots: RacingPilot[] = [];
+  /**
+   * 对手车的出界回收。**没有它对手被撞出赛道就再也回不来了**——出界重置本来
+   * 长在 `Race` 里,而 `Race` 只伺候玩家(见 `trackRecovery.ts` 的类注释)。
+   */
+  private readonly rivalRecoveries: TrackRecovery[] = [];
+  private rivalCrafts: Craft[] = [];
+  private readonly rivalInputs: InputFrame[] = [];
+  private readonly rivalPrevPositions: Vector3[] = [];
+  private readonly rivalPrevOrientations: Quaternion[] = [];
   private readonly prevPosition = new Vector3();
   private readonly prevOrientation = new Quaternion();
   private preset = 'chase';
+  /**
+   * 车壳是否已经是 glTF 模型的版本。
+   *
+   * 构造时就置位而不是恒 false:`?test=1` 下 `main.ts` 会**先 await 模型再造
+   * World**,那时候四辆车一造出来就是模型版的,再"升级"一次是白白重建一遍。
+   */
+  private craftsUpgraded = false;
+  /** 真的执行过一次换壳(而不是构造时就已经是模型版)。 */
+  private craftsSwapped = false;
   private readonly fixedCamera: PerspectiveCamera;
   private readonly input: InputFrame = createInputFrame();
   /**
@@ -78,8 +199,14 @@ export class World {
    */
   private readonly recorder = new InputRecorder();
 
-  constructor(rng: Rng, kind: CourseKind = 'race') {
+  /** 测试模式:跳过发车倒计时,理由见 `raceSession.ts` 的类注释。 */
+  private readonly skipCountdown: boolean;
+
+  constructor(rng: Rng, kind: CourseKind = 'race', options: { skipCountdown?: boolean } = {}) {
+    this.skipCountdown = options.skipCountdown === true;
     const palette = createPalette(rng.fork());
+    this.palette = palette;
+    let trackMesh: Group | null = null;
 
     this.atmosphere = new Atmosphere(rng.fork());
     this.scene.add(this.atmosphere.sky);
@@ -93,11 +220,19 @@ export class World {
         this.atmosphere.sunDirection.x,
         this.atmosphere.sunDirection.z,
       );
-      const course = new Course(layout, rng.fork());
+      /*
+       * 维修道只依赖赛道长度、采样间距和条带外缘半宽,**不消耗随机数** ——
+       * 所以可以排在这里,而 `rng.fork()` 的取用顺序一个字没动:同一个 seed
+       * 还是同一条赛道(HANDOFF 第五十七节踩过一次的那条线)。
+       */
+      const pitLane = createPitLane(layout, layout.halfWidth + TRACK.shoulderWidth);
+      const course = new Course(layout, rng.fork(), pitLane);
       this.track = layout;
       this.field = course;
+      this.pitLane = pitLane;
       this.scene.add(createTerrainMesh(course, rng.fork(), palette));
-      this.scene.add(createTrackMesh(course, rng.fork(), palette));
+      trackMesh = createTrackMesh(course, rng.fork(), palette, pitLane);
+      this.scene.add(trackMesh);
     } else {
       const field = new Heightfield(rng.fork());
       this.track = null;
@@ -108,12 +243,44 @@ export class World {
     this.race = this.track === null ? null : new Race(this.track);
     this.physics = new Physics();
     this.vehicle = new Vehicle(this.field, this.physics);
+    // 和玩家共享 this.physics——这正是这一节要证明的事:两辆车能安全地
+    // 共用同一个 Rapier 世界(见 vehicle.ts 的 applyForces()/readState() 拆分、
+    // 以及 ghost.ts 类注释里「为什么 Ghost 必须用独立世界」的对照说明)。
+    const track = this.track;
+    const rivalCount = track === null ? 0 : RACE_FORMAT.rivalCount;
+    for (let i = 0; i < rivalCount; i++) {
+      this.rivals.push(new Vehicle(this.field, this.physics));
+      // 每辆对手的难度递减一档:全场同速会变成一列火车,谁也超不了谁。
+      this.rivalPilots.push(
+        new RacingPilot(
+          track as TrackLayout,
+          RACING_AI.defaultAggression - i * RACING_AI.aggressionSpread,
+        ),
+      );
+      // 只给 AI 开卡住检测:玩家停车是合法操作,见 TrackRecovery 的构造注释。
+      this.rivalRecoveries.push(new TrackRecovery(track as TrackLayout, { detectStall: true }));
+      this.rivalInputs.push(createInputFrame());
+      this.rivalPrevPositions.push(new Vector3());
+      this.rivalPrevOrientations.push(new Quaternion());
+    }
+    this.session = track === null ? null : new RaceSession();
+    this.standings =
+      track === null ? null : new Standings(racerIds(rivalCount), track.totalLength);
     this.chase = new ChaseCamera(this.field);
     this.fixedCamera = this.chase.camera.clone();
     this.spawnAtStart();
 
+    // 构造时模型就绪的话,造出来的已经是模型版,没有"升级"可做(见字段注释)。
+    this.craftsUpgraded = isCraftModelReady();
     this.craft = createCraft(rng.fork(), palette);
     this.scene.add(this.craft.group);
+    for (let i = 0; i < this.rivals.length; i++) {
+      const colors = rivalCraftColors(palette, i, this.rivals.length);
+      this.rivalPalettes.push(colors);
+      const craft = createCraft(rng.fork(), colors);
+      this.rivalCrafts.push(craft);
+      this.scene.add(craft.group);
+    }
 
     this.ghost = this.track === null ? null : new Ghost(this.field, this.track, rng.fork(), palette);
     if (this.ghost !== null) {
@@ -122,10 +289,40 @@ export class World {
 
     // 背光面不再靠半球光去补,改由 IBL 提供 —— 环境反射来自真实的大气散射,
     // 明暗过渡和天空是一致的,而不是人为塞一个补光。
+    /*
+     * **赛道状态的随机数必须排在最后取。**
+     *
+     * 它跟着太阳仰角走(低角度的太阳晒不热路面),所以逻辑上属于
+     * `Atmosphere` 之后;但只要 `rng.fork()` 插在赛道生成之前,同一个 seed
+     * 就会生成出**另一条赛道** —— 精选赛道的目标时间、玩家存的最佳圈全部
+     * 作废。所以取数排在这里,车辆和路面材质回过头来补。
+     */
+    this.weather = createWeather(rng.fork(), this.atmosphere.sunElevation);
+    this.vehicle.setWeather(this.weather);
+    for (const rival of this.rivals) {
+      rival.setWeather(this.weather);
+    }
+    if (trackMesh !== null) {
+      applyTrackDamp(trackMesh, this.weather.damp);
+    }
+
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
+    this.saveRivalPrevious();
     this.chase.snapTo(this.vehicle);
     this.present(1);
+  }
+
+  /** 记下所有对手车上一帧的位姿,给渲染插值用。 */
+  private saveRivalPrevious(): void {
+    for (let i = 0; i < this.rivals.length; i++) {
+      const rival = this.rivals[i];
+      if (rival === undefined) {
+        continue;
+      }
+      this.rivalPrevPositions[i]?.copy(rival.position);
+      this.rivalPrevOrientations[i]?.copy(rival.orientation);
+    }
   }
 
   /** 把载具放到起跑线,车头朝赛道前进方向。平地场景就是原点朝 +Z。 */
@@ -133,13 +330,116 @@ export class World {
     this.race?.reset();
     this.recorder.clear();
     this.ghost?.restartLap();
-    const start = this.track?.samples[0];
-    if (start === undefined) {
+    if (this.track === null || this.track.samples[0] === undefined) {
+      // 平地场景:没有赛道也就没有发车格,原点起步。
       this.vehicle.reset();
       return;
     }
-    // forward = (sin yaw, 0, cos yaw),所以由切线反解 yaw 用 atan2(x, z)。
-    this.vehicle.reset(start.x, start.z, Math.atan2(start.tangentX, start.tangentZ));
+
+    {
+      /*
+       * 发车格。玩家占杆位(slot 0),对手依次往后排;两两一排交错开,
+       * 横向偏移压在半宽以内。上一版是「对手沿赛道往回退 20 米」的一字纵队,
+       * 多辆车之后那样排会全叠在同一条线上互相追尾。
+       */
+      const { samples, spacing, halfWidth } = this.track;
+      const count = samples.length;
+      const room = halfWidth - 1.5;
+      const placeAt = (vehicle: Vehicle, slot: number): void => {
+        const { back, lateral } = gridSlot(slot);
+        const behindIndex = ((-Math.round(back / spacing) % count) + count) % count;
+        const sample = samples[behindIndex];
+        if (sample === undefined) {
+          return;
+        }
+        const offset = clamp(lateral, -room, room);
+        // 赛道右手法向 = (tangentZ, -tangentX)。
+        vehicle.reset(
+          sample.x + sample.tangentZ * offset,
+          sample.z - sample.tangentX * offset,
+          Math.atan2(sample.tangentX, sample.tangentZ),
+        );
+      };
+
+      placeAt(this.vehicle, 0);
+      for (let i = 0; i < this.rivals.length; i++) {
+        const rival = this.rivals[i];
+        if (rival !== undefined) {
+          placeAt(rival, i + 1);
+        }
+      }
+    }
+
+    // 一局重开才换新车:出界回收调的是 vehicle.reset(),那个不清车况
+    // ——把车扶回赛道是回收,不是修车(见 condition.ts 的类注释)。
+    this.vehicle.condition.reset();
+    /*
+     * 起步油量按**赛程 + 余量**算,不是灌满一箱(见 `fuel.ts`)。所以改
+     * `RACE_FORMAT.lapCount` 或者换一条更长的赛道,加油量会自己跟着变。
+     * `flat` 那块没有赛道的平地拿不到长度,退回 `FUEL.startLitres`。
+     */
+    const startFuel =
+      this.track === null
+        ? FUEL.startLitres
+        : raceFuelLitres(RACE_FORMAT.lapCount, this.track.totalLength);
+    this.vehicle.fuel.reset(startFuel);
+    this.pit.reset();
+    for (const rival of this.rivals) {
+      rival.condition.reset();
+      rival.fuel.reset(startFuel);
+    }
+    for (const recovery of this.rivalRecoveries) {
+      recovery.reset();
+    }
+    this.standings?.reset([this.vehicle.arc, ...this.rivals.map((r) => r.arc)]);
+    this.session?.begin({ skipCountdown: this.skipCountdown });
+  }
+
+  /**
+   * 把玩家直接摆到维修道上:`box` = 车位里,`entry` = 入口前的赛车线上。
+   *
+   * **这是一条验收路径,不是玩法。** 维修道在起跑线前 210 米到线后 150 米
+   * 之间,而截图机位全部跟着车走、车又起步在起跑线上 —— 想看它长什么样,
+   * 得先在无头里开一整圈过去。上一版维修区的观感始终没验过,原因就是这个
+   * (HANDOFF 第五十八节「还没做的」)。
+   *
+   * 两个位置分工不同:`box` 拍近景(车位、隔离墙、维修道外墙),`entry` 是
+   * 给人试玩用的 —— 从那里往前开一遍就把入口、限速、停车、出口全走完了。
+   *
+   * 不清车况、不重开一局:它是"把车挪过去",不是 `spawnAtStart()`。
+   */
+  spawnAtPit(where: 'box' | 'entry'): void {
+    const lane = this.pitLane;
+    const track = this.track;
+    if (lane === null || track === null) {
+      return;
+    }
+    const { samples, spacing } = track;
+    const centre = pitBoxCentre(lane);
+    // 入口前留 60 米,够把车速降到限速以下再切进引道。
+    const entryRow = ((lane.entryRow - Math.round(60 / spacing)) % samples.length +
+      samples.length) % samples.length;
+    const row = where === 'box' ? Math.floor(centre.arc / spacing) % samples.length : entryRow;
+    const lateral = where === 'box' ? centre.lateral : 0;
+    const sample = samples[row];
+    if (sample === undefined) {
+      return;
+    }
+    /*
+     * **`Course.sample()` 的 `lateral` 正方向是 `(-tangentZ, tangentX)`,
+     * 和上面发车格用的 `(tangentZ, -tangentX)` 正好相反**(HANDOFF 第五十八节
+     * 量过这一条)。发车格左右对称,用错也看不出来;维修道只在正的一侧,
+     * 用错就是把车摆到赛道另一边的山坡上。
+     */
+    this.vehicle.reset(
+      sample.x - sample.tangentZ * lateral,
+      sample.z + sample.tangentX * lateral,
+      Math.atan2(sample.tangentX, sample.tangentZ),
+    );
+    this.prevPosition.copy(this.vehicle.position);
+    this.prevOrientation.copy(this.vehicle.orientation);
+    this.chase.snapTo(this.vehicle);
+    this.present(1);
   }
 
   get camera(): PerspectiveCamera {
@@ -166,11 +466,24 @@ export class World {
   update(input: InputFrame, dt: number): void {
     this.prevPosition.copy(this.vehicle.position);
     this.prevOrientation.copy(this.vehicle.orientation);
+    this.saveRivalPrevious();
 
-    this.input.throttle = input.throttle;
-    this.input.reverse = input.reverse;
-    this.input.steer = input.steer;
-    this.input.airBrake = input.airBrake;
+    /*
+     * 发车倒计时中、以及冲线之后,输入被锁住。抢跑不判罚——压根动不了,
+     * 这比事后罚时直观。锁住的是**写进物理的那份**,不是外面传进来的
+     * `input`,免得把调用方的帧改脏。
+     */
+    /*
+     * 进站作业期间同样锁输入,而且**多踩一脚刹车**:车已经停下了(进站的
+     * 前提就是速度低于 `PIT.entrySpeed`),但赛道有侧倾和坡度,不踩住会慢慢
+     * 溜出维修区。用现成的刹车力矩按住,比另开一条"冻结刚体"的路子干净。
+     */
+    const servicing = this.updatePit(dt);
+    const locked = this.session?.inputLocked === true || servicing;
+    this.input.throttle = locked ? 0 : input.throttle;
+    this.input.reverse = locked ? 0 : input.reverse;
+    this.input.steer = locked ? 0 : input.steer;
+    this.input.airBrake = servicing ? 1 : locked ? 0 : input.airBrake;
 
     if (this.race !== null) {
       // 就地把 this.input 量化成回放精度 —— 物理这一帧吃到的和录下来的必须是
@@ -179,16 +492,76 @@ export class World {
     }
 
     /*
-     * 拆成 applyForces() → physics.step() → readState() 三段而不是调
-     * this.vehicle.update(),是 M7(多车共享同一个 Physics 世界)的落地
-     * 准备:这里目前只有一辆车,行为和调 update() 完全一样,但把 step()
-     * 的调度权交给了 World——以后加第二辆车时,只需要把这三行改成
-     * 「所有车 applyForces() → 一次 physics.step() → 所有车 readState()」,
-     * 不用再动 Vehicle 内部。见 vehicle.ts 的 update()/applyForces() 类注释。
+     * 所有车先 applyForces(),物理世界只 step() 一次,再所有车 readState() ——
+     * 这正是 vehicle.ts 拆分 update() 时预留的模式(见那边的类注释),
+     * 现在真的用上了第二辆车。玩家和对手共享同一个 this.physics,
+     * 车间碰撞靠 Physics.createChassis() 挂的碰撞体自然发生,不用在这里
+     * 额外处理。
      */
+    // 尾流要在所有车都还没施力之前算好——它读的是上一帧读回来的位置,
+    // 和「所有车先 applyForces 再统一 step」那条模式一致。
+    if (this.rivals.length > 0) {
+      allCars.length = 0;
+      allCars.push(this.vehicle, ...this.rivals);
+      applyDraft(allCars);
+    }
+
     this.vehicle.applyForces(this.input, dt);
+    /*
+     * 每辆对手都要看到**场上所有其他车**(玩家 + 其他对手),否则对手之间
+     * 会互相追尾。`rivalOpponents` 是复用的数组,每帧重填不新建。
+     */
+    if (this.rivals.length > 0) {
+      rivalOpponents.length = 0;
+      rivalOpponents.push(this.vehicle, ...this.rivals);
+    }
+    for (let i = 0; i < this.rivals.length; i++) {
+      const rival = this.rivals[i];
+      const pilot = this.rivalPilots[i];
+      const input = this.rivalInputs[i];
+      if (rival === undefined || pilot === undefined || input === undefined) {
+        continue;
+      }
+      // RacingPilot 自己会跳过 `other === vehicle`,不用在这里剔除自己。
+      pilot.drive(rival, input, rivalOpponents);
+      if (locked) {
+        // 对手也要等发车灯,否则倒计时期间它自己先跑了。
+        input.throttle = 0;
+        input.reverse = 0;
+        input.steer = 0;
+        input.airBrake = 0;
+      }
+      rival.applyForces(input, dt);
+    }
     this.physics.step();
     this.vehicle.readState(dt);
+    for (const rival of this.rivals) {
+      rival.readState(dt);
+    }
+
+    // 名次:两辆车的弧长都读回来之后算一次。用弧长而不是检查点,理由见
+    // standings.ts 的类注释。
+    if (this.standings !== null) {
+      this.standings.setArc(0, this.vehicle.arc);
+      for (let i = 0; i < this.rivals.length; i++) {
+        this.standings.setArc(i + 1, this.rivals[i]?.arc ?? 0);
+      }
+      this.standings.update();
+    }
+
+    // 对手出界也要被拉回来。送回它**当前**的弧长而不是某个检查点:AI 不刷
+    // 成绩,原地扶起来就行,送回检查点反而是平白惩罚。
+    // 发车倒计时期间所有车都静止,那是合法的,别让卡住检测把它们全传送一遍。
+    if (!locked) {
+      for (let i = 0; i < this.rivals.length; i++) {
+        const rival = this.rivals[i];
+        this.rivalRecoveries[i]?.update(rival as Vehicle, dt, rival?.arc ?? 0);
+      }
+    }
+
+    // 赛制在名次算完之后推进:完赛判定读的是 Standings.laps(每辆车都有,
+    // 而 Race 只伺候玩家),见 raceSession.ts 的类注释。
+    this.session?.update(dt, this.standings);
 
     const lapsBefore = this.race?.laps ?? 0;
     this.race?.update(this.vehicle, dt);
@@ -219,6 +592,141 @@ export class World {
     this.chase.update(this.vehicle, dt);
   }
 
+  /**
+   * 把所有车壳换成 glTF 模型的版本。**首屏不等模型**(见 `main.ts`):
+   * 开局先用程序化造型,`car.glb`(gzip 约 990 KB)到货之后再整批换掉。
+   *
+   * 这条路径本来就是免费的 —— `craft.ts` 的程序化实现一直作为回退保留着,
+   * 这里只是把「回退」变成「先上场」。
+   *
+   * **只往一个方向换**,调用前 `isCraftModelReady()` 必须为真;重复调用是
+   * 空操作。新车壳沿用构造时那份配色,所以外观和换之前是同一套色,不会在
+   * 玩家眼前变个颜色。
+   *
+   * 位置/朝向从旧车壳抄过来,下一帧 `present()` 会立刻覆盖掉 —— 抄一下是
+   * 为了「换的那一帧」不闪到原点。
+   */
+  /**
+   * 会动的那些子树:玩家、三辆对手、幽灵。
+   *
+   * 给逐物体运动模糊的速度缓冲用(`Postprocess.markMoving()`)。**换车壳之后
+   * 内容会变**,所以每次现拼一个数组而不是缓存一份 —— 调用方(`main.ts`)
+   * 在模型到货那一刻会重新取一遍。
+   */
+  get movingGroups(): readonly Object3D[] {
+    const groups: Object3D[] = [this.craft.group];
+    for (const craft of this.rivalCrafts) {
+      groups.push(craft.group);
+    }
+    if (this.ghost !== null) {
+      groups.push(this.ghost.craft.group);
+    }
+    return groups;
+  }
+
+  /** 给 HUD 的进站状态。窄接口,HUD 不该知道状态机长什么样。 */
+  get pitStatus(): PitStatus {
+    const lane = this.pitLane;
+    return {
+      phase: this.pit.phase,
+      remaining: this.pit.remaining,
+      inside: lane !== null && insidePitBox(lane, this.vehicle.arc, this.vehicle.lateral),
+      // 「在不在维修道上」直接读物理查出来的那一位,不再自己判一遍 ——
+      // 楔形段的边界是按段内参数插值的,重算一次必然差一点,HUD 就会在
+      // 引道上闪。
+      inLane: this.vehicle.inPit,
+      limited: this.vehicle.inPit && this.vehicle.groundSpeed > PIT.speedLimit,
+    };
+  }
+
+  /**
+   * 推进玩家的进站状态。返回**这一帧是否在作业中**(要锁输入 + 踩住刹车)。
+   *
+   * 作业做完的那一刻才真的加油/换胎/修车 —— 不是一进站就瞬间恢复。时间代价
+   * 和收益必须绑在一起,否则「进站」就变成一个没有取舍的免费按钮。
+   */
+  private updatePit(dt: number): boolean {
+    const lane = this.pitLane;
+    const track = this.track;
+    if (lane === null || track === null) {
+      return false;
+    }
+    const session = this.session;
+    const inside = insidePitBox(lane, this.vehicle.arc, this.vehicle.lateral);
+    const busy = this.pit.update(dt, inside, this.vehicle.groundSpeed, () => {
+      // 加到「还剩几圈 + 余量」,不一律加满 —— 加满等于白背几十公斤出去。
+      const done = this.standings?.rowOf('player')?.laps ?? 0;
+      const left = Math.max(0, (session?.totalLaps ?? RACE_FORMAT.lapCount) - done);
+      const wanted = raceFuelLitres(left + PIT.refuelReserveLaps, track.totalLength);
+      return planService(this.vehicle.fuel, this.vehicle.condition, wanted);
+    });
+
+    if (!busy && this.pit.phase === 'released' && this.pit.service !== null) {
+      const service = this.pit.service;
+      if (service.refuelLitres > 0) {
+        this.vehicle.fuel.refill(this.vehicle.fuel.litres + service.refuelLitres);
+      }
+      if (service.changeTires) {
+        this.vehicle.condition.tireWear = 0;
+      }
+      if (service.repair) {
+        this.vehicle.condition.damage = 0;
+      }
+      // 停了十几秒,刹车当然也凉了。
+      this.vehicle.condition.brakeHeat = 0;
+      this.pit.service = null;
+    }
+    return busy;
+  }
+
+  /**
+   * 车壳是哪来的。给无头测试断言用(见 `main.ts` 和冒烟测试)。
+   *
+   * 三态而不是两态,因为 `model` 和 `model-preloaded` 走的是**不同的代码
+   * 路径**:前者是异步到货之后整批换掉(首屏那条),后者是造 World 之前
+   * 模型就已经在了(`?test=1` 走这条,本地预览服务器快到来不及也可能走)。
+   * 只报"是不是模型"的话,换车壳这段就永远测不到 —— 它会被"其实压根没换,
+   * 一开始就是模型"悄悄冒充过去。
+   */
+  get craftSource(): 'procedural' | 'model' | 'model-preloaded' {
+    if (!this.craftsUpgraded) {
+      return 'procedural';
+    }
+    return this.craftsSwapped ? 'model' : 'model-preloaded';
+  }
+
+  upgradeCrafts(): void {
+    if (!isCraftModelReady() || this.craftsUpgraded) {
+      return;
+    }
+    this.craftsUpgraded = true;
+    this.craftsSwapped = true;
+    // 造型不消耗随机数(模型路径根本不看 rng),所以这里给一个独立的 Rng,
+    // 不去动世界那条随机数流 —— 动了地形和配色都会跟着变。
+    const rng = new Rng(0);
+    const swap = (previous: Craft, palette: Palette): Craft => {
+      const next = createCraft(rng.fork(), palette);
+      next.group.position.copy(previous.group.position);
+      next.group.quaternion.copy(previous.group.quaternion);
+      this.scene.remove(previous.group);
+      this.scene.add(next.group);
+      previous.dispose();
+      return next;
+    };
+
+    this.craft = swap(this.craft, this.palette);
+    this.rivalCrafts = this.rivalCrafts.map((craft, i) =>
+      swap(craft, this.rivalPalettes[i] ?? this.palette),
+    );
+    if (this.ghost !== null) {
+      const next = createCraft(rng.fork(), this.palette);
+      this.scene.add(next.group);
+      const previous = this.ghost.upgradeCraft(next);
+      this.scene.remove(previous.group);
+      previous.dispose();
+    }
+  }
+
   present(alpha: number): void {
     shownPosition.lerpVectors(this.prevPosition, this.vehicle.position, alpha);
     shownOrientation.copy(this.prevOrientation).slerp(this.vehicle.orientation, alpha);
@@ -231,11 +739,6 @@ export class World {
       this.input.throttle * CRAFT.thrustThrottleWeight +
         normalize01(this.vehicle.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
     );
-    /*
-     * 摆四个轮子。**用当前帧的值,不做插值** —— 悬挂行程和转向角的变化幅度
-     * 是厘米/几度的量级,插不插值看不出来;而为了插值再存一份上一帧的四轮状态,
-     * 是每帧四次拷贝换一个看不见的差别。
-     */
     const wheels = this.vehicle.wheelViews;
     for (let i = 0; i < wheels.length; i++) {
       const wheel = wheels[i];
@@ -246,8 +749,41 @@ export class World {
         i,
         wheel.length,
         wheel.steered ? this.vehicle.steerAngle : 0,
-        wheel.rollAngle,
+        rollAt(wheel, alpha),
       );
+    }
+
+    for (let i = 0; i < this.rivals.length; i++) {
+      const rival = this.rivals[i];
+      const craft = this.rivalCrafts[i];
+      const input = this.rivalInputs[i];
+      const prevPos = this.rivalPrevPositions[i];
+      const prevRot = this.rivalPrevOrientations[i];
+      if (
+        rival === undefined ||
+        craft === undefined ||
+        input === undefined ||
+        prevPos === undefined ||
+        prevRot === undefined
+      ) {
+        continue;
+      }
+      rivalShownPosition.lerpVectors(prevPos, rival.position, alpha);
+      rivalShownOrientation.copy(prevRot).slerp(rival.orientation, alpha);
+      craft.group.position.copy(rivalShownPosition);
+      craft.group.quaternion.copy(rivalShownOrientation);
+      craft.setThrust(
+        input.throttle * CRAFT.thrustThrottleWeight +
+          normalize01(rival.groundSpeed, 0, REFERENCE_TOP_SPEED) * CRAFT.thrustSpeedWeight,
+      );
+      const wheels = rival.wheelViews;
+      for (let w = 0; w < wheels.length; w++) {
+        const wheel = wheels[w];
+        if (wheel === undefined) {
+          continue;
+        }
+        craft.setWheel(w, wheel.length, wheel.steered ? rival.steerAngle : 0, rollAt(wheel, alpha));
+      }
     }
 
     this.ghost?.present(alpha);

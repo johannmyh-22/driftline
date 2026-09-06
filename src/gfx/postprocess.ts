@@ -1,5 +1,12 @@
-import { type PerspectiveCamera, type Scene, Vector2, type WebGLRenderer } from 'three';
+import {
+  type Object3D,
+  type PerspectiveCamera,
+  type Scene,
+  Vector2,
+  type WebGLRenderer,
+} from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import type { Pass } from 'three/examples/jsm/postprocessing/Pass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -8,11 +15,25 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { VignetteShader } from 'three/examples/jsm/shaders/VignetteShader.js';
 import { POST } from '../game/tuning';
+import { MotionBlurShader, motionBlurStrength } from './motionBlur';
+import {
+  ObjectMotionBlurShader,
+  VelocityBuffer,
+  objectMotionStrength,
+} from './objectMotionBlur';
+import { prefersReducedMotion } from '../core/reducedMotion';
 
 /** 可单独开关的环节。`?post=` 按名字启用,量各级成本、诊断画面问题都靠它。 */
-export type PostStage = 'ao' | 'bloom' | 'smaa' | 'vignette';
+export type PostStage = 'ao' | 'motion' | 'objmotion' | 'bloom' | 'smaa' | 'vignette';
 
-export const ALL_STAGES: readonly PostStage[] = ['ao', 'bloom', 'smaa', 'vignette'];
+export const ALL_STAGES: readonly PostStage[] = [
+  'ao',
+  'motion',
+  'objmotion',
+  'bloom',
+  'smaa',
+  'vignette',
+];
 
 /**
  * 默认启用的环节。**AO 故意不在里面。**
@@ -32,7 +53,13 @@ export const ALL_STAGES: readonly PostStage[] = ['ao', 'bloom', 'smaa', 'vignett
  *
  * 代码留着不删:M5 的隧道段一进来,遮蔽关系就有了,那时把 'ao' 加回默认即可。
  */
-export const DEFAULT_STAGES: readonly PostStage[] = ['bloom', 'smaa', 'vignette'];
+export const DEFAULT_STAGES: readonly PostStage[] = [
+  'motion',
+  'objmotion',
+  'bloom',
+  'smaa',
+  'vignette',
+];
 
 /**
  * 后处理链。
@@ -55,8 +82,19 @@ export class Postprocess {
   private readonly renderPass: RenderPass;
   private readonly gtao: GTAOPass | null = null;
   private readonly bloom: UnrealBloomPass | null = null;
+  private readonly motion: ShaderPass | null = null;
+  private readonly objectMotion: ShaderPass | null = null;
+  private readonly velocity: VelocityBuffer | null = null;
+  /** 除 RenderPass / OutputPass 之外的所有 pass,给 `setEffectsEnabled()` 整批开关。 */
+  private readonly effects: Pass[] = [];
   private readonly aoScale: number;
   private readonly bloomScale: number;
+  private readonly renderer: WebGLRenderer;
+  private readonly scene: Scene;
+  private effectsOn = true;
+  private readonly reducedMotion = prefersReducedMotion();
+  private width = 1;
+  private height = 1;
 
   constructor(
     renderer: WebGLRenderer,
@@ -65,6 +103,8 @@ export class Postprocess {
     stages: readonly PostStage[] = DEFAULT_STAGES,
   ) {
     const enabled = new Set(stages);
+    this.renderer = renderer;
+    this.scene = scene;
     this.aoScale = POST.aoResolutionScale;
     this.bloomScale = POST.bloomResolutionScale;
     this.composer = new EffectComposer(renderer);
@@ -83,7 +123,61 @@ export class Postprocess {
         samples: POST.aoSamples,
       });
       this.composer.addPass(gtao);
+      this.effects.push(gtao);
       this.gtao = gtao;
+    }
+
+    /*
+     * 动态模糊排在 AO 之后、bloom 之前。
+     *
+     * AO 是**着色**阶段的效果,先算完再谈曝光;动态模糊和 bloom 都是相机在
+     * 「拍下这一帧」时发生的事,而真实相机里是先有曝光时间内的位移(模糊),
+     * 光才在镜头/传感器里散开(bloom)—— 所以模糊在前。反过来的话,尾灯的
+     * 辉光会被拉成一条明显是后期加的光带。
+     *
+     * 两者都必须在 `OutputPass` 之前,也就是在**线性 HDR** 空间里做,理由和
+     * bloom 那条一样(见类注释)。
+     */
+    if (enabled.has('motion')) {
+      const motion = new ShaderPass(MotionBlurShader);
+      // 默认不出力:`setMotionBlur()` 每帧按车速给值,慢速时整级会被关掉。
+      motion.enabled = false;
+      this.composer.addPass(motion);
+      this.effects.push(motion);
+      this.motion = motion;
+    }
+
+    /*
+     * 逐物体模糊紧跟在径向之后:两者都是"相机在曝光期间发生的事",而它们的
+     * 分工是相机运动 vs 物体相对运动(见 `objectMotionBlur.ts`)。谁先谁后
+     * 差别很小,排在一起是为了让"曝光"这一段在链上是连续的,后面才是
+     * bloom(镜头/传感器的散射)。
+     */
+    if (enabled.has('objmotion')) {
+      const velocity = new VelocityBuffer();
+      const pass = new ShaderPass(ObjectMotionBlurShader);
+      const slot = pass.uniforms['tVelocity'];
+      if (slot === undefined) {
+        throw new Error('ObjectMotionBlurShader 没有 tVelocity uniform');
+      }
+      slot.value = velocity.target.texture;
+      pass.enabled = false;
+      this.composer.addPass(pass);
+      this.effects.push(pass);
+      this.objectMotion = pass;
+      this.velocity = velocity;
+    }
+
+    /*
+     * 两级分区:径向那一级要读逐物体的速度缓冲当掩码,跳过会动的物体
+     * (理由见 `motionBlur.ts` 的「两级分区」)。两级都在的时候才接上。
+     */
+    if (this.motion !== null && this.velocity !== null) {
+      const mask = this.motion.uniforms['tVelocity'];
+      if (mask !== undefined) {
+        mask.value = this.velocity.target.texture;
+      }
+      setNumberUniform(this.motion, 'useMask', 1);
     }
 
     if (enabled.has('bloom')) {
@@ -96,13 +190,16 @@ export class Postprocess {
       );
       clampBloomInput(bloom);
       this.composer.addPass(bloom);
+      this.effects.push(bloom);
       this.bloom = bloom;
     }
 
     this.composer.addPass(new OutputPass());
 
     if (enabled.has('smaa')) {
-      this.composer.addPass(new SMAAPass());
+      const smaa = new SMAAPass();
+      this.composer.addPass(smaa);
+      this.effects.push(smaa);
     }
 
     if (enabled.has('vignette')) {
@@ -110,6 +207,7 @@ export class Postprocess {
       setNumberUniform(vignette, 'offset', POST.vignetteOffset);
       setNumberUniform(vignette, 'darkness', POST.vignetteDarkness);
       this.composer.addPass(vignette);
+      this.effects.push(vignette);
     }
   }
 
@@ -131,31 +229,158 @@ export class Postprocess {
     }
   }
 
+  /**
+   * 每帧喂一次动态模糊的强度与扩张焦点。
+   *
+   * `speed01` 是归一化车速;`focusX/focusY` 是**速度方向在画面上的投影**
+   * (uv,0..1),由 `main.ts` 用相机把它投出来 —— 钉死在屏幕中心的话过弯时
+   * 模糊方向会明显不对(推导见 `gfx/motionBlur.ts`)。
+   *
+   * `alignment` 是**速度方向和相机朝向的重合度**(0..1),乘在强度上。
+   *
+   * **这一项是拍完截图才补上的,不补的话固定机位会糊成一团。** 径向模糊的
+   * 推导前提是「相机沿自己的视线方向前进」,那时光流才是从扩张焦点发散的
+   * 径向场。而 `side`/`front`/`top` 这几个机位是**横着跟拍**的:扩张焦点跑到
+   * 画面外很远的地方,着色器里 `位移 ∝ 离焦点的距离` 那条就彻底失效,整幅
+   * 画面被拉出一串重影 —— 实测 `side` 机位 53 m/s 时车身完全糊掉。
+   *
+   * 玩家也够得着这个坑:鼠标把视角转到侧面时,前提同样不成立。用重合度当
+   * 闸门,前提不成立时自然衰减到 0,不需要判断"现在是哪个机位"。
+   *
+   * **强度为 0 时整级 pass 直接关掉**,而不是喂一个 0 进去:后者照样要跑一遍
+   * 全屏采样,而慢速行驶和停车恰恰是最不该花这笔钱的时候。
+   */
+  setMotionBlur(speed01: number, focusX: number, focusY: number, alignment = 1): void {
+    const pass = this.motion;
+    if (pass === null || !this.effectsOn) {
+      return;
+    }
+    const strength =
+      motionBlurStrength(speed01, this.reducedMotion) * Math.min(1, Math.max(0, alignment));
+    pass.enabled = strength > 0;
+    if (!pass.enabled) {
+      return;
+    }
+    setNumberUniform(pass, 'strength', strength);
+    const focus = pass.uniforms['focus']?.value as Vector2 | undefined;
+    focus?.set(focusX, focusY);
+  }
+
+  /**
+   * 把一棵子树标成「会动的」,它才会进速度缓冲。**换车壳之后要再调一次**
+   * (`World.upgradeCrafts()` 会把整批网格换掉)。重复调是空操作。
+   */
+  markMoving(roots: readonly Object3D[]): void {
+    for (const root of roots) {
+      this.velocity?.mark(root);
+    }
+  }
+
+  /**
+   * 每帧喂一次逐物体模糊的强度。和径向那一级一样,强度为 0 时整级关掉 ——
+   * 这一级更值得关,因为它还连着一次额外的场景渲染。
+   */
+  setObjectMotionBlur(speed01: number): void {
+    const pass = this.objectMotion;
+    if (pass === null || !this.effectsOn) {
+      return;
+    }
+    const strength = objectMotionStrength(speed01);
+    pass.enabled = strength > 0;
+    if (pass.enabled) {
+      setNumberUniform(pass, 'strength', strength * POST.objectMotionShutter);
+    }
+  }
+
+  /**
+   * 整批开关后处理效果。**给动态画质调节用(`core/perfGovernor.ts`)**,
+   * 是最后一档才动的杠杆 —— 前面几档先降分辨率,理由见 `PERF.levels`。
+   *
+   * `RenderPass` 和 `OutputPass` 不在里面:前者是画面本身,后者做 ACES +
+   * sRGB,关掉画面会直接变成一片过曝的线性值,那不是"省一点",是坏掉。
+   */
+  setEffectsEnabled(on: boolean): void {
+    this.effectsOn = on;
+    for (const pass of this.effects) {
+      pass.enabled = on;
+    }
+  }
+
+  /**
+   * 径向那一级这一帧要不要掩码。
+   *
+   * 逐物体那一级在低速时会被整个关掉(省一次场景渲染),但径向那一级的开启
+   * 门槛更高(`motionMinSpeed01` > `objectMotionMinSpeed01`),所以正常情况
+   * 下不会出现"径向开着而掩码没画"。**这个判断是防御性的**:两个门槛哪天
+   * 被调反了,不加这条就会拿上一帧的陈旧掩码去挖当前帧的画面。
+   */
+  private motionNeedsMask(): boolean {
+    return this.motion?.enabled === true && this.velocity !== null;
+  }
+
   render(camera: PerspectiveCamera): void {
     this.renderPass.camera = camera;
     if (this.gtao !== null) {
       this.gtao.camera = camera;
     }
+    // 速度缓冲要在主渲染之前画:模糊那一级读的是这一帧的速度。
+    // pass 关着的时候连这一遍都不画 —— 它是这一级真正的成本所在。
+    if (this.objectMotion?.enabled === true || this.motionNeedsMask()) {
+      this.velocity?.render(this.renderer, this.scene, camera);
+    }
     this.composer.render();
   }
 
   setSize(width: number, height: number): void {
+    this.width = width;
+    this.height = height;
+    /*
+     * **必须显式转告 composer 当前的 pixelRatio。**
+     *
+     * `EffectComposer` 在**构造时**把 `renderer.getPixelRatio()` 抄进
+     * `_pixelRatio` 就再也不看了,`setSize()` 只按这个抄下来的值算渲染目标。
+     * 所以动态画质调节改 `renderer.setPixelRatio()` 之后,如果不补这一句,
+     * 渲染目标**尺寸一点没变** —— 省下的只有最后那一次贴到画布的 blit。
+     *
+     * 这个坑是量出来的:降到最低档实测只快了 17%,而按像素数算应该快得多;
+     * 那 17% 全是"关掉后处理"带来的,分辨率那一档完全没生效。
+     */
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(width, height);
-    // composer.setSize 会把每个 pass 都拉到全分辨率,所以缩放必须在它之后补。
-    // AO 和 bloom 都是低频信号,半分辨率肉眼看不出来,省下的却是全屏的一半 fill ——
-    // SwiftShader 上 fill 就是全部成本。
-    this.gtao?.setSize(
-      Math.max(1, Math.round(width * this.aoScale)),
-      Math.max(1, Math.round(height * this.aoScale)),
+    this.applyEffectResolution();
+    const ratio = this.renderer.getPixelRatio();
+    this.velocity?.setSize(
+      Math.round(width * ratio * POST.objectMotionResolutionScale),
+      Math.round(height * ratio * POST.objectMotionResolutionScale),
     );
-    this.bloom?.setSize(
-      Math.max(1, Math.round(width * this.bloomScale)),
-      Math.max(1, Math.round(height * this.bloomScale)),
-    );
+  }
+
+  /**
+   * AO 和 bloom 的自有渲染目标。**composer.setSize 会把每个 pass 都拉到全
+   * 分辨率,所以缩放必须在它之后补。**
+   *
+   * 两者都是低频信号,半分辨率肉眼看不出来,省下的却是全屏的一半 fill ——
+   * SwiftShader 上 fill 就是全部成本。
+   *
+   * 基准刻意用的是 **CSS 像素**而不是渲染像素:DPR 2 的屏上这等于 1/4 渲染
+   * 分辨率,更省,而且照样看不出来。但要夹住上限 —— 动态画质把 pixelRatio
+   * 降到 1 以下时,不夹的话这两个目标会比主目标还大,白花钱。
+   */
+  private applyEffectResolution(): void {
+    const ratio = this.renderer.getPixelRatio();
+    const maxW = Math.max(1, Math.round(this.width * ratio));
+    const maxH = Math.max(1, Math.round(this.height * ratio));
+    const sized = (scale: number): [number, number] => [
+      Math.min(maxW, Math.max(1, Math.round(this.width * scale))),
+      Math.min(maxH, Math.max(1, Math.round(this.height * scale))),
+    ];
+    this.gtao?.setSize(...sized(this.aoScale));
+    this.bloom?.setSize(...sized(this.bloomScale));
   }
 
 
   dispose(): void {
+    this.velocity?.dispose();
     this.composer.dispose();
   }
 }

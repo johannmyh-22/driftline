@@ -82,6 +82,23 @@ body {
   letter-spacing: 0.08em;
 }
 
+/* 名次徽章(M7)。默认中性色,领跑时变金——和 BEST 那栏的金是同一个语义。 */
+.hud-pos-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #e8ecff;
+  letter-spacing: 0.08em;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-pos-lead {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.14);
+}
+
 .hud-delta-badge {
   font-size: 0.78rem;
   font-weight: 700;
@@ -248,6 +265,7 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .hud-speed-num,
   .hud-delta-badge,
+  .hud-pos-badge,
   .hud-map-player {
     transition: none;
   }
@@ -395,4 +413,200 @@ body {
   font-size: 0.7rem;
   opacity: 0.65;
   letter-spacing: 0.02em;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 赛制(M7):发车倒计时与结算面板
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+.hud-countdown {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: clamp(4rem, 14vw, 10rem);
+  font-weight: 800;
+  line-height: 1;
+  color: #e8ecff;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0.08em 0.3em rgba(0, 0, 0, 0.75);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.hud-results {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  min-width: min(22rem, 80vw);
+  padding: 1.4rem 1.6rem;
+  border-radius: 10px;
+  background: rgba(5, 8, 18, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+
+.hud-results-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: #94a3b8;
+  margin-bottom: 0.9rem;
+}
+
+.hud-results-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  padding: 0.35rem 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-results-row:first-child .hud-results-pos,
+.hud-results-row:first-child .hud-results-who {
+  color: #fbbf24;
+}
+
+.hud-results-pos {
+  font-weight: 700;
+  color: #e8ecff;
+  min-width: 2.2rem;
+}
+
+.hud-results-who {
+  flex: 1;
+  color: #e8ecff;
+}
+
+.hud-results-time {
+  color: #94a3b8;
+}
+
+.hud-results-hint {
+  margin-top: 1rem;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+/*
+ * ── 触屏控件(M6)──────────────────────────────────────────────────────────
+ *
+ * 位置和大小全部由 `touchOverlay.ts` 按 `TOUCH` 那张表写成内联样式,这里只
+ * 管长相。别在这里再写一套坐标 —— 两处坐标迟早对不上,而且错法是"看起来在
+ * 这儿、按下去没反应"。
+ */
+.touch {
+  position: absolute;
+  inset: 0;
+  /* 不设的话浏览器会把拖动当成滚动/下拉刷新,pointermove 收到一半被 pointercancel
+     抢走,表现是"方向打到一半自己回正了"。 */
+  touch-action: none;
+  /* 这一层只在控件自己身上收事件,空白处的点击照旧穿透到画布(鼠标视角要用)。 */
+  pointer-events: none;
+  z-index: 5;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.touch-stick,
+.touch-button {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: auto;
+  box-sizing: border-box;
+  border: 1.5px solid rgb(255 255 255 / 30%);
+  background: rgb(12 16 22 / 28%);
+  backdrop-filter: blur(2px);
+  display: grid;
+  place-items: center;
+  font: 500 13px/1 system-ui, sans-serif;
+  color: rgb(255 255 255 / 72%);
+  letter-spacing: 0.08em;
+  /* 控件是给拇指用的,不该抢走视线。按住时才提亮(.is-held)。 */
+  opacity: 0.55;
+  transition: opacity 120ms ease, background-color 80ms ease;
+}
+
+.touch-button.is-held {
+  opacity: 1;
+  background: rgb(120 200 255 / 32%);
+  border-color: rgb(160 220 255 / 70%);
+}
+
+.touch-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 38%;
+  height: 38%;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 42%);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/*
+ * 油量条。挂在时速表下面 —— 它是"偶尔瞄一眼"的信息,不该和圈速/名次争同一级
+ * 的注意力,所以做得很细、很淡,只有快见底时才变红跳出来。
+ */
+.hud-fuel-bar {
+  margin-top: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 14%);
+  overflow: hidden;
+}
+
+.hud-fuel-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 2px;
+  background: rgb(140 210 255 / 75%);
+  transition: width 240ms linear, background-color 200ms ease;
+}
+
+.hud-fuel-bar.is-low .hud-fuel-fill {
+  background: rgb(255 120 100 / 90%);
+}
+
+/*
+ * 路面状态。挂在时速表底下,和油量条同一档"偶尔瞄一眼"的信息 —— 做得比
+ * 时速小得多,潮湿时才提亮跳出来。
+ */
+.hud-track-state {
+  margin: 6px 0 0;
+  font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  color: rgb(255 255 255 / 45%);
+  text-align: right;
+}
+
+.hud-track-state.is-damp {
+  color: rgb(120 200 255 / 85%);
+}
+
+/*
+ * 进站提示。画面中央偏下 —— 这是需要**立刻看到**的信息,和右下角那两条
+ * "偶尔瞄一眼"的不是一个量级,所以位置和字号都往上提一档。
+ */
+.hud-pit-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  padding: 8px 18px;
+  border-radius: 6px;
+  background: rgb(12 18 26 / 72%);
+  border: 1px solid rgb(120 190 255 / 45%);
+  color: rgb(190 225 255 / 95%);
+  font: 600 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+
+.hud-pit-banner.is-working {
+  border-color: rgb(255 200 120 / 60%);
+  color: rgb(255 220 170 / 95%);
 }
