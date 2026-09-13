@@ -148,6 +148,8 @@ function createRibbon(course: Course, rng: Rng, palette: Palette, pit: PitLane |
     }),
   );
   mesh.name = 'track-ribbon';
+  // 见 `applyTrackDamp()`:所有沥青路面都要打这个标记,少一块就会干在雨里。
+  mesh.userData['roadSurface'] = true;
   mesh.receiveShadow = true;
   return mesh;
 }
@@ -214,6 +216,7 @@ function createPitSurface(course: Course, rng: Rng, palette: Palette, pit: PitLa
     }),
   );
   mesh.name = 'pit-surface';
+  mesh.userData['roadSurface'] = true;
   mesh.receiveShadow = true;
   return mesh;
 }
@@ -466,11 +469,21 @@ export function applyTrackDamp(track: Group, damp: number): void {
   if (wet <= 0) {
     return;
   }
-  const ribbon = track.getObjectByName('track-ribbon');
-  if (!(ribbon instanceof Mesh)) {
-    return;
-  }
-  const material = ribbon.material as MeshStandardMaterial;
-  material.color.setScalar(1 - WEATHER.dampDarken * wet);
-  material.roughness = lerp(1, WEATHER.dampRoughness, wet);
+  /*
+   * **按标记遍历,不要按名字点名。**
+   *
+   * 上一版写死了 `getObjectByName('track-ribbon')`,而维修道那一轮多铺了一块
+   * `pit-surface` —— 于是潮湿赛道上维修道是干的,紧挨着湿赛道,一眼就看出来
+   * (seed 5,damp 0.79)。**点名式的写法没法在加新路面时提醒任何人**,所以
+   * 改成认 `userData.roadSurface` 这个标记:漏打标记会被单测抓到
+   * (它断言打了标记的不止一块,而且每一块都真的变湿了)。
+   */
+  track.traverse((child) => {
+    if (!(child instanceof Mesh) || child.userData['roadSurface'] !== true) {
+      return;
+    }
+    const material = child.material as MeshStandardMaterial;
+    material.color.setScalar(1 - WEATHER.dampDarken * wet);
+    material.roughness = lerp(1, WEATHER.dampRoughness, wet);
+  });
 }

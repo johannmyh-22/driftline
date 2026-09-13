@@ -1,4 +1,5 @@
-import type { BufferAttribute, Mesh } from 'three';
+import { Mesh } from 'three';
+import type { BufferAttribute, MeshStandardMaterial } from 'three';
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
 import { Course } from '../../src/game/course';
@@ -6,7 +7,7 @@ import { type PitLane, createPitLane } from '../../src/game/pitLane';
 import { generateTrack } from '../../src/game/trackLayout';
 import { PIT, TRACK } from '../../src/game/tuning';
 import { createPalette } from '../../src/gfx/palette';
-import { createTrackMesh } from '../../src/gfx/trackMesh';
+import { applyTrackDamp, createTrackMesh } from '../../src/gfx/trackMesh';
 
 function buildWall(seed: number): { wall: Mesh; course: Course } {
   const rng = new Rng(seed);
@@ -300,5 +301,86 @@ describe('维修道网格', () => {
       checked++;
     }
     expect(checked).toBeGreaterThan(100);
+  });
+});
+
+describe('潮湿路面要盖到每一块沥青', () => {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   * 这一条是修出来的(2026-09,HANDOFF 第六十六节)。
+   *
+   * `applyTrackDamp()` 原来写死 `getObjectByName('track-ribbon')`,而维修道
+   * 那一轮多铺了一块 `pit-surface` —— 潮湿赛道上维修道是**干的**,紧挨着湿
+   * 赛道,一眼就看得出来(seed 5,damp 0.79,截图确认过)。
+   *
+   * **点名式的写法没法在加新路面时提醒任何人。** 改成认 `userData.roadSurface`
+   * 标记之后,这条测试断言「打了标记的不止一块,而且每一块都真的变湿了」——
+   * 将来再加一块路面,忘了打标记就会在这里红。
+   * ══════════════════════════════════════════════════════════════════════════
+   */
+  function roadMeshes(group: ReturnType<typeof createTrackMesh>): Mesh[] {
+    const out: Mesh[] = [];
+    group.traverse((child) => {
+      if (child instanceof Mesh && child.userData['roadSurface'] === true) {
+        out.push(child);
+      }
+    });
+    return out;
+  }
+
+  it('维修道和主条带都被打湿,护墙不受影响', () => {
+    const { course, lane, palette } = buildPitMesh(42);
+    const rng = new Rng(9);
+    const group = createTrackMesh(course, rng, palette, lane);
+
+    const roads = roadMeshes(group);
+    // 两块:主条带 + 维修道。少一块就说明有人加了路面却没打标记。
+    expect(roads.length).toBe(2);
+    expect(roads.map((m) => m.name).sort()).toEqual(['pit-surface', 'track-ribbon']);
+
+    const before = roads.map((m) => {
+      const material = m.material as MeshStandardMaterial;
+      return { color: material.color.r, roughness: material.roughness };
+    });
+    const wall = group.getObjectByName('guardrail') as Mesh;
+    const wallMaterial = wall.material as MeshStandardMaterial;
+    const wallBefore = { color: wallMaterial.color.r, roughness: wallMaterial.roughness };
+
+    applyTrackDamp(group, 0.8);
+
+    for (let i = 0; i < roads.length; i++) {
+      const material = roads[i]?.material as MeshStandardMaterial;
+      // 湿沥青又暗又亮:变暗 + 粗糙度压下去,两件事必须一起发生。
+      expect(material.color.r).toBeLessThan(before[i]?.color ?? 1);
+      expect(material.roughness).toBeLessThan(before[i]?.roughness ?? 1);
+    }
+    // 护墙是混凝土,不跟着路面变湿。
+    expect(wallMaterial.color.r).toBeCloseTo(wallBefore.color, 9);
+    expect(wallMaterial.roughness).toBeCloseTo(wallBefore.roughness, 9);
+  });
+
+  it('两块路面湿成同一个样子 —— 不然交界处会有一条突兀的分界', () => {
+    const { course, lane, palette } = buildPitMesh(42);
+    const group = createTrackMesh(course, new Rng(9), palette, lane);
+    applyTrackDamp(group, 0.8);
+    const roads = roadMeshes(group).map((m) => m.material as MeshStandardMaterial);
+    const first = roads[0];
+    expect(first).toBeDefined();
+    for (const material of roads) {
+      expect(material.color.r).toBeCloseTo(first?.color.r ?? 0, 9);
+      expect(material.roughness).toBeCloseTo(first?.roughness ?? 0, 9);
+    }
+  });
+
+  it('干燥赛道什么都不动', () => {
+    const { course, lane, palette } = buildPitMesh(42);
+    const group = createTrackMesh(course, new Rng(9), palette, lane);
+    const roads = roadMeshes(group).map((m) => m.material as MeshStandardMaterial);
+    const before = roads.map((m) => ({ color: m.color.r, roughness: m.roughness }));
+    applyTrackDamp(group, 0);
+    for (let i = 0; i < roads.length; i++) {
+      expect(roads[i]?.color.r).toBeCloseTo(before[i]?.color ?? 0, 9);
+      expect(roads[i]?.roughness).toBeCloseTo(before[i]?.roughness ?? 0, 9);
+    }
   });
 });
