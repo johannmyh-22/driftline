@@ -102,21 +102,16 @@ export class RacingPilot {
     targetSpeed = Math.max(targetSpeed, RACING_AI.minTargetSpeed);
 
     // ── 2. 转向:纯追踪,目标点朝弯内偏 ──
-    const lookAhead = RACING_AI.lookAheadBase + speed * RACING_AI.lookAheadTime;
-    const aheadIdx = (here + Math.round(lookAhead / spacing)) % count;
+    // 前视点走 `aheadIndex()`,不在这儿再算一遍 —— 测试断言 `aimOffset()` 时
+    // 用的是同一个口径,两边各算一份迟早会漂开。
+    const aheadIdx = this.aheadIndex(vehicle);
     const target = samples[aheadIdx];
     if (target === undefined) {
       out.throttle = 0;
       return;
     }
 
-    const signedKappa = this.signedCurvatureAt(aheadIdx);
-    let offset = 0;
-    if (Math.abs(signedKappa) > RACING_AI.lineCurvature) {
-      // 朝弯内偏。signedKappa > 0 表示向右弯,内侧在右。
-      offset = Math.sign(signedKappa) * this.layout.halfWidth * RACING_AI.lineOffset;
-    }
-    offset += this.avoidOffset(vehicle, rivals);
+    const offset = this.aimOffset(vehicle, rivals, aheadIdx);
 
     // 赛道右手边的单位法向 = 切线绕 Y 轴转 -90°:(tz, -tx) → 这里用 (tangentZ, -tangentX)。
     const aimX = target.x + target.tangentZ * offset;
@@ -213,6 +208,55 @@ export class RacingPilot {
     return arcLen > 0 ? angle / arcLen : 0;
   }
 
+  /**
+   * 瞄点允许偏离中心线多远(米)。留 1 米余量,免得贴着路缘跑。
+   *
+   * **走线偏移和避让偏移共用这一个上限。**
+   */
+  get lineRoom(): number {
+    return this.layout.halfWidth - 1;
+  }
+
+  /**
+   * 瞄点相对中心线的横向偏移(米,正 = 赛道右侧)。
+   *
+   * ## 为什么是 public
+   *
+   * 这条的正确性**必须直接断言**,不能靠「撞墙帧数下降」去间接量 ——
+   * 那个量被车间碰撞污染,而多车碰撞是混沌的:上一轮就因为拿它当证据,
+   * 同一个改动在两套配置下得出相反结论(HANDOFF 第六十三节)。
+   * 暴露出来之后这条不变量是确定性的、一帧就能验,不需要跑物理。
+   *
+   * ## 两项偏移必须夹**总量**
+   *
+   * 走线朝弯内偏最多 `halfWidth × lineOffset` = 4.65 米,避让再偏
+   * `rivalSideStep` = 4.5 米,而原来只有后者自己夹了自己那一项。叠起来
+   * **9.15 米,而路面半宽只有 7.5 米** —— 瞄点落到路肩上,纯追踪照着开
+   * 就是贴着墙跑。实测四车磨光胎时有 1.3~3.0% 的帧是这个状态。
+   *
+   * 两项冲突时按总量夹、不做优先级:只有「都往同一边推」时才会超,
+   * 那种情况下限制往那边走多远是唯一讲得通的处理。
+   */
+  aimOffset(vehicle: Vehicle, rivals: readonly Vehicle[], aheadIdx: number): number {
+    const signedKappa = this.signedCurvatureAt(aheadIdx);
+    let offset = 0;
+    if (Math.abs(signedKappa) > RACING_AI.lineCurvature) {
+      // 朝弯内偏。signedKappa > 0 表示向右弯,内侧在右。
+      offset = Math.sign(signedKappa) * this.layout.halfWidth * RACING_AI.lineOffset;
+    }
+    offset += this.avoidOffset(vehicle, rivals);
+    return clamp(offset, -this.lineRoom, this.lineRoom);
+  }
+
+  /** 前视点的采样下标。给 `aimOffset()` 的调用方和测试用,口径必须一致。 */
+  aheadIndex(vehicle: Vehicle): number {
+    const { samples, spacing } = this.layout;
+    const count = samples.length;
+    const here = ((Math.floor(vehicle.arc / spacing) % count) + count) % count;
+    const lookAhead = RACING_AI.lookAheadBase + vehicle.groundSpeed * RACING_AI.lookAheadTime;
+    return (here + Math.round(lookAhead / spacing)) % count;
+  }
+
   /** 前方有车挡路时朝旁边挪。返回附加的横向偏移(米)。 */
   private avoidOffset(vehicle: Vehicle, rivals: readonly Vehicle[]): number {
     const blocker = this.findBlocker(vehicle, rivals);
@@ -222,8 +266,7 @@ export class RacingPilot {
     // 往对方所在一侧的反方向挪;正好并排(差值接近 0)时默认往左让。
     const side = blocker.lateral - vehicle.lateral;
     const away = side >= 0 ? -1 : 1;
-    const room = this.layout.halfWidth - 1;
-    return clamp(away * RACING_AI.rivalSideStep, -room, room);
+    return clamp(away * RACING_AI.rivalSideStep, -this.lineRoom, this.lineRoom);
   }
 
   /** 跟在别人后面时的油门系数,避免直接怼上去。 */
