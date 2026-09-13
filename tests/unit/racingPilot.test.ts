@@ -6,7 +6,7 @@ import { Course } from '../../src/game/course';
 import { CURATED_TRACKS } from '../../src/game/curatedTracks';
 import { Physics, initPhysics } from '../../src/game/physics';
 import { RacingPilot } from '../../src/game/racingPilot';
-import { generateTrack } from '../../src/game/trackLayout';
+import { type TrackLayout, generateTrack } from '../../src/game/trackLayout';
 import { RACING_AI } from '../../src/game/tuning';
 import { Vehicle } from '../../src/game/vehicle';
 
@@ -244,5 +244,99 @@ describe('RacingPilot 的避让', () => {
     const withSelf = createInputFrame();
     pilot.drive(vehicle, withSelf, [vehicle]);
     expect(withSelf.throttle).toBeCloseTo(alone.throttle, 6);
+  });
+});
+
+describe('瞄点不许跑到路面外', () => {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   * 这一条是量出来的(2026-09,HANDOFF 第六十三节),而且**第一次尝试是失败
+   * 的** —— 当时拿「撞墙帧数」当验收标准,同一个改动在两套配置下得出相反结论
+   * (probe 里 972→276,单测里 0→23)。原因是多车碰撞混沌,那个量根本不只
+   * 量到了我想量的东西。
+   *
+   * 所以这一版断言的是**这条改动直接控制的量**:瞄点相对中心线的偏移。它是
+   * 确定性的、一帧就能验、不用跑物理、不受碰撞影响。
+   *
+   * 缺陷本身:走线朝弯内偏 `halfWidth × lineOffset` = 4.65 米,避让再偏
+   * `rivalSideStep` = 4.5 米,而原来只有后者夹了自己那一项 —— 叠起来 9.15 米,
+   * 而路面半宽只有 7.5 米。瞄点落到路肩上,纯追踪照着开就是贴着墙跑。
+   * ══════════════════════════════════════════════════════════════════════════
+   */
+  function rig(seed = 42): { layout: TrackLayout; course: Course; pilot: RacingPilot } {
+    const rng = new Rng(seed);
+    const layout = generateTrack(rng.fork());
+    return { layout, course: new Course(layout, rng.fork()), pilot: new RacingPilot(layout) };
+  }
+
+  /** 把车摆到「行号 + 横向」上。`Course.sample()` 的 lateral 正方向是 (-tz, tx)。 */
+  function place(car: Vehicle, layout: TrackLayout, row: number, lateral: number): void {
+    const samples = layout.samples;
+    const sample = samples[((row % samples.length) + samples.length) % samples.length];
+    if (sample === undefined) {
+      throw new Error('采样点缺失');
+    }
+    car.reset(
+      sample.x - sample.tangentZ * lateral,
+      sample.z + sample.tangentX * lateral,
+      Math.atan2(sample.tangentX, sample.tangentZ),
+    );
+  }
+
+  it('两项偏移的上限之和确实超得过路面半宽 —— 所以这条 clamp 是要干活的', () => {
+    const { layout } = rig();
+    const stacked = layout.halfWidth * RACING_AI.lineOffset + RACING_AI.rivalSideStep;
+    // 不成立就说明有人调过旋钮,这条测试也就不再测它想测的东西了。
+    expect(stacked).toBeGreaterThan(layout.halfWidth);
+    expect(stacked).toBeCloseTo(9.15, 2);
+  });
+
+  it('**整条赛道、任意挡路位置,瞄点都留在路面内**', () => {
+    const { layout, course, pilot } = rig();
+    const physics = new Physics();
+    const car = new Vehicle(course, physics);
+    const blocker = new Vehicle(course, physics);
+    const room = pilot.lineRoom;
+
+    let worst = 0;
+    let outside = 0;
+    let samplesChecked = 0;
+    for (let row = 0; row < layout.samples.length; row += 3) {
+      for (const mine of [-4, 0, 4]) {
+        place(car, layout, row, mine);
+        // 挡路的车摆在正前方,左右都试 —— 避让的方向由它决定。
+        for (const theirs of [-6, -1, 1, 6]) {
+          place(blocker, layout, row + 2, theirs);
+          const offset = pilot.aimOffset(car, [car, blocker], pilot.aheadIndex(car));
+          worst = Math.max(worst, Math.abs(offset));
+          if (Math.abs(offset) > room) {
+            outside++;
+          }
+          samplesChecked++;
+        }
+      }
+    }
+    expect(samplesChecked).toBeGreaterThan(500);
+    expect(outside).toBe(0);
+    expect(worst).toBeLessThanOrEqual(room + 1e-9);
+    // 而且 clamp 确实生效过 —— 不然这条测试是空过的。
+    expect(worst).toBeCloseTo(room, 6);
+  });
+
+  it('单车时这条 clamp 一次都不生效 —— 已验收的单车行为逐位不变', () => {
+    /*
+     * 单车没有避让偏移,总量就是走线那 4.65 米,小于 6.5 —— clamp 碰不到。
+     * 这一条是「改动不会碰到既有基线」的直接证据,不用靠跑圈去推断。
+     */
+    const { layout, course, pilot } = rig();
+    const car = new Vehicle(course, new Physics());
+    const limit = layout.halfWidth * RACING_AI.lineOffset;
+    for (let row = 0; row < layout.samples.length; row += 2) {
+      place(car, layout, row, 0);
+      expect(Math.abs(pilot.aimOffset(car, [car], pilot.aheadIndex(car)))).toBeLessThanOrEqual(
+        limit + 1e-9,
+      );
+    }
+    expect(limit).toBeLessThan(pilot.lineRoom);
   });
 });
