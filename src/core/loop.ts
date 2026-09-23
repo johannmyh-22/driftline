@@ -96,12 +96,19 @@ export class Loop {
    *
    * 这里用 `alpha = 1` 而不是 `accumulator / fixedDt`(=0):截图必须画的是
    * `snapshot()` 报告的那个状态,否则断言值和图对不上。
+   *
+   * `beforeLastStep` 在最后一个固定步之前调一次。n 步只渲染一帧,而有些东西
+   * 要「上一帧」才成立(逐物体运动模糊的速度),得在这里补记,否则最后那一帧
+   * 看到的历史是 n 步之前的。
    */
-  advance(frames: number): void {
+  advance(frames: number, beforeLastStep?: () => void): void {
     if (!Number.isInteger(frames) || frames < 0) {
       throw new RangeError(`advance() 需要非负整数,收到 ${String(frames)}`);
     }
     for (let i = 0; i < frames; i++) {
+      if (i === frames - 1) {
+        beforeLastStep?.();
+      }
       this.step();
     }
     this.handlers.render(1);

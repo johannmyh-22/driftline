@@ -13,10 +13,21 @@ import type { Palette } from './palette';
 import { type PitLane, pitRowIndex, pitWallAtRow, rowWithin } from '../game/pitLane';
 import { createSurfaceTextures } from './textures';
 import { clamp, lerp } from '../core/mathx';
-import { WEATHER } from '../game/tuning';
+import { TRACK, WEATHER } from '../game/tuning';
 
-/** 边线条纹的宽度,占外缘半宽的比例。 */
-const EDGE_STRIPE = 0.06;
+/**
+ * 路面标线的尺寸(米)。**在着色器里按真实宽度画,不走顶点色。**
+ *
+ * 顶点色的最小单位是一列(`LATERAL_DIVISIONS` = 10,一列 2.9 米),用它画出来的
+ * 「边线」是一条 2.9 米宽的带子,「起跑线」是三行 = 18 米深的色块 —— 那不是
+ * 标线,是色带。着色器拿插值出来的横向位置和弧长,能画到厘米级。
+ *
+ * 数值参照:赛道边线(track limits 那条白线)真实宽度 10~20 cm,这里取 25 cm
+ * —— 追尾机位下 15 cm 的线在 30 米外已经小于一个像素,会闪。起跑/终点线
+ * 取 60 cm。
+ */
+const EDGE_LINE_WIDTH = 0.25;
+const START_LINE_DEPTH = 0.6;
 
 /** 顶点色当贴图乘数用时的中性值。 */
 const WHITE = new Color().setRGB(1, 1, 1);
@@ -43,8 +54,6 @@ const WALL_TOP_SEGMENT = 4;
 
 /** 预制段长度(米)。真实护墙是一段段拼的,接缝是最省的「这不是一整块」的线索。 */
 const WALL_SEGMENT_LENGTH = 12;
-/** 起跑线覆盖多少个中心线采样。 */
-const START_LINE_ROWS = 3;
 
 /**
  * 赛道条带、边线、路肩、护栏、起跑线。
@@ -56,8 +65,9 @@ const START_LINE_ROWS = 3;
  * `pit` 传进来就多铺一条维修道的路面,并且在隔离墙上开出入口/出口的缺口。
  * 传 null 就没有(`flat` 那块平地)。
  *
- * 路面上的标记一律用**顶点色**涂,不加贴片:路面本来就是靠顶点色区分标线 /
- * 路肩 / 起跑线的,多一块几何体既要对齐赛道侧倾又会 z-fighting。
+ * 路面上的标记都不加贴片 —— 多一块几何体既要对齐赛道侧倾又会 z-fighting:
+ * 赛道的边线、路肩、起跑线在着色器里画(`applyRoadMarkings()`),维修道的
+ * 引道和车位用顶点色涂。
  */
 export function createTrackMesh(
   course: Course,
@@ -86,6 +96,7 @@ function createRibbon(course: Course, rng: Rng, palette: Palette, pit: PitLane |
 
   const triangles = positions.length / 9;
   const colors = new Float32Array(triangles * 9);
+  const markings = new Float32Array(triangles * 3);
   const tint = new Color();
 
   // 归一化的路面/路肩分界。lateral 是 -1..1,覆盖含路肩的外缘半宽。
@@ -94,64 +105,214 @@ function createRibbon(course: Course, rng: Rng, palette: Palette, pit: PitLane |
   const rowTriangles = triangles / rowCount;
 
   /*
-   * 引道:隔离墙的两个缺口那一段,把**路肩**涂成维修道的颜色。
+   * 顶点色在这里是**贴图的乘数**,基准值 1。它现在只剩一个用途:维修道引道。
    *
-   * 这是玩家唯一看得见的「从这里切出去」的线索 —— 缺口在墙上,而墙从赛车线
-   * 上是看不出哪儿断的。判定和物理的走廊开口用的是同一批行号
-   * (`pitRowIndex` + `pitWallAtRow`),差一行就会出现「看着能进、开过去撞墙」。
+   * 引道:隔离墙的两个缺口那一段,把**路肩**涂成维修道的颜色。这是玩家唯一
+   * 看得见的「从这里切出去」的线索 —— 缺口在墙上,而墙从赛车线上是看不出哪儿
+   * 断的。判定和物理的走廊开口用的是同一批行号(`pitRowIndex` +
+   * `pitWallAtRow`),差一行就会出现「看着能进、开过去撞墙」。
+   *
+   * **边线、路肩、起跑线原来也走这里,那是一个语义错误**(HANDOFF 第六十九节):
+   * palette 里那几个值是按**绝对反照率**写的(注释:「标线是脏白不是纯白」→
+   * 0.42),而这里把它们当成乘到 0.055 沥青上的系数 —— 0.42 × 0.055 = 0.023,
+   * **白线画出来比沥青还暗**;路肩 = 沙地色 × 0.8 × 0.055 ≈ 0.01,近乎黑。
+   * 俯视剖面实测:沥青 34~45,「白线」16~29,路肩 15~21,而旁边沙地 68~77。
+   * 现在这三样在着色器里按真实宽度、按绝对反照率画(见 `applyRoadMarkings()`)。
+   *
+   * `marking` 属性告诉着色器这一块画什么,三档:
+   *
+   * - `1`:边线 + 路肩渐变到地形色(常态);
+   * - `0.5`:只画边线,路肩保持沥青 —— 引道那几行里**边线所在的那一列**;
+   * - `0`:都不画 —— 引道本身(涂了维修道的颜色)。
+   *
+   * 要分三档是因为边线落在第 5 列(5.8~8.7 米),而路肩渐变从 7.5 米就开始;
+   * 只分两档的话,引道那几行里这一列会先渐变成沙地色、到 8.7 米再硬接回引道的
+   * 沥青色,切出一道看得见的边。
    */
   for (let t = 0; t < triangles; t++) {
-    const side = Math.abs(lateral[t] ?? 0);
     const row = Math.floor(t / rowTriangles);
-
-    // 顶点色在这里是**贴图的乘数**:路面本身由沥青贴图决定,顶点色只负责
-    // 区分标线、路肩和起跑线。所以基准值是 1 而不是某个颜色。
     const signed = lateral[t] ?? 0;
-    if (
-      pit !== null &&
-      signed > roadEdge &&
-      pitRowIndex(pit, row) >= 0 &&
-      !pitWallAtRow(pit, row)
-    ) {
+    const approachRow = pit !== null && pitRowIndex(pit, row) >= 0 && !pitWallAtRow(pit, row);
+    const approach = approachRow && signed > roadEdge;
+    const edgeColumnOnApproach = approachRow && !approach && signed > 0 && signed + 0.1 > roadEdge;
+    const marking = approach ? 0 : edgeColumnOnApproach ? 0.5 : 1;
+    if (approach) {
       tint.copy(palette.pitApron);
-    } else if (row < START_LINE_ROWS && side < roadEdge) {
-      tint.copy(palette.startLine);
-    } else if (side > roadEdge + EDGE_STRIPE) {
-      tint.copy(palette.shoulder);
-    } else if (side > roadEdge - EDGE_STRIPE) {
-      tint.copy(palette.roadEdge);
     } else {
       tint.setRGB(1, 1, 1);
     }
 
+    // 每个三角形的明暗抖动保留 —— 它也保证了 rng 的取用次数和原来一样,
+    // 后面 `createSurfaceTextures(rng, …)` 拿到的还是同一段随机数。
     tint.multiplyScalar(1 + rng.range(-0.03, 0.03));
     for (let v = 0; v < 3; v++) {
       const o = (t * 3 + v) * 3;
       colors[o] = tint.r;
       colors[o + 1] = tint.g;
       colors[o + 2] = tint.b;
+      markings[t * 3 + v] = marking;
     }
   }
 
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
+  geometry.setAttribute('marking', new BufferAttribute(markings, 1));
 
   const textures = createSurfaceTextures(rng, palette.roadSurface);
-  const mesh = new Mesh(
-    geometry,
-    new MeshStandardMaterial({
-      map: textures.map,
-      normalMap: textures.normalMap,
-      roughnessMap: textures.roughnessMap,
-      normalScale: new Vector2(0.8, 0.8),
-      vertexColors: true,
-      metalness: 0.02,
-    }),
-  );
+  const material = new MeshStandardMaterial({
+    map: textures.map,
+    normalMap: textures.normalMap,
+    roughnessMap: textures.roughnessMap,
+    normalScale: new Vector2(0.8, 0.8),
+    vertexColors: true,
+    metalness: 0.02,
+  });
+  applyRoadMarkings(material, course, palette);
+  const mesh = new Mesh(geometry, material);
   mesh.name = 'track-ribbon';
   // 见 `applyTrackDamp()`:所有沥青路面都要打这个标记,少一块就会干在雨里。
   mesh.userData['roadSurface'] = true;
   mesh.receiveShadow = true;
   return mesh;
+}
+
+/** 路面标线着色器的参数。导出给单测核对:数值要和设计意图一致。 */
+export interface RoadMarkingUniforms {
+  /** 路面半宽(米):边线的外沿、路肩的起点。 */
+  halfWidth: number;
+  /** 路肩从沥青过渡到地形用多宽(米)。 */
+  shoulderBlend: number;
+  /** 贴图的世界尺度(米),UV × 它 = 米。 */
+  textureScale: number;
+  edgeLineWidth: number;
+  startLineDepth: number;
+  /** 边线、起跑线、路肩的**绝对**反照率(线性空间)。 */
+  paintAlbedo: [number, number, number];
+  startAlbedo: [number, number, number];
+  shoulderAlbedo: [number, number, number];
+  /** 沥青贴图的基色 —— 用来把贴图采样换算成「颗粒系数」。 */
+  asphaltAlbedo: [number, number, number];
+}
+
+export function roadMarkingUniforms(course: Course, palette: Palette): RoadMarkingUniforms {
+  const base = palette.roadSurface.base;
+  return {
+    halfWidth: course.halfWidth,
+    shoulderBlend: TRACK.shoulderWidth,
+    textureScale: TRACK.textureScale,
+    edgeLineWidth: EDGE_LINE_WIDTH,
+    startLineDepth: START_LINE_DEPTH,
+    paintAlbedo: [palette.roadEdge.r, palette.roadEdge.g, palette.roadEdge.b],
+    startAlbedo: [palette.startLine.r, palette.startLine.g, palette.startLine.b],
+    shoulderAlbedo: [palette.shoulder.r, palette.shoulder.g, palette.shoulder.b],
+    asphaltAlbedo: [base[0] ?? 0.055, base[1] ?? 0.055, base[2] ?? 0.055],
+  };
+}
+
+/**
+ * 在路面材质上画标线:边线、起跑线、路肩。**按绝对反照率、按真实宽度。**
+ *
+ * ## 为什么不用顶点色
+ *
+ * 两个原因,见 `createRibbon()` 里那段注释:顶点色是乘数,而 palette 的值是
+ * 绝对反照率(白线被乘成了黑线);而且顶点色最细只能到一列 2.9 米。
+ *
+ * ## 横向位置和弧长从 UV 来
+ *
+ * 条带的 UV 就是「横向米数 / 贴图尺度」和「弧长 / 贴图尺度」
+ * (`Course.buildRibbonTriangles()`),乘回去就是米。所以不需要新的顶点属性
+ * 来传位置,和物理查询用的是同一套坐标。
+ *
+ * ## 沥青的颗粒要留着
+ *
+ * 标线和路肩不是贴上去的色块:漆刷在沥青上,底下的颗粒照样透出来;路肩是碎石
+ * 和土,也有颗粒。所以用「这一点的贴图采样 / 沥青基色」当颗粒系数乘上去,
+ * 漆面只保留一部分(漆会把缝隙填平)。
+ *
+ * ## 潮湿路面
+ *
+ * `applyTrackDamp()` 改的是 `material.color`,也就是着色器里的 `diffuse`。
+ * 这里的反照率全部乘了 `diffuse`,所以下雨时标线和路肩跟着一起变湿。
+ */
+function applyRoadMarkings(material: MeshStandardMaterial, course: Course, palette: Palette): void {
+  const u = roadMarkingUniforms(course, palette);
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms['uMarkHalfWidth'] = { value: u.halfWidth };
+    shader.uniforms['uMarkShoulderBlend'] = { value: u.shoulderBlend };
+    shader.uniforms['uMarkTextureScale'] = { value: u.textureScale };
+    shader.uniforms['uMarkEdgeWidth'] = { value: u.edgeLineWidth };
+    shader.uniforms['uMarkStartDepth'] = { value: u.startLineDepth };
+    shader.uniforms['uMarkPaint'] = { value: new Color(...u.paintAlbedo) };
+    shader.uniforms['uMarkStart'] = { value: new Color(...u.startAlbedo) };
+    shader.uniforms['uMarkShoulder'] = { value: new Color(...u.shoulderAlbedo) };
+    shader.uniforms['uMarkAsphalt'] = { value: new Color(...u.asphaltAlbedo) };
+
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+attribute float marking;
+varying vec2 vMarkPos;
+varying float vMarking;`,
+      )
+      .replace(
+        '#include <uv_vertex>',
+        `#include <uv_vertex>
+vMarkPos = uv;
+vMarking = marking;`,
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+uniform float uMarkHalfWidth;
+uniform float uMarkShoulderBlend;
+uniform float uMarkTextureScale;
+uniform float uMarkEdgeWidth;
+uniform float uMarkStartDepth;
+uniform vec3 uMarkPaint;
+uniform vec3 uMarkStart;
+uniform vec3 uMarkShoulder;
+uniform vec3 uMarkAsphalt;
+varying vec2 vMarkPos;
+varying float vMarking;
+
+// 一段 [lo, hi] 区间的抗锯齿掩码。线在远处会细于一个像素,硬边会闪。
+float markBand(float x, float lo, float hi) {
+  float w = max(fwidth(x), 1e-4);
+  return clamp((x - lo) / w + 0.5, 0.0, 1.0) * clamp((hi - x) / w + 0.5, 0.0, 1.0);
+}`,
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+{
+  float lateral = vMarkPos.x * uMarkTextureScale;
+  float arc = vMarkPos.y * uMarkTextureScale;
+  float side = abs(lateral);
+  float lineEnabled = step(0.25, vMarking);
+  float shoulderEnabled = step(0.75, vMarking);
+
+  // 沥青颗粒系数:贴图采样 / 沥青基色,在 1 附近浮动。
+  vec3 grain = sampledDiffuseColor.rgb / max(uMarkAsphalt, vec3(1e-3));
+
+  // 路肩:从路面边缘起,反照率渐变到地形色 —— 和几何上那段高度渐变
+  // (Course.buildRibbon)是同一件事的两面。
+  float shoulder = smoothstep(uMarkHalfWidth, uMarkHalfWidth + uMarkShoulderBlend * 0.5, side) * shoulderEnabled;
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uMarkShoulder * grain, shoulder);
+
+  // 边线:紧贴路面边缘内侧。漆面只透出一部分颗粒。
+  float edge = markBand(side, uMarkHalfWidth - uMarkEdgeWidth, uMarkHalfWidth) * lineEnabled;
+  // 起跑/终点线:弧长 0 处横跨路面。
+  float start = markBand(arc, 0.0, uMarkStartDepth) * step(side, uMarkHalfWidth) * lineEnabled;
+  vec3 paintGrain = mix(vec3(1.0), grain, 0.35);
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uMarkPaint * paintGrain, edge);
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uMarkStart * paintGrain, start);
+}`,
+      );
+  };
+  // 不同的 onBeforeCompile 要有不同的缓存键,否则 three 会把别的材质编好的程序拿来复用。
+  material.customProgramCacheKey = () => 'driftline-road-markings';
 }
 
 /**

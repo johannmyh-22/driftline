@@ -476,7 +476,11 @@ async function boot(container: HTMLDivElement): Promise<void> {
     installTestApi({
       ready,
       advance: (frames) => {
-        loop.advance(frames);
+        // 见 `PostPipeline.rememberMotion()`:截图里高速的车不该是糊的。
+        loop.advance(frames, () => {
+          world.present(1);
+          post.rememberMotion(world.camera);
+        });
       },
       setCamera: (preset) => {
         world.setCameraPreset(preset);

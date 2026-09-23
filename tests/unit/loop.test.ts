@@ -72,6 +72,33 @@ describe('Loop 测试模式', () => {
     expect(renders).toEqual([1]);
   });
 
+  /*
+   * n 步只渲染一帧,逐物体运动模糊的「上一帧」要在最后一步之前补记,否则截图
+   * 里高速的车全是糊的(HANDOFF 第七十一节)。钩子必须恰好在最后一步**之前**:
+   * 早一步,历史就又是两步前的;晚了(渲染之后)就没用了。
+   */
+  it('beforeLastStep 恰好在最后一步之前调一次', () => {
+    const events: string[] = [];
+    const loop = new Loop(
+      {
+        update: () => events.push('update'),
+        render: () => events.push('render'),
+      },
+      { requestFrame: () => 0, cancelFrame: () => {} },
+    );
+    loop.advance(3, () => events.push('prime'));
+    expect(events).toEqual(['update', 'update', 'prime', 'update', 'render']);
+
+    events.length = 0;
+    loop.advance(1, () => events.push('prime'));
+    expect(events).toEqual(['prime', 'update', 'render']);
+
+    // 不走步就没有「最后一步」,当前渲染的历史本来就是上一次渲染留下的。
+    events.length = 0;
+    loop.advance(0, () => events.push('prime'));
+    expect(events).toEqual(['render']);
+  });
+
   it('拒绝负数与非整数', () => {
     const { loop } = makeLoop();
     expect(() => loop.advance(-1)).toThrow(RangeError);

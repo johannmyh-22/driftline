@@ -566,7 +566,8 @@ test('逐物体运动模糊真的把轮辐糊平了', async ({ page }) => {
       api.setCamera('side');
       api.setInput({ throttle: 1, steer: 0, airBrake: 0 });
       api.advance(420);
-      // 速度缓冲要有"上一帧"才算得出速度,预热的最后一帧没有历史、完全不糊。
+      // 速度缓冲要有"上一帧"才算得出速度。`advance(n)` 现在会在最后一步之前
+      // 补记历史(第七十一节),这一帧留着是为了和最初量的那组数对得上。
       api.advance(1);
 
       const source = document.querySelector('canvas') as HTMLCanvasElement;
@@ -613,6 +614,64 @@ test('逐物体运动模糊真的把轮辐糊平了', async ({ page }) => {
   // 实测 37.4 → 20.2。阈值留足余量:要拦的是"完全没生效"和"幅度被钉住",
   // 不是把某个具体数字钉死。
   expect(on, `开=${on.toFixed(2)} 关=${off.toFixed(2)}`).toBeLessThan(off * 0.75);
+  expect(problems).toEqual([]);
+});
+
+test('advance(n) 拍出来的车和逐帧渲染时一样清楚 —— 截图不再把高速的车糊成一片', async ({ page }) => {
+  const problems = watchForProblems(page);
+
+  /*
+   * 逐物体运动模糊要「上一帧」才算得出速度。真人每帧都渲染,上一帧永远是
+   * 1/60 秒前;测试模式的 `advance(n)` 走 n 步只渲染一次,原来最后那一帧拿到的
+   * 历史是好几步之前的 —— 跟着相机走、画面上纹丝不动的车身被算出一大截位移,
+   * **每一张高速截图里的车都是糊的**(HANDOFF 第七十一节)。人类看图验收看的
+   * 就是这些截图。
+   *
+   * 所以断言:一口气 `advance(200)` 和 `advance(199)` + `advance(1)` 拍出来的车
+   * 那一块应该一样。后者最后一帧的历史就是前一步,和真人看到的一致。
+   */
+  const carRegion = async (split: boolean): Promise<number[]> => {
+    await page.goto(`${BASE_URL}?test=1&seed=5`, { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__DRIFTLINE_TEST__ !== undefined);
+    await page.evaluate(async () => {
+      await window.__DRIFTLINE_TEST__!.ready;
+    });
+    return page.evaluate((splitRun: boolean) => {
+      const api = window.__DRIFTLINE_TEST__!;
+      api.setCamera('chase');
+      api.setInput({ throttle: 1, steer: 0, airBrake: 0 });
+      if (splitRun) {
+        api.advance(199);
+        api.advance(1);
+      } else {
+        api.advance(200);
+      }
+      const source = document.querySelector('canvas') as HTMLCanvasElement;
+      const scratch = document.createElement('canvas');
+      // 追尾机位下车身所在的那一块(1280×720)。
+      const rx = 520;
+      const ry = 370;
+      const rw = 240;
+      const rh = 160;
+      scratch.width = rw;
+      scratch.height = rh;
+      const ctx = scratch.getContext('2d')!;
+      ctx.drawImage(source, rx, ry, rw, rh, 0, 0, rw, rh);
+      return Array.from(ctx.getImageData(0, 0, rw, rh).data);
+    }, split);
+  };
+
+  const single = await carRegion(false);
+  const stepped = await carRegion(true);
+  let diff = 0;
+  for (let i = 0; i < single.length; i += 4) {
+    diff +=
+      Math.abs((single[i] ?? 0) - (stepped[i] ?? 0)) +
+      Math.abs((single[i + 1] ?? 0) - (stepped[i + 1] ?? 0)) +
+      Math.abs((single[i + 2] ?? 0) - (stepped[i + 2] ?? 0));
+  }
+  const meanDiff = diff / ((single.length / 4) * 3);
+  expect(meanDiff, `车身那一块平均每通道差 ${meanDiff.toFixed(2)}/255`).toBeLessThan(1);
   expect(problems).toEqual([]);
 });
 
