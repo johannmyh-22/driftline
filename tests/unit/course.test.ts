@@ -3,6 +3,7 @@ import { Rng } from '../../src/core/rng';
 import { Course } from '../../src/game/course';
 import { createGroundHit } from '../../src/game/groundQuery';
 import { generateTrack } from '../../src/game/trackLayout';
+import { TRACK } from '../../src/game/tuning';
 
 function makeCourse(seed = 42): Course {
   const rng = new Rng(seed);
@@ -447,6 +448,36 @@ describe('赛道外的压平走廊不是楼梯', () => {
         }
       }
       expect(worst).toBeLessThan(0.25);
+    }
+  });
+});
+
+describe('条带的贴图坐标沿赛道连续', () => {
+  /*
+   * 这一条是修出来的(2026-09,HANDOFF 第六十八节)。
+   *
+   * 闭环最后一格(从最后一行连回第 0 行)原来的 v 从约 600 直接落回 0 ——
+   * 600 个平铺周期被压进 6 米,mipmap 把它平均成一片:又亮又光滑,正好压在
+   * 起跑线上。截图上是起跑线处一块没有纹理的发亮矩形。
+   *
+   * 断言每个三角形跨过的 v 范围都在一段的量级之内:任何一格都不该把贴图
+   * 压缩几百倍。
+   */
+  it('没有哪一格把贴图压缩上百倍 —— 包括连回起跑线的那一格', () => {
+    for (const seed of [42, 135, 107]) {
+      const course = makeCourse(seed);
+      const { uvs } = course.buildRibbonTriangles();
+      const perSegment = course.layout.spacing / TRACK.textureScale;
+      let worst = 0;
+      for (let t = 0; t < uvs.length / 6; t++) {
+        const v0 = uvs[t * 6 + 1] ?? 0;
+        const v1 = uvs[t * 6 + 3] ?? 0;
+        const v2 = uvs[t * 6 + 5] ?? 0;
+        const span = Math.max(v0, v1, v2) - Math.min(v0, v1, v2);
+        worst = Math.max(worst, span / perSegment);
+      }
+      // 正常一格正好跨一段(比值 1)。修前最后一格是 (rows-1) 段,几百。
+      expect(worst).toBeLessThan(1.5);
     }
   });
 });

@@ -319,12 +319,23 @@ export class Course implements GroundQuery {
       normals[n++] = normalScratch[2] ?? 0;
 
       // UV:横向按实际米数、纵向按弧长,贴图才不会在弯道里被拉伸。
+      // `row` 这里是**不回绕**的行号,见下面循环里 `nextRow` 的注释。
       uvs[u++] = (-this.outerHalfWidth + col * this.lateralStep) / TRACK.textureScale;
-      uvs[u++] = ((row % this.rows) * this.layout.spacing) / TRACK.textureScale;
+      uvs[u++] = (row * this.layout.spacing) / TRACK.textureScale;
     };
 
     for (let row = 0; row < this.rows; row++) {
-      const nextRow = (row + 1) % this.rows;
+      /*
+       * **不回绕。** 顶点下标由 `vertexIndex()`/`vertexNormal()` 自己取模,这里
+       * 传进去的行号只决定 UV 的 v。
+       *
+       * 原来传的是 `(row + 1) % rows`,于是闭环最后一格的 v 从 `(rows-1)·段长/5`
+       * (约 600)直接落回 0 —— **600 个平铺周期被压进 6 米**。mipmap 把它平均成
+       * 一片:albedo 变成均值、法线贴图变得完全平坦(没了凹凸的明暗),所以
+       * 那一格**又亮又光滑**,正好压在起跑线上(HANDOFF 第六十八节)。护墙那段
+       * 早就处理过同一件事(「闭环最后一行要用整圈长度」),条带漏了。
+       */
+      const nextRow = row + 1;
       for (let col = 0; col < LATERAL_DIVISIONS; col++) {
         // 与 sample() 相同的对角线切分。
         push(row, col);
