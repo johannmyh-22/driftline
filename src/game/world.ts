@@ -469,6 +469,18 @@ export class World {
     this.saveRivalPrevious();
 
     /*
+     * 发车倒计时期间,玩家的圈计时、输入录制、幽灵回放**都不走**(HANDOFF
+     * 第七十二节)。和 `RaceSession.elapsed` 同一条口径:第一圈从发车那一步
+     * 开始算。原来三样都在倒计时里照走 —— 第一圈白白多出 3 秒,各圈加起来
+     * 对不上总用时;幽灵比玩家早 3 秒出发,玩家还被锁着就看它开走了。
+     *
+     * 取的是**这一步开始时**的阶段:倒计时在这一步归零的话,输入这一步仍然是
+     * 锁着的(`inputLocked` 也是在这之前读的),`elapsed` 这一步也不加,三者
+     * 从下一步一起开始。
+     */
+    const countingDown = this.session?.phase === 'countdown';
+
+    /*
      * 发车倒计时中、以及冲线之后,输入被锁住。抢跑不判罚——压根动不了,
      * 这比事后罚时直观。锁住的是**写进物理的那份**,不是外面传进来的
      * `input`,免得把调用方的帧改脏。
@@ -485,7 +497,7 @@ export class World {
     this.input.steer = locked ? 0 : input.steer;
     this.input.airBrake = servicing ? 1 : locked ? 0 : input.airBrake;
 
-    if (this.race !== null) {
+    if (this.race !== null && !countingDown) {
       // 就地把 this.input 量化成回放精度 —— 物理这一帧吃到的和录下来的必须是
       // 同一串数字,否则幽灵会慢慢和玩家原本跑的线漂开(见 InputRecorder 类注释)。
       this.recorder.record(this.input);
@@ -564,7 +576,9 @@ export class World {
     this.session?.update(dt, this.standings);
 
     const lapsBefore = this.race?.laps ?? 0;
-    this.race?.update(this.vehicle, dt);
+    if (!countingDown) {
+      this.race?.update(this.vehicle, dt);
+    }
 
     if (this.race !== null && this.race.laps > lapsBefore) {
       if (this.race.isNewBestLap) {
@@ -588,7 +602,9 @@ export class World {
       this.ghost?.restartLap();
     }
 
-    this.ghost?.update(dt);
+    if (!countingDown) {
+      this.ghost?.update(dt);
+    }
     this.chase.update(this.vehicle, dt);
   }
 
