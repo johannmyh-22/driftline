@@ -47,6 +47,12 @@ const INDEX_CELL = 24;
  */
 const ARC_LINE_EPSILON = 0.05;
 
+/**
+ * `surfaceEdgeDistance()` 在空间索引覆盖范围之外的返回值。索引向外铺了
+ * `terrainFlattenRadius`(130 米),所以这只出现在离路面很远的地方。
+ */
+export const FAR_FROM_SURFACE = 1e4;
+
 export class Course implements GroundQuery {
   readonly layout: TrackLayout;
   readonly halfWidth: number;
@@ -244,12 +250,7 @@ export class Course implements GroundQuery {
      * 只取起始行的话,楔形段最外面那一条会「画得出来但查不到」,也就是
      * 「视觉上有路、物理上没有」。三角形重心那条测试钉的就是这个。
      */
-    const pitOuter =
-      pit === null
-        ? 0
-        : pit.lateralMin +
-          pitLaneWidthAt(pit, bestRow) +
-          (pitLaneWidthAt(pit, (bestRow + 1) % this.rows) - pitLaneWidthAt(pit, bestRow)) * bestT;
+    const pitOuter = this.pitOuterAt(bestRow, bestT);
 
     const applyTrackFields = (): void => {
       out.lateral = lateral;
@@ -281,6 +282,41 @@ export class Course implements GroundQuery {
     out.onTrack = true;
     out.inPit = false;
     this.fillFromRibbon(x, z, bestRow, bestT, lateral, out);
+  }
+
+  /** 维修道外缘在段内 `t` 处的横向位置。没有维修道时返回 0,不在维修道那几行时就是条带外缘。 */
+  private pitOuterAt(row: number, t: number): number {
+    const pit = this.pit;
+    return pit === null
+      ? 0
+      : pit.lateralMin +
+          pitLaneWidthAt(pit, row) +
+          (pitLaneWidthAt(pit, (row + 1) % this.rows) - pitLaneWidthAt(pit, row)) * t;
+  }
+
+  /**
+   * 到路面(条带 + 维修道)外缘的**有符号**距离(米),路面里为负。离赛道太远、
+   * 空间索引里没有候选段时返回 `FAR_FROM_SURFACE`。
+   *
+   * 边界和 `sample()` 的 `onTrack` 是同一条:条带左右外缘,维修道那几行右侧换成
+   * 维修道外缘。地形网格拿它把压在路面上的那部分切掉(`gfx/terrainMesh.ts`)。
+   */
+  surfaceEdgeDistance(x: number, z: number): number {
+    const row = this.nearestRow(x, z);
+    const a = row >= 0 ? this.layout.samples[row] : undefined;
+    if (a === undefined) {
+      return FAR_FROM_SURFACE;
+    }
+    const lateral = (x - a.x) * -a.tangentZ + (z - a.z) * a.tangentX;
+    if (lateral < 0) {
+      return -lateral - this.outerHalfWidth;
+    }
+    const pit = this.pit;
+    const right =
+      pit !== null && pitRowIndex(pit, row) >= 0
+        ? Math.max(this.outerHalfWidth, this.pitOuterAt(row, this.nearestT))
+        : this.outerHalfWidth;
+    return lateral - right;
   }
 
   /**
