@@ -325,10 +325,31 @@ export class Postprocess {
     }
     // 速度缓冲要在主渲染之前画:模糊那一级读的是这一帧的速度。
     // pass 关着的时候连这一遍都不画 —— 它是这一级真正的成本所在。
-    if (this.objectMotion?.enabled === true || this.motionNeedsMask()) {
+    const drawVelocity = this.objectMotion?.enabled === true || this.motionNeedsMask();
+    if (drawVelocity) {
       this.velocity?.render(this.renderer, this.scene, camera);
     }
     this.composer.render();
+    if (!drawVelocity) {
+      // 缓冲不画,历史照记:见 `VelocityBuffer.remember()`。
+      this.velocity?.remember(camera);
+    }
+  }
+
+  /**
+   * 不渲染,只把当前状态记成逐物体模糊的「上一帧」。
+   *
+   * 给测试模式的 `advance(n)` 用:n 步只渲染一帧,不补记的话最后那一帧的
+   * 「上一帧」是 n 步之前的,整台车被算出几十米的位移,糊成一片 —— 真人
+   * 每帧都渲染,永远看不到这个画面,但截图里每一张高速的车都是糊的。
+   */
+  rememberMotion(camera: PerspectiveCamera): void {
+    if (this.velocity === null) {
+      return;
+    }
+    this.scene.updateMatrixWorld();
+    camera.updateMatrixWorld();
+    this.velocity.remember(camera);
   }
 
   setSize(width: number, height: number): void {

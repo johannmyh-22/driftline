@@ -290,6 +290,19 @@ export class VelocityBuffer {
     renderer.setClearColor(this.savedClearColor, savedClearAlpha);
 
     // 这一帧画完才更新「上一帧」,否则同一帧里前后两个位置会是同一个。
+    this.remember(camera);
+  }
+
+  /**
+   * 把当前的相机和各网格的世界矩阵记成「上一帧」。调用方负责矩阵是新的
+   * (`render()` 之后自然是;单独调要先 `updateMatrixWorld()`)。
+   *
+   * **每一帧都要记,不只是画了速度缓冲的那些帧**(HANDOFF 第七十一节)。
+   * 低速时这一级整个关掉、不画缓冲;如果历史也跟着停,减速进站再加速的那一刻,
+   * 第一帧拿到的「上一帧」是几十秒前的 —— 整台车糊一帧。
+   */
+  remember(camera: Camera): void {
+    this.lastCamera = camera;
     this.prevViewProjection.copy(camera.projectionMatrix).multiply(camera.matrixWorldInverse);
     for (const mesh of this.marked) {
       let stored = this.previous.get(mesh);

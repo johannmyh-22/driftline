@@ -1,8 +1,11 @@
+import { BoxGeometry, Matrix4, Mesh, MeshBasicMaterial, PerspectiveCamera, ShaderMaterial } from 'three';
+import type { BufferGeometry, Camera, Group, Material, Scene, WebGLRenderer } from 'three';
 import { describe, expect, it } from 'vitest';
 import { MotionBlurShader, motionBlurStrength } from '../../src/gfx/motionBlur';
 import {
   MOVING_LAYER,
   ObjectMotionBlurShader,
+  VelocityBuffer,
   objectMotionStrength,
 } from '../../src/gfx/objectMotionBlur';
 import { CAMERA, POST, REFERENCE_TOP_SPEED } from '../../src/game/tuning';
@@ -164,6 +167,55 @@ describe('MOVING_LAYER', () => {
      */
     expect(MOVING_LAYER).toBeGreaterThan(0);
     expect(MOVING_LAYER).toBeLessThan(32);
+  });
+});
+
+describe('VelocityBuffer.remember()', () => {
+  /*
+   * 「上一帧」必须能在不渲染的情况下记下来:低速时速度缓冲整级不画,测试模式
+   * 下 n 步只渲染一帧 —— 两种情况下历史都不能停(HANDOFF 第七十一节)。
+   * 读回来走的是真实路径:网格的 `onBeforeRender` 把存下的矩阵塞进速度材质。
+   */
+  const prevMatrixSeenBy = (mesh: Mesh): Matrix4 => {
+    const material = new ShaderMaterial({ uniforms: { prevModelMatrix: { value: new Matrix4() } } });
+    mesh.onBeforeRender(
+      undefined as unknown as WebGLRenderer,
+      undefined as unknown as Scene,
+      undefined as unknown as Camera,
+      mesh.geometry as BufferGeometry,
+      material as Material,
+      undefined as unknown as Group,
+    );
+    return (material.uniforms['prevModelMatrix']?.value as Matrix4).clone();
+  };
+
+  it('记下的是调用那一刻的矩阵,之后物体再动也不影响', () => {
+    const buffer = new VelocityBuffer();
+    const mesh = new Mesh(new BoxGeometry(), new MeshBasicMaterial());
+    buffer.mark(mesh);
+
+    mesh.position.set(1, 2, 3);
+    mesh.updateMatrixWorld();
+    const camera = new PerspectiveCamera();
+    camera.updateMatrixWorld();
+    buffer.remember(camera);
+    const remembered = mesh.matrixWorld.clone();
+
+    mesh.position.set(40, 2, 3);
+    mesh.updateMatrixWorld();
+    expect(prevMatrixSeenBy(mesh).equals(remembered)).toBe(true);
+    expect(prevMatrixSeenBy(mesh).equals(mesh.matrixWorld)).toBe(false);
+    buffer.dispose();
+  });
+
+  it('从没记过的网格,上一帧就是这一帧 —— 速度为 0,不会凭空糊一帧', () => {
+    const buffer = new VelocityBuffer();
+    const mesh = new Mesh(new BoxGeometry(), new MeshBasicMaterial());
+    buffer.mark(mesh);
+    mesh.position.set(5, 0, 0);
+    mesh.updateMatrixWorld();
+    expect(prevMatrixSeenBy(mesh).equals(mesh.matrixWorld)).toBe(true);
+    buffer.dispose();
   });
 });
 
