@@ -130,29 +130,48 @@ function latticeAt(lattice: Float32Array, x: number, y: number): number {
   return lattice[iy * LATTICE + ix] ?? 0;
 }
 
-function valueNoise(lattice: Float32Array, x: number, y: number): number {
+/**
+ * `period` 是这一层噪声在一张贴图宽度里跨过多少个格点,格点下标按它回绕。
+ *
+ * **必须按每一层自己的周期回绕,不能只靠 `latticeAt()` 里那个 `% LATTICE`。**
+ * 贴图从左到右,第 k 层的格点坐标从 0 走到 `period`;要无缝平铺,走到右边缘时
+ * 必须回到格点 0。只按 LATTICE(64)回绕的话,只有 `period = 64` 那一层做得到,
+ * 其余每一层都会在平铺边上断开。
+ */
+function valueNoise(lattice: Float32Array, x: number, y: number, period: number): number {
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
   const fx = smooth(x - x0);
   const fy = smooth(y - y0);
+  const x1 = x0 + 1;
+  const y1 = y0 + 1;
 
-  const a = latticeAt(lattice, x0, y0);
-  const b = latticeAt(lattice, x0 + 1, y0);
-  const c = latticeAt(lattice, x0, y0 + 1);
-  const d = latticeAt(lattice, x0 + 1, y0 + 1);
+  const a = latticeAt(lattice, x0 % period, y0 % period);
+  const b = latticeAt(lattice, x1 % period, y0 % period);
+  const c = latticeAt(lattice, x0 % period, y1 % period);
+  const d = latticeAt(lattice, x1 % period, y1 % period);
 
   return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
 }
 
-/** 多层叠加。频率必须整除 LATTICE,否则平铺处会错位。 */
+/**
+ * 多层叠加。每一层按自己的频率回绕,所以任何整数频率都能无缝平铺。
+ *
+ * **这里原来写的是「频率必须整除 LATTICE」,条件是反的**,而且代码也没照着
+ * 做:四层共用一个按 64 回绕的格点表,地形那组频率(8/16/32/64)只有最后一层
+ * 在贴图边缘回到了格点 0,前三层全在平铺边上断开。实测接缝处的亮度跳变是
+ * 贴图内部相邻像素的 17~22 倍(地形)、6.5~8.7 倍(路面)、11 倍(护墙);
+ * 法线贴图从这张高度图求梯度,断口就变成一道迎着太阳发亮的线 —— 地形上那种
+ * 5 米一格的方格就是它(`TRACK.textureScale` = 5 米,HANDOFF 第六十七节)。
+ */
 function fbm(lattice: Float32Array, x: number, y: number, frequency: number): number {
   let total = 0;
   let amplitude = 1;
   let normalizer = 0;
-  let f = frequency;
+  let f = Math.max(1, Math.round(frequency));
 
   for (let octave = 0; octave < 4; octave++) {
-    total += valueNoise(lattice, (x / SIZE) * f, (y / SIZE) * f) * amplitude;
+    total += valueNoise(lattice, (x / SIZE) * f, (y / SIZE) * f, f) * amplitude;
     normalizer += amplitude;
     amplitude *= 0.5;
     f *= 2;
