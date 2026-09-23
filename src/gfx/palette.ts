@@ -18,13 +18,20 @@ export interface Palette {
   roadSurface: SurfaceOptions;
   wallSurface: SurfaceOptions;
 
-  /** 路肩、标线、护墙压顶。 */
+  /**
+   * 路肩、标线、护墙压顶。
+   *
+   * 路肩、边线、起跑线这三个是**绝对反照率**,由路面着色器直接当颜色用
+   * (`trackMesh.ts` 的 `applyRoadMarkings()`)。别把它们当顶点色乘到沥青
+   * 贴图上 —— 那样「脏白」0.42 会被乘成 0.023,比沥青还暗(HANDOFF 第六十九节)。
+   */
   shoulder: Color;
   roadEdge: Color;
   wallCap: Color;
   startLine: Color;
   /**
-   * 维修车位。**故意用一个赛道上不会出现的颜色**(偏蓝的冷色)——
+   * 维修车位。和下面的 `pitApron` 一样是**顶点色乘数**,乘在沥青贴图上。
+   * **故意用一个赛道上不会出现的颜色**(偏蓝的冷色)——
    * 它是功能标识不是装饰,玩家要能一眼认出停哪儿,而路肩、标线、起跑线
    * 已经把中性灰白那一档占满了。
    */

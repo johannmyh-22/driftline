@@ -1,13 +1,18 @@
-import { Mesh } from 'three';
-import type { BufferAttribute, MeshStandardMaterial } from 'three';
+import { Mesh, ShaderChunk, ShaderLib } from 'three';
+import type {
+  BufferAttribute,
+  MeshStandardMaterial,
+  WebGLProgramParametersWithUniforms,
+  WebGLRenderer,
+} from 'three';
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
 import { Course } from '../../src/game/course';
-import { type PitLane, createPitLane } from '../../src/game/pitLane';
+import { type PitLane, createPitLane, pitRowIndex, pitWallAtRow } from '../../src/game/pitLane';
 import { generateTrack } from '../../src/game/trackLayout';
 import { PIT, TRACK } from '../../src/game/tuning';
 import { createPalette } from '../../src/gfx/palette';
-import { applyTrackDamp, createTrackMesh } from '../../src/gfx/trackMesh';
+import { applyTrackDamp, createTrackMesh, roadMarkingUniforms } from '../../src/gfx/trackMesh';
 
 function buildWall(seed: number): { wall: Mesh; course: Course } {
   const rng = new Rng(seed);
@@ -382,5 +387,156 @@ describe('潮湿路面要盖到每一块沥青', () => {
       expect(roads[i]?.color.r).toBeCloseTo(before[i]?.color ?? 0, 9);
       expect(roads[i]?.roughness).toBeCloseTo(before[i]?.roughness ?? 0, 9);
     }
+  });
+});
+
+/*
+ * ── 路面标线 ─────────────────────────────────────────────────────────────
+ *
+ * 这一块是修出来的(HANDOFF 第六十九节):边线、路肩、起跑线原来用顶点色画,
+ * 而顶点色是**乘到沥青贴图上的系数**,palette 里的值却是按绝对反照率写的 ——
+ * 「脏白」0.42 × 沥青 0.055,**白线比沥青还暗**。截图上看起来像是「标线有点
+ * 旧」,没人会觉得是错的,所以这里把设计意图直接钉成数字。
+ */
+function ribbonOf(seed: number): {
+  ribbon: Mesh;
+  course: Course;
+  lane: PitLane;
+  palette: ReturnType<typeof createPalette>;
+} {
+  const { course, lane, palette } = buildPitMesh(seed);
+  const group = createTrackMesh(course, new Rng(seed + 1), palette, lane);
+  const ribbon = group.getObjectByName('track-ribbon');
+  if (!(ribbon instanceof Mesh)) {
+    throw new Error('赛道网格里没有 track-ribbon');
+  }
+  return { ribbon, course, lane, palette };
+}
+
+function luminance(rgb: readonly number[]): number {
+  return 0.2126 * (rgb[0] ?? 0) + 0.7152 * (rgb[1] ?? 0) + 0.0722 * (rgb[2] ?? 0);
+}
+
+describe('路面标线', () => {
+  it('白线按绝对反照率画,比沥青亮得多 —— 不是被乘暗的「脏白」系数', () => {
+    for (const seed of [42, 7, 1337]) {
+      const { course, palette } = buildPitMesh(seed);
+      const u = roadMarkingUniforms(course, palette);
+      // 真实路面标线的反照率 0.3~0.6,沥青 0.05~0.12:至少差三倍。
+      expect(luminance(u.paintAlbedo)).toBeGreaterThan(luminance(u.asphaltAlbedo) * 3);
+      expect(luminance(u.startAlbedo)).toBeGreaterThan(luminance(u.asphaltAlbedo) * 3);
+      /*
+       * 路肩渐变到的是**地形那一档**的颜色 —— 不是「比沥青亮」:火山主题的
+       * 玄武岩本来就比沥青暗(0.08 × 0.8 ≈ 0.045 < 0.055),那是对的。
+       * 原来的错是被乘到 0.01 上下,比地形暗了一个数量级。
+       */
+      const terrain = luminance(palette.terrainSurface.base);
+      expect(luminance(u.shoulderAlbedo)).toBeGreaterThan(terrain * 0.5);
+      expect(luminance(u.shoulderAlbedo)).toBeLessThanOrEqual(terrain);
+    }
+  });
+
+  it('标线宽度是真实尺寸,比一列顶点窄得多', () => {
+    const { course, palette } = buildPitMesh(42);
+    const u = roadMarkingUniforms(course, palette);
+    const column = (course.outerHalfWidth * 2) / 10;
+    expect(u.edgeLineWidth).toBeGreaterThanOrEqual(0.1);
+    expect(u.edgeLineWidth).toBeLessThanOrEqual(0.3);
+    expect(u.startLineDepth).toBeLessThanOrEqual(1);
+    expect(u.edgeLineWidth).toBeLessThan(column / 5);
+    // 着色器从 UV 反推米数,两边的尺度必须是同一个。
+    expect(u.textureScale).toBe(TRACK.textureScale);
+    expect(u.halfWidth).toBe(course.halfWidth);
+  });
+
+  it('顶点色不再参与标线:除了引道,全部是 1 附近的抖动', () => {
+    const { ribbon } = ribbonOf(42);
+    const color = ribbon.geometry.getAttribute('color') as BufferAttribute;
+    const marking = ribbon.geometry.getAttribute('marking') as BufferAttribute;
+    let plain = 0;
+    for (let v = 0; v < color.count; v += 3) {
+      if (marking.getX(v) === 0) {
+        continue;
+      }
+      plain++;
+      for (const channel of [color.getX(v), color.getY(v), color.getZ(v)]) {
+        expect(channel).toBeGreaterThan(0.969);
+        expect(channel).toBeLessThan(1.031);
+      }
+    }
+    expect(plain).toBeGreaterThan(color.count / 3 / 2);
+  });
+
+  /*
+   * 三档而不是两档的原因见 `createRibbon()`:边线那一列横跨路面边缘,路肩渐变
+   * 从列中间就开始了。引道那几行如果这一列照常渐变成沙地色,到下一列又硬接回
+   * 引道的沥青,会切出一道看得见的边。
+   */
+  it('引道那几行:引道本身不画,边线那一列只画线,其余行照常', () => {
+    for (const seed of [42, 7, 1337]) {
+      const { ribbon, course, lane } = ribbonOf(seed);
+      const marking = ribbon.geometry.getAttribute('marking') as BufferAttribute;
+      const triangles = marking.count / 3;
+      const rows = course.layout.samples.length;
+      const perRow = triangles / rows;
+      const columns = perRow / 2;
+      const step = (course.outerHalfWidth * 2) / columns;
+      const edgeColumn = Math.floor((course.outerHalfWidth + course.halfWidth) / step);
+
+      let approachRows = 0;
+      for (let row = 0; row < rows; row++) {
+        const approach = pitRowIndex(lane, row) >= 0 && !pitWallAtRow(lane, row);
+        approachRows += approach ? 1 : 0;
+        for (let col = 0; col < columns; col++) {
+          const value = marking.getX((row * perRow + col * 2) * 3);
+          // 同一格的两个三角必须是同一档,不然一格里会有半边渐变。
+          expect(marking.getX((row * perRow + col * 2 + 1) * 3)).toBe(value);
+          if (!approach) {
+            expect(value).toBe(1);
+          } else if (col > edgeColumn) {
+            expect(value).toBe(0);
+          } else if (col === edgeColumn) {
+            expect(value).toBe(0.5);
+          } else {
+            expect(value).toBe(1);
+          }
+        }
+      }
+      expect(approachRows).toBeGreaterThan(0);
+    }
+  });
+
+  /*
+   * `onBeforeCompile` 靠字符串替换插代码。**替换失败不报错** —— three 哪天把
+   * 某个 chunk 改了名,标线就静悄悄地消失,编译照过、截图也只是「路面素了一点」。
+   * 所以在这里拿 three 自己的 standard 着色器跑一遍,确认每个锚点都还在、
+   * 插进去的代码都真的进去了。
+   */
+  it('着色器注入的锚点在当前 three 版本里都还在', () => {
+    const { ribbon } = ribbonOf(42);
+    const material = ribbon.material as MeshStandardMaterial;
+    const shader = {
+      uniforms: {},
+      vertexShader: ShaderLib.standard.vertexShader,
+      fragmentShader: ShaderLib.standard.fragmentShader,
+    };
+    material.onBeforeCompile(
+      shader as unknown as WebGLProgramParametersWithUniforms,
+      undefined as unknown as WebGLRenderer,
+    );
+
+    expect(shader.vertexShader).toContain('vMarking = marking;');
+    expect(shader.vertexShader).toContain('attribute float marking;');
+    expect(shader.fragmentShader).toContain('float markBand(');
+    expect(shader.fragmentShader).toContain('diffuse * uMarkStart * paintGrain, start');
+    expect(Object.keys(shader.uniforms).length).toBe(9);
+    // 注入点在 map_fragment 之后:颗粒系数要用它声明的 sampledDiffuseColor。
+    expect(ShaderChunk.map_fragment).toContain('sampledDiffuseColor');
+    const fragment = ShaderLib.standard.fragmentShader;
+    expect(fragment.indexOf('#include <map_fragment>')).toBeGreaterThan(-1);
+    expect(fragment.indexOf('#include <map_fragment>')).toBeLessThan(
+      fragment.indexOf('#include <color_fragment>'),
+    );
+    expect(material.customProgramCacheKey()).toBe('driftline-road-markings');
   });
 });
